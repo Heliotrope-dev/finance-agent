@@ -1,6 +1,32 @@
-venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Streamlit — NEVER commit credentials
 .streamlit/secrets.toml
-data/track_record.db
+
+# Local data (SQLite database)
+data/
+
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/

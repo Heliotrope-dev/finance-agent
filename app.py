@@ -1,5 +1,6 @@
 """科学理财 Agent —— 行情+财务+新闻交叉验证，不做黑箱荐股。"""
 
+import re
 import streamlit as st
 from datetime import datetime, timedelta
 
@@ -30,6 +31,11 @@ with tab_analyze:
         run = st.button("开始分析", type="primary", use_container_width=True)
 
     if run and symbol:
+        symbol = symbol.strip()
+        if not re.match(r"^\d{6}$", symbol):
+            st.error("股票代码格式不对，应为 6 位纯数字，例如 600519、000001。")
+            st.stop()
+
         with st.spinner("拉取行情数据..."):
             end = datetime.now().strftime("%Y%m%d")
             start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")

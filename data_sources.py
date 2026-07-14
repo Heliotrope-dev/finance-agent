@@ -2,11 +2,23 @@
 
 import json
 import time
+from datetime import datetime, timedelta
 
 import akshare as ak
 import pandas as pd
 import requests
 import streamlit as st
+
+# 给所有出站 HTTP 请求（包括 akshare 内部）打上 15 秒硬超时，防止页面永久 loading。
+_original_session_request = requests.Session.request
+
+
+def _session_request_with_timeout(self, method, url, **kwargs):
+    kwargs.setdefault("timeout", 15)
+    return _original_session_request(self, method, url, **kwargs)
+
+
+requests.Session.request = _session_request_with_timeout
 
 _MIN_INTERVAL_SEC = 3  # 东财接口对高频请求会临时封IP，两次请求之间留够间隔
 _last_call_ts = 0.0
@@ -33,24 +45,52 @@ def _with_retry(fn, retries=2, backoff=5):
     raise last_err
 
 
+def _sina_symbol(symbol: str) -> str:
+    """AkShare 东财接口用纯数字代码，新浪接口要带交易所前缀。"""
+    prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
+    return f"{prefix}{symbol}"
+
+
+def _fetch_history_sina(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """新浪源兜底，列名对齐东财源，让上层（charts.py/app.py）不用关心具体来源。"""
+    df = ak.stock_zh_a_daily(symbol=_sina_symbol(symbol), start_date=start_date, end_date=end_date)
+    df = df.rename(
+        columns={
+            "date": "日期",
+            "open": "开盘",
+            "high": "最高",
+            "low": "最低",
+            "close": "收盘",
+            "volume": "成交量",
+        }
+    )
+    df["日期"] = pd.to_datetime(df["日期"])
+    return df[["日期", "开盘", "收盘", "最高", "最低", "成交量"]]
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_stock_history(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """日线历史行情。symbol 例如 '600519'。"""
-    return _with_retry(
-        lambda: ak.stock_zh_a_hist(
-            symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq"
+    """日线历史行情。symbol 例如 '600519'。东财限流/超时时自动切新浪源兜底。"""
+    try:
+        return _with_retry(
+            lambda: ak.stock_zh_a_hist(
+                symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq"
+            )
         )
-    )
+    except Exception:
+        return _with_retry(lambda: _fetch_history_sina(symbol, start_date, end_date))
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def get_stock_realtime(symbol: str) -> dict:
-    """单只股票实时快照（从全市场快照里筛出这一只）。"""
-    df = _with_retry(ak.stock_zh_a_spot_em)
-    row = df[df["代码"] == symbol]
-    if row.empty:
+    """单只股票的最新价，直接复用 get_stock_history 的最后一行，不额外发请求。"""
+    end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=5)).strftime("%Y%m%d")
+    df = get_stock_history(symbol, start, end)
+    if df is None or df.empty:
         return {}
-    return row.iloc[0].to_dict()
+    row = df.iloc[-1]
+    return {"代码": symbol, "最新价": row["收盘"]}
 
 
 @st.cache_data(ttl=600, show_spinner=False)
