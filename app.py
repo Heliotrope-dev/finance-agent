@@ -9,6 +9,7 @@ from data_sources import (
     get_stock_realtime,
     get_financial_abstract,
     get_stock_news,
+    search_stock_by_name,
 )
 from analysis import cross_validate
 from tracker import log_analysis, get_history, get_due_for_review, record_review
@@ -24,18 +25,43 @@ tab_analyze, tab_history = st.tabs(["新建分析", "历史回看"])
 with tab_analyze:
     col1, col2 = st.columns([2, 1])
     with col1:
-        symbol = st.text_input("股票代码（如 600519）", value="", max_chars=6)
+        query = st.text_input("股票代码或名称（如 600519 / 贵州茅台）", value="")
     with col2:
         st.write("")
         st.write("")
         run = st.button("开始分析", type="primary", use_container_width=True)
 
-    if run and symbol:
-        symbol = symbol.strip()
-        if not re.match(r"^\d{6}$", symbol):
-            st.error("股票代码格式不对，应为 6 位纯数字，例如 600519、000001。")
-            st.stop()
+    symbol = None
 
+    if run and query:
+        query = query.strip()
+        if re.match(r"^\d{6}$", query):
+            symbol = query
+        else:
+            with st.spinner("按名称搜索..."):
+                try:
+                    matches = search_stock_by_name(query)
+                except Exception as e:
+                    st.error(f"名称搜索失败：{e}")
+                    st.stop()
+            if not matches:
+                st.error(f"没找到叫「{query}」的A股个股，检查一下名称或者直接输代码。")
+                st.stop()
+            elif len(matches) == 1:
+                symbol = matches[0]["code"]
+                st.caption(f"匹配到：{matches[0]['name']}（{symbol}）")
+            else:
+                st.session_state["_candidates"] = matches
+                st.session_state.pop("_picked_symbol", None)
+
+    if "_candidates" in st.session_state and not symbol:
+        options = {f"{m['name']}（{m['code']}）": m["code"] for m in st.session_state["_candidates"]}
+        picked = st.selectbox("找到多个匹配，选一个：", list(options.keys()))
+        if st.button("确认选择并分析"):
+            symbol = options[picked]
+            st.session_state.pop("_candidates", None)
+
+    if symbol:
         with st.spinner("拉取行情数据..."):
             end = datetime.now().strftime("%Y%m%d")
             start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")

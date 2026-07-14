@@ -53,6 +53,28 @@ def _sina_symbol(symbol: str) -> str:
     return "sh" if symbol.startswith(("6", "9")) else "sz"
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_stock_by_name(query: str) -> list[dict]:
+    """按名称（支持模糊匹配）搜个股代码。只返回股票（排除指数/基金），只返回在市的。"""
+    query = query.strip()
+    if not query:
+        return []
+    with contextlib.redirect_stdout(io.StringIO()):
+        bs.login()
+        try:
+            rs = bs.query_stock_basic(code_name=query)
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+        finally:
+            bs.logout()
+    results = []
+    for code, name, ipo_date, out_date, type_, status in rows:
+        if type_ == "1" and status == "1":  # 1=股票, status 1=在市
+            results.append({"code": code.split(".")[1], "name": name})
+    return results
+
+
 def _fetch_history_baostock(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """BaoStock 是主数据源：官方维护、不用注册、成功率明显高于爬网页的东财/新浪源。"""
     bs_code = f"{_sina_symbol(symbol)}.{symbol}"
