@@ -3,3 +3,4 @@ akshare
 pandas
 requests
 openai
+plotly

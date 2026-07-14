@@ -11,6 +11,7 @@ from data_sources import (
 )
 from analysis import cross_validate
 from tracker import log_analysis, get_history, get_due_for_review, record_review
+from charts import build_candlestick, compute_stats
 
 st.set_page_config(page_title="科学理财 Agent", page_icon="📊", layout="wide")
 
@@ -63,10 +64,20 @@ with tab_analyze:
             st.error("没有获取到行情数据，检查一下股票代码是否正确。")
             st.stop()
 
-        st.subheader("行情走势")
-        st.line_chart(hist.set_index("日期")["收盘"])
+        st.subheader("K线图")
+        st.plotly_chart(build_candlestick(hist), use_container_width=True)
+
+        st.subheader("统计指标")
+        st.caption("以下数字是本地直接算出来的，不经过 AI —— 跟下面的 AI 文字分析是两条独立的证据链。")
+        stats = compute_stats(hist)
+        cols = st.columns(len(stats))
+        for col, (label, value) in zip(cols, stats.items()):
+            col.metric(label, value)
 
         history_summary = hist.tail(20).to_string(index=False)
+        history_summary += "\n\n统计指标（本地计算，非AI生成）：" + "，".join(
+            f"{k}={v}" for k, v in stats.items()
+        )
         financial_summary = fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
         news_summary = (
             "\n".join(f"- {row['新闻标题']}：{row['新闻内容'][:100]}" for _, row in news.iterrows())
