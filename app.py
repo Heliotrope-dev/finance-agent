@@ -105,6 +105,20 @@ with tab_analyze:
             st.error("没有获取到行情数据，检查一下股票代码是否正确。")
             st.stop()
 
+        if spot and spot.get("最新价"):
+            change = spot["最新价"] - spot["昨收"]
+            change_pct = change / spot["昨收"] * 100 if spot["昨收"] else 0
+            qcol1, qcol2, qcol3, qcol4 = st.columns([2, 1, 1, 1])
+            qcol1.metric(
+                spot.get("名称", symbol),
+                f"{spot['最新价']:.2f}",
+                f"{change:+.2f} ({change_pct:+.2f}%)",
+            )
+            qcol2.metric("今开", f"{spot.get('今开', 0):.2f}")
+            qcol3.metric("最高", f"{spot.get('最高', 0):.2f}")
+            qcol4.metric("最低", f"{spot.get('最低', 0):.2f}")
+            st.caption(f"更新时间：{spot.get('更新时间', '未知')}（新浪实时行情，非收盘价）")
+
         st.divider()
         st.subheader("行情与统计")
         st.caption("本区块的数字和图表全部本地直接算出来，不经过 AI —— 跟下面 AI 的文字分析是两条独立的证据链。")
@@ -136,6 +150,12 @@ with tab_analyze:
             st.caption("暂无财务数据。")
 
         history_summary = hist.tail(20).to_string(index=False)
+        if spot and spot.get("最新价"):
+            history_summary += (
+                f"\n\n实时行情快照（用户此刻正在看到的价格，{spot.get('更新时间', '')}）："
+                f"最新价{spot['最新价']}，今开{spot.get('今开')}，"
+                f"最高{spot.get('最高')}，最低{spot.get('最低')}，昨收{spot.get('昨收')}"
+            )
         history_summary += "\n\n统计指标（本地计算，非AI生成）：" + "，".join(
             f"{k}={v}" for k, v in stats.items()
         )

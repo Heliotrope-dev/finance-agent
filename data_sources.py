@@ -188,16 +188,39 @@ def get_stock_history(symbol: str, start_date: str, end_date: str) -> pd.DataFra
     raise RuntimeError("三个数据源（BaoStock/东财/新浪）全部获取失败，稍后再试。")
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def get_stock_realtime(symbol: str) -> dict:
-    """单只股票的最新价，直接复用 get_stock_history 的最后一行，不额外发请求。"""
-    end = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=5)).strftime("%Y%m%d")
-    df = get_stock_history(symbol, start, end)
-    if df is None or df.empty:
-        return {}
-    row = df.iloc[-1]
-    return {"代码": symbol, "最新价": row["收盘"]}
+    """真正的实时行情（新浪单股快照接口），不是最近收盘价。
+
+    之前这里是从日线历史数据里取最后一行——那是"最近收盘价"，交易时段内
+    跟用户自己在别的地方看到的实时价格对不上。这个接口是新浪的轻量单股查询，
+    只查一只股票、不拉全市场，缓存 TTL 也缩短到 30 秒，更贴近"实时"。
+    """
+
+    def _fetch():
+        code = f"{_sina_symbol(symbol)}{symbol}"
+        r = requests.get(
+            f"https://hq.sinajs.cn/list={code}",
+            headers={"Referer": "https://finance.sina.com.cn"},
+            timeout=10,
+        )
+        text = r.content.decode("gbk", errors="ignore")
+        raw = text.split('"')[1]
+        fields = raw.split(",")
+        if len(fields) < 32 or not fields[3]:
+            return {}
+        return {
+            "代码": symbol,
+            "名称": fields[0],
+            "最新价": float(fields[3]),
+            "今开": float(fields[1]),
+            "昨收": float(fields[2]),
+            "最高": float(fields[4]),
+            "最低": float(fields[5]),
+            "更新时间": f"{fields[30]} {fields[31]}",
+        }
+
+    return _with_retry(_fetch, retries=1, backoff=2)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
