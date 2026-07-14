@@ -1,7 +1,9 @@
 """科学理财 Agent —— 行情+财务+新闻交叉验证，不做黑箱荐股。"""
 
+import os
 import re
 import streamlit as st
+import streamlit.components.v1 as _cv1
 from datetime import datetime, timedelta
 
 from data_sources import (
@@ -16,8 +18,133 @@ from data_sources import (
 from analysis import cross_validate
 from tracker import log_analysis, get_history, get_due_for_review, record_review
 from charts import build_candlestick, compute_stats, build_return_histogram, build_benchmark_comparison
+from auth import (
+    _check_user, _register_user, _create_token, _validate_token,
+    _invalidate_token, _hash_pw, _user_exists,
+)
+
+for _k in ("SUPABASE_URL", "SUPABASE_KEY"):
+    if _k not in os.environ:
+        try:
+            os.environ[_k] = st.secrets[_k]
+        except Exception:
+            pass
 
 st.set_page_config(page_title="科学理财 Agent", layout="wide")
+
+
+def _show_login_page():
+    st.markdown(
+        "<div style='text-align:center;padding:60px 0 24px'>"
+        "<div style='font-size:1.5rem;font-weight:600;margin:8px 0 4px'>科学理财 Agent</div>"
+        "<div style='font-size:0.85rem;color:#888'>行情 + 财务 + 新闻交叉验证 · 登录后开始使用</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        tab_l, tab_r = st.tabs(["登录", "注册"])
+        with tab_l:
+            _em = st.text_input("邮箱", key="li_email", placeholder="your@email.com")
+            _pw = st.text_input("密码", type="password", key="li_pw")
+            if st.button("登录", type="primary", use_container_width=True, key="do_login"):
+                _ok, _msg = _check_user(_em, _pw)
+                if _ok:
+                    _tok = _create_token(_em)
+                    st.query_params["_auth"] = _tok
+                    st.session_state["logged_in"] = True
+                    st.session_state["user_email"] = _em
+                    st.session_state["_token"] = _tok
+                    _cv1.html(
+                        f'<script>try{{window.parent.localStorage.setItem("fa_auth_tok","{_tok}");}}catch(e){{}}</script>',
+                        height=1,
+                    )
+                    st.rerun()
+                else:
+                    st.error(_msg)
+        with tab_r:
+            _rem = st.text_input("邮箱", key="reg_email", placeholder="your@email.com")
+            _rpw = st.text_input("密码（至少6位）", type="password", key="reg_pw")
+            _rpw2 = st.text_input("确认密码", type="password", key="reg_pw2")
+            if st.button("注册账号", type="primary", use_container_width=True, key="do_reg"):
+                if not _rem or "@" not in _rem:
+                    st.error("请输入有效邮箱")
+                elif len(_rpw) < 6:
+                    st.error("密码至少6位")
+                elif _rpw != _rpw2:
+                    st.error("两次密码不一致")
+                elif _user_exists(_rem):
+                    st.error("该邮箱已注册（跟 math-agent 共用同一套账号，那边注册过这里也能直接登）")
+                else:
+                    try:
+                        _register_user(_rem, _hash_pw(_rpw))
+                        st.success("注册成功，请切换到登录标签页")
+                    except Exception as _e:
+                        st.error(f"注册失败：{_e}")
+
+
+# ── localStorage 自动登录（关闭浏览器后用书签/快捷方式打开也能恢复）────────────
+_cv1.html("""
+<script>
+(function() {
+    try {
+        var url = new URL(window.parent.location.href);
+        if (!url.searchParams.get('_auth')) {
+            var t = window.parent.localStorage.getItem('fa_auth_tok');
+            if (t) {
+                url.searchParams.set('_auth', t);
+                window.parent.history.replaceState(null, '', url.toString());
+                setTimeout(function() {
+                    if (!new URL(window.parent.location.href).searchParams.get('_auth')) return;
+                    window.parent.location.replace(url.toString());
+                }, 800);
+            }
+        }
+    } catch(e) {}
+})();
+</script>
+""", height=1)
+
+_stored_token = st.query_params.get("_auth", "") or ""
+if _stored_token and not st.session_state.get("logged_in"):
+    _auto_email = _validate_token(_stored_token)
+    if _auto_email:
+        st.session_state["logged_in"] = True
+        st.session_state["user_email"] = _auto_email
+        st.session_state["_token"] = _stored_token
+    else:
+        try:
+            del st.query_params["_auth"]
+        except Exception:
+            pass
+        _cv1.html(
+            '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");}catch(e){}</script>',
+            height=1,
+        )
+
+if not st.session_state.get("logged_in"):
+    _show_login_page()
+    st.stop()
+
+with st.sidebar:
+    _uemail = st.session_state.get("user_email", "")
+    _uemail_safe = _uemail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    st.markdown(f"<p style='font-size:0.8rem;color:#888'>{_uemail_safe}</p>", unsafe_allow_html=True)
+    if st.button("退出登录", use_container_width=True):
+        _tok = st.session_state.pop("_token", None)
+        if _tok:
+            _invalidate_token(_tok)
+        try:
+            del st.query_params["_auth"]
+        except Exception:
+            pass
+        _cv1.html(
+            '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");}catch(e){}</script>',
+            height=1,
+        )
+        st.session_state["logged_in"] = False
+        st.session_state.pop("user_email", None)
+        st.rerun()
 
 st.title("科学理财 Agent")
 st.caption("行情数据 + 财务数据 + 新闻资讯，AI 交叉核实后呈现依据链 —— 不直接给买卖建议，判断权始终在你手里。")
@@ -141,7 +268,7 @@ with tab_analyze:
                     st.stop()
 
             current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
-            log_analysis(symbol, float(current_price), result)
+            log_analysis(st.session_state["user_email"], symbol, float(current_price), result)
 
             st.session_state["_analysis_cache"] = {
                 "hist": hist, "spot": spot, "fin": fin, "news": news,
@@ -171,7 +298,7 @@ with tab_analyze:
         st.caption("本区块的数字和图表全部本地直接算出来，不经过 AI —— 跟下面 AI 的文字分析是两条独立的证据链。")
 
         with st.container(border=True):
-            period_options = {"日K": ("d", 90), "周K": ("w", 730), "月K": ("m", 1825), "分钟K（今日）": ("5", 1)}
+            period_options = {"分时K（今日）": ("5", 1), "日K": ("d", 90), "周K": ("w", 730), "月K": ("m", 1825)}
             period_label = st.radio(
                 "K线周期", list(period_options.keys()), horizontal=True, key="_kline_period"
             )
@@ -225,7 +352,7 @@ with tab_analyze:
 with tab_history:
     st.subheader("历史分析回看")
 
-    due = get_due_for_review(min_age_days=7)
+    due = get_due_for_review(st.session_state["user_email"], min_age_days=7)
     if due:
         st.info(f"有 {len(due)} 条分析记录满 7 天了，补录一下后续价格才能看到对照效果。")
         for row in due:
@@ -237,7 +364,7 @@ with tab_history:
                 st.rerun()
 
     st.divider()
-    records = get_history(limit=50)
+    records = get_history(st.session_state["user_email"], limit=50)
     if not records:
         st.write("还没有分析记录，去「新建分析」跑一个吧。")
     for r in records:
