@@ -92,18 +92,27 @@ def get_stock_name(symbol: str) -> str:
     return symbol
 
 
-def _fetch_history_baostock(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """BaoStock 是主数据源：官方维护、不用注册、成功率明显高于爬网页的东财/新浪源。"""
+_INTRADAY_FREQS = {"5", "15", "30", "60"}
+
+
+def _fetch_history_baostock(symbol: str, start_date: str, end_date: str, frequency: str = "d") -> pd.DataFrame:
+    """BaoStock 是主数据源：官方维护、不用注册、成功率明显高于爬网页的东财/新浪源。
+
+    frequency: d=日K, w=周K, m=月K, 5/15/30/60=分钟K（BaoStock 原生支持，
+    分钟级数据自带 time 字段，用它拼出真正的时间点而不是只有日期）。
+    """
     bs_code = f"{_sina_symbol(symbol)}.{symbol}"
     start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
     end = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
+    is_intraday = frequency in _INTRADAY_FREQS
+    fields = "date,time,open,high,low,close,volume" if is_intraday else "date,open,high,low,close,volume"
 
     with contextlib.redirect_stdout(io.StringIO()):  # 屏蔽 baostock 自带的 login/logout 打印
         bs.login()
         try:
             rs = bs.query_history_k_data_plus(
-                bs_code, "date,open,high,low,close,volume", start_date=start, end_date=end,
-                frequency="d", adjustflag="3",
+                bs_code, fields, start_date=start, end_date=end,
+                frequency=frequency, adjustflag="3",
             )
             if rs.error_code != "0":
                 raise RuntimeError(f"baostock: {rs.error_msg}")
@@ -113,10 +122,17 @@ def _fetch_history_baostock(symbol: str, start_date: str, end_date: str) -> pd.D
         finally:
             bs.logout()
 
-    df = pd.DataFrame(rows, columns=["日期", "开盘", "最高", "最低", "收盘", "成交量"])
+    cols = (["日期", "时间", "开盘", "最高", "最低", "收盘", "成交量"] if is_intraday
+            else ["日期", "开盘", "最高", "最低", "收盘", "成交量"])
+    df = pd.DataFrame(rows, columns=cols)
     if df.empty:
         return df
-    df["日期"] = pd.to_datetime(df["日期"])
+    if is_intraday:
+        # time 字段形如 20260714093500000（YYYYMMDDHHMMSSmmm），拼出真正的时间点
+        df["日期"] = pd.to_datetime(df["时间"].str[:14], format="%Y%m%d%H%M%S")
+        df = df.drop(columns=["时间"])
+    else:
+        df["日期"] = pd.to_datetime(df["日期"])
     for col in ("开盘", "最高", "最低", "收盘", "成交量"):
         df[col] = pd.to_numeric(df[col])
     return df
@@ -166,14 +182,19 @@ def get_benchmark_history(start_date: str, end_date: str, index_code: str = "sh.
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_stock_history(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """日线历史行情。symbol 例如 '600519'。
+def get_stock_history(symbol: str, start_date: str, end_date: str, frequency: str = "d") -> pd.DataFrame:
+    """历史行情。symbol 例如 '600519'。
 
-    三层兜底：BaoStock（主，稳定免注册）→ 东财 → 新浪。
-    任何一层挂了自动往下切，不会因为单一数据源抽风而整个功能不可用。
+    frequency: d=日K（默认）, w=周K, m=月K, 5/15/30/60=分钟K。
+    三层兜底只在日K上做（东财/新浪的周期参数跟BaoStock不是一回事，容易拼错）：
+    BaoStock（主，稳定免注册）→ 东财 → 新浪。周K/月K/分钟K目前只走BaoStock，
+    它对这几种周期原生支持得很好，暂时不需要额外兜底。
     """
+    if frequency != "d":
+        return _fetch_history_baostock(symbol, start_date, end_date, frequency)
+
     for fetch in (
-        lambda: _fetch_history_baostock(symbol, start_date, end_date),
+        lambda: _fetch_history_baostock(symbol, start_date, end_date, "d"),
         lambda: ak.stock_zh_a_hist(
             symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq"
         ),

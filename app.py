@@ -64,46 +64,93 @@ with tab_analyze:
             st.session_state.pop("_candidates", None)
 
     if symbol:
-        with st.spinner("拉取行情数据..."):
-            end = datetime.now().strftime("%Y%m%d")
-            start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
-            try:
-                hist = get_stock_history(symbol, start, end)
-            except Exception as e:
-                st.error(f"行情数据获取失败：{e}")
+        st.session_state["_active_symbol"] = symbol
+        st.session_state.pop("_analysis_cache", None)  # 新点了一次分析，之前缓存的结果作废
+
+    active_symbol = st.session_state.get("_active_symbol")
+
+    if active_symbol:
+        symbol = active_symbol
+
+        if "_analysis_cache" not in st.session_state:
+            with st.spinner("拉取行情数据..."):
+                end = datetime.now().strftime("%Y%m%d")
+                start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+                try:
+                    hist = get_stock_history(symbol, start, end)
+                except Exception as e:
+                    st.error(f"行情数据获取失败：{e}")
+                    st.stop()
+
+            with st.spinner("拉取实时快照..."):
+                try:
+                    spot = get_stock_realtime(symbol)
+                except Exception as e:
+                    st.warning(f"实时快照获取失败（不影响后续分析）：{e}")
+                    spot = {}
+
+            with st.spinner("拉取财务数据..."):
+                try:
+                    fin = get_financial_abstract(symbol)
+                except Exception as e:
+                    st.warning(f"财务数据获取失败（不影响后续分析）：{e}")
+                    fin = None
+
+            with st.spinner("拉取相关新闻..."):
+                try:
+                    stock_name = get_stock_name(symbol)
+                    news = get_stock_news(stock_name, limit=8)
+                except Exception as e:
+                    st.warning(f"新闻获取失败（不影响后续分析）：{e}")
+                    news = None
+
+            with st.spinner("拉取沪深300基准..."):
+                try:
+                    benchmark = get_benchmark_history(start, end)
+                except Exception:
+                    benchmark = None
+
+            if hist is None or hist.empty:
+                st.error("没有获取到行情数据，检查一下股票代码是否正确。")
                 st.stop()
 
-        with st.spinner("拉取实时快照..."):
-            try:
-                spot = get_stock_realtime(symbol)
-            except Exception as e:
-                st.warning(f"实时快照获取失败（不影响后续分析）：{e}")
-                spot = {}
+            stats = compute_stats(hist)
 
-        with st.spinner("拉取财务数据..."):
-            try:
-                fin = get_financial_abstract(symbol)
-            except Exception as e:
-                st.warning(f"财务数据获取失败（不影响后续分析）：{e}")
-                fin = None
+            history_summary = hist.tail(20).to_string(index=False)
+            if spot and spot.get("最新价"):
+                history_summary += (
+                    f"\n\n实时行情快照（用户此刻正在看到的价格，{spot.get('更新时间', '')}）："
+                    f"最新价{spot['最新价']}，今开{spot.get('今开')}，"
+                    f"最高{spot.get('最高')}，最低{spot.get('最低')}，昨收{spot.get('昨收')}"
+                )
+            history_summary += "\n\n统计指标（本地计算，非AI生成）：" + "，".join(
+                f"{k}={v}" for k, v in stats.items()
+            )
+            financial_summary = fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
+            news_summary = (
+                "\n".join(f"- {row['新闻标题']}：{row['新闻内容'][:100]}" for _, row in news.iterrows())
+                if news is not None and not news.empty
+                else "无相关新闻"
+            )
 
-        with st.spinner("拉取相关新闻..."):
-            try:
-                stock_name = get_stock_name(symbol)
-                news = get_stock_news(stock_name, limit=8)
-            except Exception as e:
-                st.warning(f"新闻获取失败（不影响后续分析）：{e}")
-                news = None
+            with st.spinner("AI 正在交叉核实新闻与数据..."):
+                try:
+                    result = cross_validate(symbol, history_summary, financial_summary, news_summary)
+                except Exception as e:
+                    st.error(f"分析失败：{e}")
+                    st.stop()
 
-        with st.spinner("拉取沪深300基准..."):
-            try:
-                benchmark = get_benchmark_history(start, end)
-            except Exception:
-                benchmark = None
+            current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
+            log_analysis(symbol, float(current_price), result)
 
-        if hist is None or hist.empty:
-            st.error("没有获取到行情数据，检查一下股票代码是否正确。")
-            st.stop()
+            st.session_state["_analysis_cache"] = {
+                "hist": hist, "spot": spot, "fin": fin, "news": news,
+                "benchmark": benchmark, "stats": stats, "result": result,
+            }
+
+        cache = st.session_state["_analysis_cache"]
+        hist, spot, fin, news = cache["hist"], cache["spot"], cache["fin"], cache["news"]
+        benchmark, stats, result = cache["benchmark"], cache["stats"], cache["result"]
 
         if spot and spot.get("最新价"):
             change = spot["最新价"] - spot["昨收"]
@@ -124,9 +171,24 @@ with tab_analyze:
         st.caption("本区块的数字和图表全部本地直接算出来，不经过 AI —— 跟下面 AI 的文字分析是两条独立的证据链。")
 
         with st.container(border=True):
-            st.plotly_chart(build_candlestick(hist), use_container_width=True)
+            period_options = {"日K": ("d", 90), "周K": ("w", 730), "月K": ("m", 1825), "分钟K（今日）": ("5", 1)}
+            period_label = st.radio(
+                "K线周期", list(period_options.keys()), horizontal=True, key="_kline_period"
+            )
+            freq, days_back = period_options[period_label]
+            chart_end = datetime.now().strftime("%Y%m%d")
+            chart_start = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+            try:
+                chart_hist = get_stock_history(symbol, chart_start, chart_end, frequency=freq)
+            except Exception as e:
+                st.warning(f"该周期数据获取失败：{e}")
+                chart_hist = hist
 
-            stats = compute_stats(hist)
+            if chart_hist is not None and not chart_hist.empty:
+                st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+            else:
+                st.caption("该周期暂无数据。")
+
             cols = st.columns(len(stats))
             for col, (label, value) in zip(cols, stats.items()):
                 col.metric(label, value)
@@ -149,38 +211,12 @@ with tab_analyze:
         else:
             st.caption("暂无财务数据。")
 
-        history_summary = hist.tail(20).to_string(index=False)
-        if spot and spot.get("最新价"):
-            history_summary += (
-                f"\n\n实时行情快照（用户此刻正在看到的价格，{spot.get('更新时间', '')}）："
-                f"最新价{spot['最新价']}，今开{spot.get('今开')}，"
-                f"最高{spot.get('最高')}，最低{spot.get('最低')}，昨收{spot.get('昨收')}"
-            )
-        history_summary += "\n\n统计指标（本地计算，非AI生成）：" + "，".join(
-            f"{k}={v}" for k, v in stats.items()
-        )
-        financial_summary = fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
-        news_summary = (
-            "\n".join(f"- {row['新闻标题']}：{row['新闻内容'][:100]}" for _, row in news.iterrows())
-            if news is not None and not news.empty
-            else "无相关新闻"
-        )
-
-        with st.spinner("AI 正在交叉核实新闻与数据..."):
-            try:
-                result = cross_validate(symbol, history_summary, financial_summary, news_summary)
-            except Exception as e:
-                st.error(f"分析失败：{e}")
-                st.stop()
-
         st.divider()
         st.subheader("AI 交叉验证分析")
         with st.container(border=True):
             st.markdown(result)
 
-        current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
-        log_analysis(symbol, float(current_price), result)
-        st.success(f"已记录本次分析（当时价格 {current_price}），过几天回来在「历史回看」里能看到后续走势对照。")
+        st.caption("本次分析已自动记录，过几天回来在「历史回看」里能看到后续走势对照。")
 
         if news is not None and not news.empty:
             with st.expander("原始新闻列表"):
