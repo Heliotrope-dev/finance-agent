@@ -16,9 +16,9 @@ from analysis import cross_validate
 from tracker import log_analysis, get_history, get_due_for_review, record_review
 from charts import build_candlestick, compute_stats, build_return_histogram, build_benchmark_comparison
 
-st.set_page_config(page_title="科学理财 Agent", page_icon="📊", layout="wide")
+st.set_page_config(page_title="科学理财 Agent", layout="wide")
 
-st.title("📊 科学理财 Agent")
+st.title("科学理财 Agent")
 st.caption("行情数据 + 财务数据 + 新闻资讯，AI 交叉核实后呈现依据链 —— 不直接给买卖建议，判断权始终在你手里。")
 
 tab_analyze, tab_history = st.tabs(["新建分析", "历史回看"])
@@ -104,7 +104,7 @@ with tab_analyze:
             st.stop()
 
         st.divider()
-        st.subheader("📈 行情与统计")
+        st.subheader("行情与统计")
         st.caption("本区块的数字和图表全部本地直接算出来，不经过 AI —— 跟下面 AI 的文字分析是两条独立的证据链。")
 
         with st.container(border=True):
@@ -127,7 +127,7 @@ with tab_analyze:
                     st.markdown("**对比沪深300**")
                     st.caption("基准数据暂时获取不到，不影响其他分析。")
 
-        st.subheader("💰 财务摘要")
+        st.subheader("财务摘要")
         if fin is not None and not fin.empty:
             st.dataframe(fin, use_container_width=True, hide_index=True)
         else:
@@ -152,7 +152,7 @@ with tab_analyze:
                 st.stop()
 
         st.divider()
-        st.subheader("🤖 AI 交叉验证分析")
+        st.subheader("AI 交叉验证分析")
         with st.container(border=True):
             st.markdown(result)
 
