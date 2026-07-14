@@ -9,11 +9,12 @@ from data_sources import (
     get_stock_realtime,
     get_financial_abstract,
     get_stock_news,
+    get_benchmark_history,
     search_stock_by_name,
 )
 from analysis import cross_validate
 from tracker import log_analysis, get_history, get_due_for_review, record_review
-from charts import build_candlestick, compute_stats
+from charts import build_candlestick, compute_stats, build_return_histogram, build_benchmark_comparison
 
 st.set_page_config(page_title="科学理财 Agent", page_icon="📊", layout="wide")
 
@@ -92,19 +93,45 @@ with tab_analyze:
                 st.warning(f"新闻获取失败（不影响后续分析）：{e}")
                 news = None
 
+        with st.spinner("拉取沪深300基准..."):
+            try:
+                benchmark = get_benchmark_history(start, end)
+            except Exception:
+                benchmark = None
+
         if hist is None or hist.empty:
             st.error("没有获取到行情数据，检查一下股票代码是否正确。")
             st.stop()
 
-        st.subheader("K线图")
-        st.plotly_chart(build_candlestick(hist), use_container_width=True)
+        st.divider()
+        st.subheader("📈 行情与统计")
+        st.caption("本区块的数字和图表全部本地直接算出来，不经过 AI —— 跟下面 AI 的文字分析是两条独立的证据链。")
 
-        st.subheader("统计指标")
-        st.caption("以下数字是本地直接算出来的，不经过 AI —— 跟下面的 AI 文字分析是两条独立的证据链。")
-        stats = compute_stats(hist)
-        cols = st.columns(len(stats))
-        for col, (label, value) in zip(cols, stats.items()):
-            col.metric(label, value)
+        with st.container(border=True):
+            st.plotly_chart(build_candlestick(hist), use_container_width=True)
+
+            stats = compute_stats(hist)
+            cols = st.columns(len(stats))
+            for col, (label, value) in zip(cols, stats.items()):
+                col.metric(label, value)
+
+            chart_col1, chart_col2 = st.columns(2)
+            with chart_col1:
+                st.markdown("**每日涨跌幅分布**")
+                st.plotly_chart(build_return_histogram(hist), use_container_width=True)
+            with chart_col2:
+                if benchmark is not None and not benchmark.empty:
+                    st.markdown("**对比沪深300（起点=100）**")
+                    st.plotly_chart(build_benchmark_comparison(hist, benchmark), use_container_width=True)
+                else:
+                    st.markdown("**对比沪深300**")
+                    st.caption("基准数据暂时获取不到，不影响其他分析。")
+
+        st.subheader("💰 财务摘要")
+        if fin is not None and not fin.empty:
+            st.dataframe(fin, use_container_width=True, hide_index=True)
+        else:
+            st.caption("暂无财务数据。")
 
         history_summary = hist.tail(20).to_string(index=False)
         history_summary += "\n\n统计指标（本地计算，非AI生成）：" + "，".join(
@@ -124,8 +151,10 @@ with tab_analyze:
                 st.error(f"分析失败：{e}")
                 st.stop()
 
-        st.subheader("交叉验证分析")
-        st.markdown(result)
+        st.divider()
+        st.subheader("🤖 AI 交叉验证分析")
+        with st.container(border=True):
+            st.markdown(result)
 
         current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
         log_analysis(symbol, float(current_price), result)

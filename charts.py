@@ -85,3 +85,53 @@ def compute_stats(hist: pd.DataFrame) -> dict:
         "夏普比率(简化)": f"{sharpe_like:.2f}",
         "样本天数": f"{len(close)}天",
     }
+
+
+def build_return_histogram(hist: pd.DataFrame) -> go.Figure:
+    """每日涨跌幅分布直方图 —— 比单一波动率数字更直观：是经常小波动还是偶尔巨震。"""
+    daily_ret = hist["收盘"].astype(float).pct_change().dropna() * 100
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Histogram(
+            x=daily_ret,
+            nbinsx=25,
+            marker_color="#3b82f6",
+            marker_line=dict(color="#1e293b", width=0.5),
+        )
+    )
+    fig.add_vline(x=0, line_dash="dash", line_color="#94a3b8", line_width=1)
+    fig.update_layout(
+        height=320,
+        margin=dict(l=10, r=10, t=10, b=10),
+        xaxis_title="单日涨跌幅 (%)",
+        yaxis_title="出现天数",
+        bargap=0.05,
+    )
+    return fig
+
+
+def build_benchmark_comparison(hist: pd.DataFrame, benchmark: pd.DataFrame, benchmark_name: str = "沪深300") -> go.Figure:
+    """把个股和基准指数都从 100 起点开始画，直接对比谁涨得多、谁跑赢了。"""
+    stock = hist[["日期", "收盘"]].copy()
+    stock["归一化"] = stock["收盘"] / stock["收盘"].iloc[0] * 100
+
+    bm = benchmark.copy()
+    bm["归一化"] = bm["收盘"] / bm["收盘"].iloc[0] * 100
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(x=stock["日期"], y=stock["归一化"], name="个股", line=dict(color="#ef4444", width=2))
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=bm["日期"], y=bm["归一化"], name=benchmark_name, line=dict(color="#94a3b8", width=2, dash="dot")
+        )
+    )
+    fig.update_layout(
+        height=320,
+        margin=dict(l=10, r=10, t=10, b=10),
+        yaxis_title="走势（起点=100）",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    return fig

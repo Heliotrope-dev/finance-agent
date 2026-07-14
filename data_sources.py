@@ -125,6 +125,30 @@ def _fetch_history_sina(symbol: str, start_date: str, end_date: str) -> pd.DataF
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def get_benchmark_history(start_date: str, end_date: str, index_code: str = "sh.000300") -> pd.DataFrame:
+    """基准指数历史收盘价，默认沪深300，用于跟个股走势对比。"""
+    start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
+    end = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
+    with contextlib.redirect_stdout(io.StringIO()):
+        bs.login()
+        try:
+            rs = bs.query_history_k_data_plus(
+                index_code, "date,close", start_date=start, end_date=end, frequency="d"
+            )
+            if rs.error_code != "0":
+                raise RuntimeError(f"baostock: {rs.error_msg}")
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+        finally:
+            bs.logout()
+    df = pd.DataFrame(rows, columns=["日期", "收盘"])
+    df["日期"] = pd.to_datetime(df["日期"])
+    df["收盘"] = pd.to_numeric(df["收盘"])
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def get_stock_history(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """日线历史行情。symbol 例如 '600519'。
 
