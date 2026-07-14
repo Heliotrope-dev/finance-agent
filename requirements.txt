@@ -1,5 +1,6 @@
 streamlit>=1.40.0
 akshare
+baostock
 pandas
 requests
 openai

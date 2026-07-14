@@ -1,10 +1,13 @@
 """数据层 —— 封装 AkShare 调用，统一加重试/限流间隔/缓存。"""
 
+import contextlib
+import io
 import json
 import time
 from datetime import datetime, timedelta
 
 import akshare as ak
+import baostock as bs
 import pandas as pd
 import requests
 import streamlit as st
@@ -46,14 +49,45 @@ def _with_retry(fn, retries=2, backoff=5):
 
 
 def _sina_symbol(symbol: str) -> str:
-    """AkShare 东财接口用纯数字代码，新浪接口要带交易所前缀。"""
-    prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
-    return f"{prefix}{symbol}"
+    """AkShare 东财接口用纯数字代码，新浪/BaoStock 接口要带交易所前缀。"""
+    return "sh" if symbol.startswith(("6", "9")) else "sz"
+
+
+def _fetch_history_baostock(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """BaoStock 是主数据源：官方维护、不用注册、成功率明显高于爬网页的东财/新浪源。"""
+    bs_code = f"{_sina_symbol(symbol)}.{symbol}"
+    start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
+    end = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
+
+    with contextlib.redirect_stdout(io.StringIO()):  # 屏蔽 baostock 自带的 login/logout 打印
+        bs.login()
+        try:
+            rs = bs.query_history_k_data_plus(
+                bs_code, "date,open,high,low,close,volume", start_date=start, end_date=end,
+                frequency="d", adjustflag="3",
+            )
+            if rs.error_code != "0":
+                raise RuntimeError(f"baostock: {rs.error_msg}")
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+        finally:
+            bs.logout()
+
+    df = pd.DataFrame(rows, columns=["日期", "开盘", "最高", "最低", "收盘", "成交量"])
+    if df.empty:
+        return df
+    df["日期"] = pd.to_datetime(df["日期"])
+    for col in ("开盘", "最高", "最低", "收盘", "成交量"):
+        df[col] = pd.to_numeric(df[col])
+    return df
 
 
 def _fetch_history_sina(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """新浪源兜底，列名对齐东财源，让上层（charts.py/app.py）不用关心具体来源。"""
-    df = ak.stock_zh_a_daily(symbol=_sina_symbol(symbol), start_date=start_date, end_date=end_date)
+    """新浪源，第二层兜底。列名对齐主数据源，让上层不用关心具体来源。"""
+    df = ak.stock_zh_a_daily(
+        symbol=f"{_sina_symbol(symbol)}{symbol}", start_date=start_date, end_date=end_date
+    )
     df = df.rename(
         columns={
             "date": "日期",
@@ -70,15 +104,25 @@ def _fetch_history_sina(symbol: str, start_date: str, end_date: str) -> pd.DataF
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_stock_history(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """日线历史行情。symbol 例如 '600519'。东财限流/超时时自动切新浪源兜底。"""
-    try:
-        return _with_retry(
-            lambda: ak.stock_zh_a_hist(
-                symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq"
-            )
-        )
-    except Exception:
-        return _with_retry(lambda: _fetch_history_sina(symbol, start_date, end_date))
+    """日线历史行情。symbol 例如 '600519'。
+
+    三层兜底：BaoStock（主，稳定免注册）→ 东财 → 新浪。
+    任何一层挂了自动往下切，不会因为单一数据源抽风而整个功能不可用。
+    """
+    for fetch in (
+        lambda: _fetch_history_baostock(symbol, start_date, end_date),
+        lambda: ak.stock_zh_a_hist(
+            symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq"
+        ),
+        lambda: _fetch_history_sina(symbol, start_date, end_date),
+    ):
+        try:
+            df = _with_retry(fetch, retries=1, backoff=3)
+            if df is not None and not df.empty:
+                return df
+        except Exception:
+            continue
+    raise RuntimeError("三个数据源（BaoStock/东财/新浪）全部获取失败，稍后再试。")
 
 
 @st.cache_data(ttl=120, show_spinner=False)
