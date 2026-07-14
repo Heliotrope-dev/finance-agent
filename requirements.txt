@@ -1,0 +1,5 @@
+streamlit>=1.40.0
+akshare
+pandas
+requests
+openai

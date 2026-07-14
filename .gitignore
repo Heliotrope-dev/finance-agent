@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+data/track_record.db
+.DS_Store
