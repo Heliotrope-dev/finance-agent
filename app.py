@@ -16,7 +16,7 @@ from data_sources import (
     get_stock_name,
     check_stock_valid,
 )
-from analysis import cross_validate
+from analysis import cross_validate, summarize_financials
 from tracker import log_analysis, get_history, get_due_for_review, record_review
 from charts import build_candlestick, compute_stats, build_return_histogram, build_benchmark_comparison
 from auth import (
@@ -273,17 +273,27 @@ with tab_analyze:
                     st.error(f"分析失败：{e}")
                     st.stop()
 
+            fin_summary_text = ""
+            if fin is not None and not fin.empty:
+                with st.spinner("AI 正在总结财务数据..."):
+                    try:
+                        fin_summary_text = summarize_financials(symbol, financial_summary)
+                    except Exception:
+                        fin_summary_text = ""
+
             current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
             log_analysis(st.session_state["user_email"], symbol, float(current_price), result)
 
             st.session_state["_analysis_cache"] = {
                 "hist": hist, "spot": spot, "fin": fin, "news": news,
                 "benchmark": benchmark, "stats": stats, "result": result,
+                "fin_summary_text": fin_summary_text,
             }
 
         cache = st.session_state["_analysis_cache"]
         hist, spot, fin, news = cache["hist"], cache["spot"], cache["fin"], cache["news"]
         benchmark, stats, result = cache["benchmark"], cache["stats"], cache["result"]
+        fin_summary_text = cache.get("fin_summary_text", "")
 
         if spot and spot.get("最新价"):
             change = spot["最新价"] - spot["昨收"]
@@ -341,6 +351,8 @@ with tab_analyze:
         st.subheader("财务摘要")
         if fin is not None and not fin.empty:
             st.dataframe(fin, use_container_width=True, hide_index=True)
+            if fin_summary_text:
+                st.markdown(fin_summary_text)
         else:
             st.caption("暂无财务数据。")
 
