@@ -14,6 +14,7 @@ from data_sources import (
     get_benchmark_history,
     search_stock_by_name,
     get_stock_name,
+    check_stock_valid,
 )
 from analysis import cross_validate
 from tracker import log_analysis, get_history, get_due_for_review, record_review
@@ -165,7 +166,12 @@ with tab_analyze:
     if run and query:
         query = query.strip()
         if re.match(r"^\d{6}$", query):
+            valid, msg_or_name = check_stock_valid(query)
+            if not valid:
+                st.error(msg_or_name)
+                st.stop()
             symbol = query
+            st.caption(f"匹配到：{msg_or_name}（{symbol}）")
         else:
             with st.spinner("按名称搜索..."):
                 try:

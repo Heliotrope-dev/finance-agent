@@ -77,6 +77,30 @@ def search_stock_by_name(query: str) -> list[dict]:
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_name(symbol: str) -> str:
     """代码反查公司名，主要给新闻搜索用（新闻搜代码基本搜不到东西）。查不到就退回代码本身。"""
+    info = _stock_basic_info(symbol)
+    return info[1] if info else symbol
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def check_stock_valid(symbol: str) -> tuple[bool, str]:
+    """输入的是6位代码时用——检查是不是真实存在、还在交易的股票。
+
+    600001 这种代码格式完全合法，但公司早就退市了（比如邯郸钢铁，2009年退市），
+    直接拿去查行情三个数据源当然都查不到，之前的报错说"稍后再试"容易误导人
+    以为是临时故障——这里提前判断清楚，返回准确原因。
+    """
+    info = _stock_basic_info(symbol)
+    if not info:
+        return False, f"没有找到代码「{symbol}」对应的股票，检查一下是不是输错了。"
+    _, name, _ipo, out_date, type_, status = info
+    if type_ != "1":
+        return False, f"「{symbol}」不是个股（可能是指数/基金/其他），暂不支持分析。"
+    if status != "1":
+        return False, f"「{name}」（{symbol}）已经退市了（退市日期 {out_date or '未知'}），查不到行情数据。"
+    return True, name
+
+
+def _stock_basic_info(symbol: str) -> tuple | None:
     bs_code = f"{_sina_symbol(symbol)}.{symbol}"
     with contextlib.redirect_stdout(io.StringIO()):
         bs.login()
@@ -87,9 +111,7 @@ def get_stock_name(symbol: str) -> str:
                 rows.append(rs.get_row_data())
         finally:
             bs.logout()
-    if rows:
-        return rows[0][1]
-    return symbol
+    return rows[0] if rows else None
 
 
 _INTRADAY_FREQS = {"5", "15", "30", "60"}
