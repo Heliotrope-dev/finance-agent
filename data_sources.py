@@ -2,7 +2,6 @@
 
 import contextlib
 import io
-import json
 import time
 from datetime import datetime, timedelta
 
@@ -73,6 +72,24 @@ def search_stock_by_name(query: str) -> list[dict]:
         if type_ == "1" and status == "1":  # 1=股票, status 1=在市
             results.append({"code": code.split(".")[1], "name": name})
     return results
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_stock_name(symbol: str) -> str:
+    """代码反查公司名，主要给新闻搜索用（新闻搜代码基本搜不到东西）。查不到就退回代码本身。"""
+    bs_code = f"{_sina_symbol(symbol)}.{symbol}"
+    with contextlib.redirect_stdout(io.StringIO()):
+        bs.login()
+        try:
+            rs = bs.query_stock_basic(code=bs_code)
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+        finally:
+            bs.logout()
+    if rows:
+        return rows[0][1]
+    return symbol
 
 
 def _fetch_history_baostock(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -190,78 +207,26 @@ def get_financial_abstract(symbol: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_stock_news(symbol: str, limit: int = 10) -> pd.DataFrame:
-    """个股新闻 —— 自己实现而非直接调 ak.stock_news_em。
+def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
+    """个股相关新闻。
 
-    原因：akshare 1.18.64 的 stock_news_em 在清洗文本时用
-    `.str.replace(r"\\u3000", "", regex=True)`，在本环境的 pandas/pyarrow
-    字符串后端下会报 "invalid escape sequence" 崩掉。这里复用它的请求逻辑，
-    把两处清洗换成普通字符串替换（不用正则），绕开这个上游 bug。
+    原本调东财的关键词搜索接口，实测发现它已经被反爬拦截了——不管传什么关键词，
+    返回的都是同一份缓存假数据（连 JSONP 回调标识都一模一样）。这类接口层面的
+    伪装拦截没法靠改参数绕过，所以换成财新的大盘资讯源（get_market_news），
+    本地按公司名关键词过滤出相关条目；如果一条都没提到这家公司，就退化成
+    展示最新的大盘资讯，好过什么都不显示。
     """
+    df = get_market_news()
+    if df is None or df.empty:
+        return pd.DataFrame()
 
-    def _fetch():
-        url = "https://search-api-web.eastmoney.com/search/jsonp"
-        inner_param = {
-            "uid": "",
-            "keyword": symbol,
-            "type": ["cmsArticleWebOld"],
-            "client": "web",
-            "clientType": "web",
-            "clientVersion": "curr",
-            "param": {
-                "cmsArticleWebOld": {
-                    "searchScope": "default",
-                    "sort": "default",
-                    "pageIndex": 1,
-                    "pageSize": limit,
-                    "preTag": "<em>",
-                    "postTag": "</em>",
-                }
-            },
-        }
-        params = {
-            "cb": "jQuery0_0",
-            "param": json.dumps(inner_param, ensure_ascii=False),
-            "_": str(int(time.time() * 1000)),
-        }
-        headers = {
-            "accept": "*/*",
-            "user-agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "referer": f"https://so.eastmoney.com/news/s?keyword={symbol}",
-        }
-        r = requests.get(url, params=params, headers=headers, timeout=15)
-        text = r.text.strip()
-        json_str = text[text.index("(") + 1 : text.rindex(")")]
-        data = json.loads(json_str)
-        items = data.get("result", {}).get("cmsArticleWebOld", [])
-        df = pd.DataFrame(items)
-        if df.empty:
-            return df
-        df = df.rename(
-            columns={
-                "title": "新闻标题",
-                "content": "新闻内容",
-                "date": "发布时间",
-                "mediaName": "文章来源",
-                "code": "url_code",
-            }
-        )
-        for col in ("新闻标题", "新闻内容"):
-            if col in df.columns:
-                df[col] = (
-                    df[col]
-                    .str.replace("<em>", "", regex=False)
-                    .str.replace("</em>", "", regex=False)
-                    .str.replace("　", "", regex=False)
-                    .str.replace("\r\n", " ", regex=False)
-                )
-        keep = [c for c in ("新闻标题", "新闻内容", "发布时间", "文章来源") if c in df.columns]
-        return df[keep]
+    matched = df[df["summary"].str.contains(keyword, na=False)]
+    result = matched if not matched.empty else df
 
-    return _with_retry(_fetch)
+    result = result.head(limit).copy()
+    result["新闻标题"] = result["summary"].str.slice(0, 24) + "…"
+    result = result.rename(columns={"summary": "新闻内容", "tag": "分类"})
+    return result[["新闻标题", "新闻内容", "分类"]]
 
 
 @st.cache_data(ttl=300, show_spinner=False)

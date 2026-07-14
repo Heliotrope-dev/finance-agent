@@ -11,6 +11,7 @@ from data_sources import (
     get_stock_news,
     get_benchmark_history,
     search_stock_by_name,
+    get_stock_name,
 )
 from analysis import cross_validate
 from tracker import log_analysis, get_history, get_due_for_review, record_review
@@ -88,7 +89,8 @@ with tab_analyze:
 
         with st.spinner("拉取相关新闻..."):
             try:
-                news = get_stock_news(symbol, limit=8)
+                stock_name = get_stock_name(symbol)
+                news = get_stock_news(stock_name, limit=8)
             except Exception as e:
                 st.warning(f"新闻获取失败（不影响后续分析）：{e}")
                 news = None
