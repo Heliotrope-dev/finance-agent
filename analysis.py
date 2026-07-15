@@ -80,3 +80,42 @@ def summarize_financials(symbol: str, financial_summary: str) -> str:
         temperature=0.3,
     )
     return resp.choices[0].message.content
+
+
+_NEWS_SUMMARY_PROMPT = """你是财经资讯助手。下面是跟一家上市公司相关（或市场大盘相关）的
+最新新闻列表，请用大白话写一段简短总结（150字以内），讲清楚这些新闻整体上偏利好还是
+利空、有没有值得关注的具体事件。如果新闻列表明显跟这家公司关系不大（只是通用大盘资讯），
+要诚实说明"没有直接相关新闻，以下是大盘概况"，不要硬扯关系。不要给投资建议。"""
+
+_BENCHMARK_SUMMARY_PROMPT = """你是财经数据分析助手。下面给你一只股票和基准指数在同一段时间的
+涨跌幅数据，请用一两句话（80字以内）说清楚：这只股票跑赢还是跑输了基准，差距大不大。
+不要给投资建议，只客观描述数据对比结果。"""
+
+
+def summarize_news(symbol: str, news_summary: str) -> str:
+    """新闻资讯模块的独立AI总结，跟财务摘要/数据分析是分开的按需调用。"""
+    resp = _client().chat.completions.create(
+        model=_MODEL,
+        messages=[
+            {"role": "system", "content": _NEWS_SUMMARY_PROMPT},
+            {"role": "user", "content": f"股票代码：{symbol}\n\n新闻列表：\n{news_summary}"},
+        ],
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content
+
+
+def summarize_benchmark(symbol: str, stock_pct: float, benchmark_name: str, benchmark_pct: float) -> str:
+    """对比大盘模块的独立AI总结。"""
+    resp = _client().chat.completions.create(
+        model=_MODEL,
+        messages=[
+            {"role": "system", "content": _BENCHMARK_SUMMARY_PROMPT},
+            {
+                "role": "user",
+                "content": f"股票 {symbol} 区间涨跌幅：{stock_pct:+.2f}%\n{benchmark_name} 同期涨跌幅：{benchmark_pct:+.2f}%",
+            },
+        ],
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content

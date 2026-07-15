@@ -285,6 +285,22 @@ def get_limit_pool(kind: str = "up", limit: int = 10) -> pd.DataFrame:
     return df[keep].reset_index(drop=True)
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def get_hk_top_movers(kind: str = "up", limit: int = 10) -> pd.DataFrame:
+    """港股没有涨跌停制度，退化成"涨跌幅排行榜"。
+
+    stock_hk_spot() 要扫全市场2800多只股票，实测要25-30秒，缓存拉长到10分钟，
+    避免每次进页面都重新等半分钟。美股同样性质的全市场接口(stock_us_spot)
+    实测要12-13分钟，完全不现实，美股这个排行榜先不做。
+    """
+    df = _with_retry(ak.stock_hk_spot, retries=0)
+    if df is None or df.empty or "涨跌幅" not in df.columns:
+        return pd.DataFrame()
+    df = df.sort_values("涨跌幅", ascending=(kind != "up")).head(limit)
+    keep = [c for c in ("代码", "中文名称", "最新价", "涨跌幅", "涨跌额") if c in df.columns]
+    return df[keep].rename(columns={"中文名称": "名称"}).reset_index(drop=True)
+
+
 def _fetch_history_hk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """港股日线，新浪源。stock_hk_daily 不接受日期范围参数，返回全部历史，本地按日期筛。"""
     try:
