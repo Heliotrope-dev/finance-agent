@@ -211,9 +211,19 @@ with tab_analyze:
 
     if run and query:
         query = query.strip()
-        if market_code != "A":
-            # 港股/美股：phase 1 先只支持直接输代码，不做名称搜索/退市校验
-            symbol = query.upper() if market_code == "US" else query
+        if market_code == "HK":
+            # phase 1 先只支持直接输代码，不做名称搜索。格式先本地校验一遍，
+            # 不对就直接拦掉，不发请求——之前"小米"这种中文名直接传下去，
+            # 新浪那边返回空表，rename 时因为列不存在崩了个看不懂的 KeyError。
+            if not re.match(r"^\d{4,5}$", query):
+                st.error("港股代码应为4-5位数字（如 00700），暂不支持按名称搜索。")
+                st.stop()
+            symbol = query.zfill(5)
+        elif market_code == "US":
+            if not re.match(r"^[A-Za-z.]{1,6}$", query):
+                st.error("美股代码应为英文字母（如 AAPL），暂不支持按名称搜索。")
+                st.stop()
+            symbol = query.upper()
         elif re.match(r"^\d{6}$", query):
             valid, msg_or_name = check_stock_valid(query)
             if not valid:

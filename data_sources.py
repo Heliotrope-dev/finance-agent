@@ -221,7 +221,14 @@ def get_benchmark_history(start_date: str, end_date: str, market: str = "A") -> 
 
 def _fetch_history_hk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """港股日线，新浪源。stock_hk_daily 不接受日期范围参数，返回全部历史，本地按日期筛。"""
-    df = ak.stock_hk_daily(symbol=symbol, adjust="")
+    try:
+        df = ak.stock_hk_daily(symbol=symbol, adjust="")
+    except Exception:
+        # 代码不存在/格式不对时，akshare 内部解析新浪返回的空数据会直接抛
+        # KeyError/IndexError 这类看不懂的底层异常，统一转成明确提示。
+        raise ValueError(f"「{symbol}」不是有效的港股代码（应为5位数字，如 00700）。")
+    if df is None or df.empty or "date" not in df.columns:
+        raise ValueError(f"「{symbol}」不是有效的港股代码（应为5位数字，如 00700）。")
     df = df.rename(columns={
         "date": "日期", "open": "开盘", "high": "最高", "low": "最低",
         "close": "收盘", "volume": "成交量",
@@ -234,7 +241,12 @@ def _fetch_history_hk(symbol: str, start_date: str, end_date: str) -> pd.DataFra
 
 def _fetch_history_us(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """美股日线，新浪源。同样返回全部历史，本地按日期筛。"""
-    df = ak.stock_us_daily(symbol=symbol, adjust="")
+    try:
+        df = ak.stock_us_daily(symbol=symbol, adjust="")
+    except Exception:
+        raise ValueError(f"「{symbol}」不是有效的美股代码（应为英文股票代码，如 AAPL）。")
+    if df is None or df.empty or "date" not in df.columns:
+        raise ValueError(f"「{symbol}」不是有效的美股代码（应为英文股票代码，如 AAPL）。")
     df = df.rename(columns={
         "date": "日期", "open": "开盘", "high": "最高", "low": "最低",
         "close": "收盘", "volume": "成交量",
