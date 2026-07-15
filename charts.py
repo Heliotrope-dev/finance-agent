@@ -9,14 +9,27 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 
+def _compute_macd(close: pd.Series) -> pd.DataFrame:
+    """标准MACD：EMA12/EMA26算DIF，DIF的9日EMA是DEA，柱状图=2*(DIF-DEA)。"""
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    dif = ema12 - ema26
+    dea = dif.ewm(span=9, adjust=False).mean()
+    hist_bar = 2 * (dif - dea)
+    return pd.DataFrame({"DIF": dif, "DEA": dea, "MACD": hist_bar})
+
+
 def build_candlestick(hist: pd.DataFrame) -> go.Figure:
-    """K线图 + MA5/MA20 + 成交量子图。hist 需要有 日期/开盘/收盘/最高/最低/成交量 列。"""
+    """K线图 + MA5/MA20 + 成交量 + MACD，三个子图。hist 需要有 日期/开盘/收盘/最高/最低/成交量 列。"""
     df = hist.copy()
     df["MA5"] = df["收盘"].rolling(5).mean()
     df["MA20"] = df["收盘"].rolling(20).mean()
+    macd = _compute_macd(df["收盘"].astype(float))
 
     fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03
+        rows=3, cols=1, shared_xaxes=True,
+        row_heights=[0.55, 0.18, 0.27], vertical_spacing=0.03,
+        subplot_titles=("", "成交量", "MACD"),
     )
 
     fig.add_trace(
@@ -53,8 +66,25 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
         col=1,
     )
 
+    macd_colors = ["#ef4444" if v >= 0 else "#22c55e" for v in macd["MACD"]]
+    fig.add_trace(
+        go.Bar(x=df["日期"], y=macd["MACD"], marker_color=macd_colors, name="MACD柱"),
+        row=3,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(x=df["日期"], y=macd["DIF"], line=dict(width=1, color="#f59e0b"), name="DIF"),
+        row=3,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(x=df["日期"], y=macd["DEA"], line=dict(width=1, color="#3b82f6"), name="DEA"),
+        row=3,
+        col=1,
+    )
+
     fig.update_layout(
-        height=520,
+        height=680,
         margin=dict(l=10, r=10, t=30, b=10),
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
