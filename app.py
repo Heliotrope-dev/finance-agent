@@ -2,6 +2,7 @@
 
 import os
 import re
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as _cv1
 from datetime import datetime, timedelta
@@ -21,7 +22,10 @@ from tracker import (
     log_analysis, get_history, get_due_for_review, record_review,
     add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
 )
-from charts import build_candlestick, compute_stats, build_return_histogram, build_benchmark_comparison
+from charts import (
+    build_candlestick, compute_stats, build_return_histogram,
+    build_benchmark_comparison, build_multi_comparison,
+)
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
     _invalidate_token, _hash_pw, _user_exists,
@@ -153,7 +157,7 @@ with st.sidebar:
 st.title("科学理财 Agent")
 st.caption("行情数据 + 财务数据 + 新闻资讯，AI 交叉核实后呈现依据链 —— 不直接给买卖建议，判断权始终在你手里。")
 
-tab_watchlist, tab_analyze, tab_history = st.tabs(["自选股", "新建分析", "历史回看"])
+tab_watchlist, tab_analyze, tab_compare, tab_history = st.tabs(["自选股", "新建分析", "多股对比", "历史回看"])
 
 with tab_watchlist:
     _email = st.session_state["user_email"]
@@ -412,6 +416,77 @@ with tab_analyze:
         if news is not None and not news.empty:
             with st.expander("原始新闻列表"):
                 st.dataframe(news, use_container_width=True)
+
+with tab_compare:
+    st.subheader("多股对比")
+    st.caption("输入2-5只股票，用逗号分隔（代码或名称都行），走势归一化到同一起点，直接看谁涨得多。")
+
+    cmp_query = st.text_input("股票列表", placeholder="600519,000858,贵州茅台", key="cmp_input")
+    include_benchmark = st.checkbox("同时对比沪深300", value=True, key="cmp_benchmark")
+    cmp_run = st.button("开始对比", type="primary", key="cmp_run")
+
+    if cmp_run and cmp_query:
+        raw_items = [x.strip() for x in re.split(r"[,，]", cmp_query) if x.strip()]
+        if len(raw_items) < 2:
+            st.error("至少输入2只股票才能对比。")
+        elif len(raw_items) > 5:
+            st.error("最多支持5只股票，太多了图会看不清。")
+        else:
+            resolved = {}  # 显示名 -> symbol
+            failed = []
+            for item in raw_items:
+                if re.match(r"^\d{6}$", item):
+                    ok, name_or_msg = check_stock_valid(item)
+                    if ok:
+                        resolved[f"{name_or_msg}（{item}）"] = item
+                    else:
+                        failed.append(f"{item}：{name_or_msg}")
+                else:
+                    matches = search_stock_by_name(item)
+                    if matches:
+                        m = matches[0]
+                        resolved[f"{m['name']}（{m['code']}）"] = m["code"]
+                    else:
+                        failed.append(f"{item}：没找到匹配的股票")
+
+            if failed:
+                st.warning("这几个没解析成功，已跳过：\n" + "\n".join(f"- {f}" for f in failed))
+
+            if len(resolved) < 2:
+                st.error("有效股票不足2只，没法对比。")
+            else:
+                with st.spinner("拉取行情数据..."):
+                    end = datetime.now().strftime("%Y%m%d")
+                    start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+                    hist_by_name = {}
+                    for name, sym in resolved.items():
+                        try:
+                            h = get_stock_history(sym, start, end)
+                            if h is not None and not h.empty:
+                                hist_by_name[name] = h
+                        except Exception:
+                            pass
+                    if include_benchmark:
+                        try:
+                            bm = get_benchmark_history(start, end)
+                            if bm is not None and not bm.empty:
+                                hist_by_name["沪深300"] = bm
+                        except Exception:
+                            pass
+
+                if len(hist_by_name) < 2:
+                    st.error("拉取到的有效数据不足2只，没法对比。")
+                else:
+                    st.plotly_chart(build_multi_comparison(hist_by_name), use_container_width=True)
+
+                    st.markdown("**统计对比**")
+                    stat_rows = []
+                    for name, h in hist_by_name.items():
+                        s = compute_stats(h)
+                        s["股票"] = name
+                        stat_rows.append(s)
+                    stat_df = pd.DataFrame(stat_rows).set_index("股票")
+                    st.dataframe(stat_df, use_container_width=True)
 
 with tab_history:
     st.subheader("历史分析回看")

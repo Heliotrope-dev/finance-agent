@@ -135,3 +135,28 @@ def build_benchmark_comparison(hist: pd.DataFrame, benchmark: pd.DataFrame, benc
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
     return fig
+
+
+_MULTI_COLORS = ["#ef4444", "#3b82f6", "#22c55e", "#f59e0b", "#a855f7"]
+
+
+def build_multi_comparison(hist_by_name: dict) -> go.Figure:
+    """多只股票（或指数）放一起对比，起点都归一化到100，跟 build_benchmark_comparison 是一回事，
+    只是不限制成两方对比，任意几只都能放一起画。hist_by_name: {显示名: 行情DataFrame}。"""
+    fig = go.Figure()
+    for i, (name, df) in enumerate(hist_by_name.items()):
+        s = df[["日期", "收盘"]].copy()
+        s["归一化"] = s["收盘"] / s["收盘"].iloc[0] * 100
+        fig.add_trace(
+            go.Scatter(
+                x=s["日期"], y=s["归一化"], name=name,
+                line=dict(color=_MULTI_COLORS[i % len(_MULTI_COLORS)], width=2),
+            )
+        )
+    fig.update_layout(
+        height=380,
+        margin=dict(l=10, r=10, t=10, b=10),
+        yaxis_title="走势（起点=100）",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    return fig
