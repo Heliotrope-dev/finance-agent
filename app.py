@@ -192,9 +192,16 @@ with tab_watchlist:
                 st.rerun()
 
 with tab_analyze:
+    market = st.radio("市场", ["A股", "港股", "美股"], horizontal=True, key="_market_select")
+    market_code = {"A股": "A", "港股": "HK", "美股": "US"}[market]
+    placeholder = {"A股": "600519 / 贵州茅台", "港股": "00700（腾讯控股）", "美股": "AAPL（苹果）"}[market]
+
+    if market_code != "A":
+        st.caption("港股/美股目前只支持直接输代码，暂不支持按名称搜索、财务摘要和新闻（后续再补）。")
+
     col1, col2 = st.columns([2, 1])
     with col1:
-        query = st.text_input("股票代码或名称（如 600519 / 贵州茅台）", value="")
+        query = st.text_input(f"股票代码或名称（如 {placeholder}）", value="", key="_query_input")
     with col2:
         st.write("")
         st.write("")
@@ -204,7 +211,10 @@ with tab_analyze:
 
     if run and query:
         query = query.strip()
-        if re.match(r"^\d{6}$", query):
+        if market_code != "A":
+            # 港股/美股：phase 1 先只支持直接输代码，不做名称搜索/退市校验
+            symbol = query.upper() if market_code == "US" else query
+        elif re.match(r"^\d{6}$", query):
             valid, msg_or_name = check_stock_valid(query)
             if not valid:
                 st.error(msg_or_name)
@@ -237,9 +247,11 @@ with tab_analyze:
 
     if symbol:
         st.session_state["_active_symbol"] = symbol
+        st.session_state["_active_market"] = market_code
         st.session_state.pop("_analysis_cache", None)  # 新点了一次分析，之前缓存的结果作废
 
     active_symbol = st.session_state.get("_active_symbol")
+    active_market = st.session_state.get("_active_market", "A")
 
     if active_symbol:
         symbol = active_symbol
@@ -249,38 +261,41 @@ with tab_analyze:
                 end = datetime.now().strftime("%Y%m%d")
                 start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
                 try:
-                    hist = get_stock_history(symbol, start, end)
+                    hist = get_stock_history(symbol, start, end, market=active_market)
                 except Exception as e:
                     st.error(f"行情数据获取失败：{e}")
                     st.stop()
 
             with st.spinner("拉取实时快照..."):
                 try:
-                    spot = get_stock_realtime(symbol)
+                    spot = get_stock_realtime(symbol, market=active_market)
                 except Exception as e:
                     st.warning(f"实时快照获取失败（不影响后续分析）：{e}")
                     spot = {}
 
-            with st.spinner("拉取财务数据..."):
-                try:
-                    fin = get_financial_abstract(symbol)
-                except Exception as e:
-                    st.warning(f"财务数据获取失败（不影响后续分析）：{e}")
-                    fin = None
+            if active_market == "A":
+                with st.spinner("拉取财务数据..."):
+                    try:
+                        fin = get_financial_abstract(symbol)
+                    except Exception as e:
+                        st.warning(f"财务数据获取失败（不影响后续分析）：{e}")
+                        fin = None
 
-            with st.spinner("拉取相关新闻..."):
-                try:
-                    stock_name = get_stock_name(symbol)
-                    news = get_stock_news(stock_name, limit=8)
-                except Exception as e:
-                    st.warning(f"新闻获取失败（不影响后续分析）：{e}")
-                    news = None
+                with st.spinner("拉取相关新闻..."):
+                    try:
+                        stock_name = get_stock_name(symbol)
+                        news = get_stock_news(stock_name, limit=8)
+                    except Exception as e:
+                        st.warning(f"新闻获取失败（不影响后续分析）：{e}")
+                        news = None
 
-            with st.spinner("拉取沪深300基准..."):
-                try:
-                    benchmark = get_benchmark_history(start, end)
-                except Exception:
-                    benchmark = None
+                with st.spinner("拉取沪深300基准..."):
+                    try:
+                        benchmark = get_benchmark_history(start, end)
+                    except Exception:
+                        benchmark = None
+            else:
+                fin, news, benchmark = None, None, None
 
             if hist is None or hist.empty:
                 st.error("没有获取到行情数据，检查一下股票代码是否正确。")
@@ -298,12 +313,16 @@ with tab_analyze:
             history_summary += "\n\n统计指标（本地计算，非AI生成）：" + "，".join(
                 f"{k}={v}" for k, v in stats.items()
             )
-            financial_summary = fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
-            news_summary = (
-                "\n".join(f"- {row['新闻标题']}：{row['新闻内容'][:100]}" for _, row in news.iterrows())
-                if news is not None and not news.empty
-                else "无相关新闻"
-            )
+            if active_market != "A":
+                financial_summary = "暂不支持（港股/美股财务数据接口还没接，仅先支持行情分析）"
+                news_summary = "暂不支持（港股/美股新闻源还没接）"
+            else:
+                financial_summary = fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
+                news_summary = (
+                    "\n".join(f"- {row['新闻标题']}：{row['新闻内容'][:100]}" for _, row in news.iterrows())
+                    if news is not None and not news.empty
+                    else "无相关新闻"
+                )
 
             with st.spinner("AI 正在交叉核实新闻与数据..."):
                 try:
@@ -364,17 +383,21 @@ with tab_analyze:
         st.caption("本区块的数字和图表全部本地直接算出来，不经过 AI —— 跟下面 AI 的文字分析是两条独立的证据链。")
 
         with st.container(border=True):
-            period_options = {"分时K（今日）": ("5", 1), "日K": ("d", 90), "周K": ("w", 730), "月K": ("m", 1825)}
-            period_label = st.radio(
-                "K线周期", list(period_options.keys()), horizontal=True, key="_kline_period"
-            )
-            freq, days_back = period_options[period_label]
-            chart_end = datetime.now().strftime("%Y%m%d")
-            chart_start = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
-            try:
-                chart_hist = get_stock_history(symbol, chart_start, chart_end, frequency=freq)
-            except Exception as e:
-                st.warning(f"该周期数据获取失败：{e}")
+            if active_market == "A":
+                period_options = {"分时K（今日）": ("5", 1), "日K": ("d", 90), "周K": ("w", 730), "月K": ("m", 1825)}
+                period_label = st.radio(
+                    "K线周期", list(period_options.keys()), horizontal=True, key="_kline_period"
+                )
+                freq, days_back = period_options[period_label]
+                chart_end = datetime.now().strftime("%Y%m%d")
+                chart_start = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+                try:
+                    chart_hist = get_stock_history(symbol, chart_start, chart_end, frequency=freq, market=active_market)
+                except Exception as e:
+                    st.warning(f"该周期数据获取失败：{e}")
+                    chart_hist = hist
+            else:
+                st.caption("港股/美股暂时只支持日K，周期切换后续再补。")
                 chart_hist = hist
 
             if chart_hist is not None and not chart_hist.empty:
@@ -391,7 +414,10 @@ with tab_analyze:
                 st.markdown("**每日涨跌幅分布**")
                 st.plotly_chart(build_return_histogram(hist), use_container_width=True)
             with chart_col2:
-                if benchmark is not None and not benchmark.empty:
+                if active_market != "A":
+                    st.markdown("**基准对比**")
+                    st.caption("港股/美股暂不支持基准指数对比。")
+                elif benchmark is not None and not benchmark.empty:
                     st.markdown("**对比沪深300（起点=100）**")
                     st.plotly_chart(build_benchmark_comparison(hist, benchmark), use_container_width=True)
                 else:
