@@ -285,20 +285,72 @@ def get_limit_pool(kind: str = "up", limit: int = 10) -> pd.DataFrame:
     return df[keep].reset_index(drop=True)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def get_hk_top_movers(kind: str = "up", limit: int = 10) -> pd.DataFrame:
-    """港股没有涨跌停制度，退化成"涨跌幅排行榜"。
+_HK_FAMOUS_CODES = [
+    "00700", "09988", "03690", "01810", "09999", "00941", "00939", "01398",
+    "02318", "00005", "01299", "00388", "03968", "09618", "01024", "02020",
+    "00027", "01928", "02628", "00016", "00883", "00003", "00688", "01109",
+    "02331", "06618", "09888", "03888", "01211",
+]
 
-    stock_hk_spot() 要扫全市场2800多只股票，实测要25-30秒，缓存拉长到10分钟，
-    避免每次进页面都重新等半分钟。美股同样性质的全市场接口(stock_us_spot)
-    实测要12-13分钟，完全不现实，美股这个排行榜先不做。
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
+    """港股没有涨跌停制度，退化成"知名股涨跌幅榜"。
+
+    stock_hk_famous_spot_em（东财）实测连不上，跟东财一贯的不稳定是一回事。
+    改用已经验证稳定的 stock_hk_spot()（新浪全市场快照，25-30秒）拉回来后，
+    本地筛出一份手动维护的知名港股清单，不依赖那个不稳定的东财接口。
     """
     df = _with_retry(ak.stock_hk_spot, retries=0)
     if df is None or df.empty or "涨跌幅" not in df.columns:
         return pd.DataFrame()
-    df = df.sort_values("涨跌幅", ascending=(kind != "up")).head(limit)
+    df = df[df["代码"].isin(_HK_FAMOUS_CODES)]
+    df = df.sort_values("涨跌幅", ascending=False).head(limit)
     keep = [c for c in ("代码", "中文名称", "最新价", "涨跌幅", "涨跌额") if c in df.columns]
     return df[keep].rename(columns={"中文名称": "名称"}).reset_index(drop=True)
+
+
+_US_FAMOUS_CODES = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "NFLX",
+    "AMD", "INTC", "AVGO", "ORCL", "CRM", "ADBE", "PYPL", "UBER",
+    "DIS", "KO", "PEP", "NKE",
+]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_us_famous_movers(limit: int = 15) -> pd.DataFrame:
+    """美股知名股涨跌幅榜。
+
+    stock_us_famous_spot_em（东财）今晚忽好忽坏，重试也救不回来。改用新浪，
+    而且新浪这个接口支持一次请求批量查多只股票（逗号分隔），不用像单股实时
+    行情那样一只只查、每次还要等全局限流的3秒间隔——一次请求20只，几乎瞬间。
+    这里不走 get_stock_realtime/_with_retry 那条路，就是因为不想被那个为
+    东财设计的全局限流拖慢，新浪这个接口从没在今晚测出过需要限流的迹象。
+    """
+    codes = ",".join(f"gb_{c.lower()}" for c in _US_FAMOUS_CODES)
+    r = requests.get(
+        f"https://hq.sinajs.cn/list={codes}",
+        headers={"Referer": "https://finance.sina.com.cn"},
+        timeout=10,
+    )
+    text = r.content.decode("gbk", errors="ignore")
+
+    rows = []
+    for code, line in zip(_US_FAMOUS_CODES, text.strip().split("\n")):
+        if '"' not in line:
+            continue
+        raw = line.split('"')[1]
+        fields = raw.split(",")
+        if len(fields) < 27 or not fields[1]:
+            continue
+        rows.append({
+            "代码": code, "名称": fields[0], "最新价": float(fields[1]),
+            "涨跌幅": float(fields[2]), "涨跌额": float(fields[4]),
+        })
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).sort_values("涨跌幅", ascending=False).head(limit)
+    return df.reset_index(drop=True)
 
 
 def _fetch_history_hk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -411,13 +463,17 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
                 "更新时间": f"{fields[17]} {fields[18]}",
             }
         if market == "US":
-            # 名称,现价,涨跌幅,时间戳,涨跌额,今开,最高,最低,昨收,...
-            if len(fields) < 9 or not fields[1]:
+            # 名称,现价,涨跌幅,时间戳,涨跌额,今开,最高,最低,...,昨收(第27个字段,index 26)
+            # 之前误用 fields[8] 当昨收，实测那个字段是别的东西（不是昨收），
+            # 算出来的涨跌幅离谱到几十个点。改成直接用新浪自己算好的涨跌幅/涨跌额
+            # （field[2]/field[4]），昨收改用真正对得上的 field[26]（用涨跌额反推验证过）。
+            if len(fields) < 27 or not fields[1]:
                 return {}
             return {
                 "代码": symbol, "名称": fields[0],
                 "最新价": float(fields[1]), "今开": float(fields[5]),
-                "昨收": float(fields[8]), "最高": float(fields[6]), "最低": float(fields[7]),
+                "昨收": float(fields[26]), "最高": float(fields[6]), "最低": float(fields[7]),
+                "涨跌额": float(fields[4]), "涨跌幅": float(fields[2]),
                 "更新时间": fields[3],
             }
 

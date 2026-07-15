@@ -16,7 +16,8 @@ from data_sources import (
     get_multi_index_snapshot,
     get_market_breadth,
     get_limit_pool,
-    get_hk_top_movers,
+    get_hk_famous_movers,
+    get_us_famous_movers,
 )
 from analysis import cross_validate, summarize_financials, summarize_news, summarize_benchmark
 from tracker import (
@@ -438,6 +439,32 @@ if bcol.button("搜索", key="_quick_search_btn", use_container_width=True) and 
 
 tab_market, tab_watchlist = st.tabs(["行情", "自选股"])
 
+def _style_movers_table(df):
+    """涨跌幅/涨跌额红涨绿跌上色，数字统一两位小数，涨跌幅带%号——表格别一片黑。"""
+    if df is None or df.empty:
+        return df
+
+    def _color(v):
+        try:
+            v = float(v)
+        except Exception:
+            return ""
+        return f"color: {'#e02020' if v >= 0 else '#22a06b'}"
+
+    fmt = {}
+    if "最新价" in df.columns:
+        fmt["最新价"] = "{:.2f}"
+    if "涨跌额" in df.columns:
+        fmt["涨跌额"] = "{:+.2f}"
+    if "涨跌幅" in df.columns:
+        fmt["涨跌幅"] = "{:+.2f}%"
+    if "换手率" in df.columns:
+        fmt["换手率"] = "{:.2f}%"
+
+    color_cols = [c for c in ("涨跌额", "涨跌幅") if c in df.columns]
+    return df.style.format(fmt).map(_color, subset=color_cols)
+
+
 with tab_market:
     mkt_pick = st.radio("市场", ["A股", "港股", "美股"], horizontal=True, key="_market_overview_pick")
     mkt_code = {"A股": "A", "港股": "HK", "美股": "US"}[mkt_pick]
@@ -483,14 +510,14 @@ with tab_market:
             st.markdown("**涨停股池**")
             try:
                 up_pool = get_limit_pool("up", show_n)
-                st.dataframe(up_pool, use_container_width=True, hide_index=True)
+                st.dataframe(_style_movers_table(up_pool), use_container_width=True, hide_index=True)
             except Exception as e:
                 st.caption(f"获取失败：{e}")
         with down_col:
             st.markdown("**跌停股池**")
             try:
                 down_pool = get_limit_pool("down", show_n)
-                st.dataframe(down_pool, use_container_width=True, hide_index=True)
+                st.dataframe(_style_movers_table(down_pool), use_container_width=True, hide_index=True)
             except Exception as e:
                 st.caption(f"获取失败：{e}")
         if not st.session_state.get("_show_more_limit_pool"):
@@ -499,24 +526,21 @@ with tab_market:
                 st.rerun()
 
     elif mkt_code == "HK":
-        st.caption("港股没有涨跌停限制制度，这里改成涨跌幅排行榜（全市场扫描，加载较慢，缓存10分钟）。")
-        up_col, down_col = st.columns(2)
-        with up_col:
-            st.markdown("**涨幅榜**")
-            try:
-                with st.spinner("扫描港股全市场（第一次会慢一些）..."):
-                    st.dataframe(get_hk_top_movers("up", 10), use_container_width=True, hide_index=True)
-            except Exception as e:
-                st.caption(f"获取失败：{e}")
-        with down_col:
-            st.markdown("**跌幅榜**")
-            try:
-                st.dataframe(get_hk_top_movers("down", 10), use_container_width=True, hide_index=True)
-            except Exception as e:
-                st.caption(f"获取失败：{e}")
+        st.caption("港股没有涨跌停限制制度，这里改成知名股涨跌幅榜。")
+        try:
+            with st.spinner("加载中（第一次会慢一些）..."):
+                hk_movers = get_hk_famous_movers(15)
+            st.dataframe(_style_movers_table(hk_movers), use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.caption(f"获取失败：{e}")
 
     else:
-        st.caption("美股同样没有涨跌停制度。全市场涨跌幅排行需要扫描近900页数据，实测要12-13分钟，免费接口下不现实，暂不提供，后续找到更快的数据源再补。")
+        st.caption("美股同样没有涨跌停制度，这里也是知名股涨跌幅榜。")
+        try:
+            us_movers = get_us_famous_movers(15)
+            st.dataframe(_style_movers_table(us_movers), use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.caption(f"获取失败：{e}")
 
 with tab_watchlist:
     _email = st.session_state["user_email"]
