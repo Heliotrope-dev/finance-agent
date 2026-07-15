@@ -203,15 +203,46 @@ def get_benchmark_history(start_date: str, end_date: str, index_code: str = "sh.
     return df
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def get_stock_history(symbol: str, start_date: str, end_date: str, frequency: str = "d") -> pd.DataFrame:
-    """历史行情。symbol 例如 '600519'。
+def _fetch_history_hk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """港股日线，新浪源。stock_hk_daily 不接受日期范围参数，返回全部历史，本地按日期筛。"""
+    df = ak.stock_hk_daily(symbol=symbol, adjust="")
+    df = df.rename(columns={
+        "date": "日期", "open": "开盘", "high": "最高", "low": "最低",
+        "close": "收盘", "volume": "成交量",
+    })
+    df["日期"] = pd.to_datetime(df["日期"])
+    start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
+    df = df[(df["日期"] >= start) & (df["日期"] <= end)]
+    return df[["日期", "开盘", "收盘", "最高", "最低", "成交量"]]
 
-    frequency: d=日K（默认）, w=周K, m=月K, 5/15/30/60=分钟K。
-    三层兜底只在日K上做（东财/新浪的周期参数跟BaoStock不是一回事，容易拼错）：
-    BaoStock（主，稳定免注册）→ 东财 → 新浪。周K/月K/分钟K目前只走BaoStock，
-    它对这几种周期原生支持得很好，暂时不需要额外兜底。
+
+def _fetch_history_us(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """美股日线，新浪源。同样返回全部历史，本地按日期筛。"""
+    df = ak.stock_us_daily(symbol=symbol, adjust="")
+    df = df.rename(columns={
+        "date": "日期", "open": "开盘", "high": "最高", "low": "最低",
+        "close": "收盘", "volume": "成交量",
+    })
+    df["日期"] = pd.to_datetime(df["日期"])
+    start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
+    df = df[(df["日期"] >= start) & (df["日期"] <= end)]
+    return df[["日期", "开盘", "收盘", "最高", "最低", "成交量"]]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_stock_history(symbol: str, start_date: str, end_date: str, frequency: str = "d", market: str = "A") -> pd.DataFrame:
+    """历史行情。symbol：A股例如'600519'，港股例如'00700'，美股例如'AAPL'。
+
+    market: A=沪深A股（默认）, HK=港股, US=美股。
+    A股：三层兜底 BaoStock（主，稳定免注册）→ 东财 → 新浪，frequency 支持 d/w/m/5/15/30/60。
+    港股/美股：BaoStock不支持这两个市场，只能走新浪源，目前只支持日K
+    （frequency 参数对港美股暂时无效，周K/月K/分钟K后续再补）。
     """
+    if market == "HK":
+        return _with_retry(lambda: _fetch_history_hk(symbol, start_date, end_date))
+    if market == "US":
+        return _with_retry(lambda: _fetch_history_us(symbol, start_date, end_date))
+
     if frequency != "d":
         return _fetch_history_baostock(symbol, start_date, end_date, frequency)
 
@@ -232,16 +263,24 @@ def get_stock_history(symbol: str, start_date: str, end_date: str, frequency: st
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def get_stock_realtime(symbol: str) -> dict:
+def get_stock_realtime(symbol: str, market: str = "A") -> dict:
     """真正的实时行情（新浪单股快照接口），不是最近收盘价。
 
     之前这里是从日线历史数据里取最后一行——那是"最近收盘价"，交易时段内
     跟用户自己在别的地方看到的实时价格对不上。这个接口是新浪的轻量单股查询，
     只查一只股票、不拉全市场，缓存 TTL 也缩短到 30 秒，更贴近"实时"。
+
+    A股/港股/美股三个市场 hq.sinajs.cn 返回的字段顺序完全不一样，各写各的解析。
     """
 
     def _fetch():
-        code = f"{_sina_symbol(symbol)}{symbol}"
+        if market == "HK":
+            code = f"rt_hk{symbol}"
+        elif market == "US":
+            code = f"gb_{symbol.lower()}"
+        else:
+            code = f"{_sina_symbol(symbol)}{symbol}"
+
         r = requests.get(
             f"https://hq.sinajs.cn/list={code}",
             headers={"Referer": "https://finance.sina.com.cn"},
@@ -250,6 +289,28 @@ def get_stock_realtime(symbol: str) -> dict:
         text = r.content.decode("gbk", errors="ignore")
         raw = text.split('"')[1]
         fields = raw.split(",")
+
+        if market == "HK":
+            # 英文名,中文名,今开,昨收,最高,最低,现价,涨跌额,涨跌幅,买一,卖一,成交额,成交量,...,日期,时间
+            if len(fields) < 19 or not fields[6]:
+                return {}
+            return {
+                "代码": symbol, "名称": fields[1],
+                "最新价": float(fields[6]), "今开": float(fields[2]),
+                "昨收": float(fields[3]), "最高": float(fields[4]), "最低": float(fields[5]),
+                "更新时间": f"{fields[17]} {fields[18]}",
+            }
+        if market == "US":
+            # 名称,现价,涨跌幅,时间戳,涨跌额,今开,最高,最低,昨收,...
+            if len(fields) < 9 or not fields[1]:
+                return {}
+            return {
+                "代码": symbol, "名称": fields[0],
+                "最新价": float(fields[1]), "今开": float(fields[5]),
+                "昨收": float(fields[8]), "最高": float(fields[6]), "最低": float(fields[7]),
+                "更新时间": fields[3],
+            }
+
         if len(fields) < 32 or not fields[3]:
             return {}
         return {
