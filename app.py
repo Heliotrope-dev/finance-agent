@@ -1,4 +1,4 @@
-"""科学理财 Agent —— 行情+财务+新闻交叉验证，不做黑箱荐股。"""
+"""Invest Agent —— 行情+财务+新闻交叉验证，不做黑箱荐股。"""
 
 import os
 import re
@@ -38,13 +38,13 @@ for _k in ("SUPABASE_URL", "SUPABASE_KEY"):
         except Exception:
             pass
 
-st.set_page_config(page_title="科学理财 Agent", layout="wide")
+st.set_page_config(page_title="Invest Agent", layout="wide")
 
 
 def _show_login_page():
     st.markdown(
         "<div style='text-align:center;padding:60px 0 24px'>"
-        "<div style='font-size:1.5rem;font-weight:600;margin:8px 0 4px'>科学理财 Agent</div>"
+        "<div style='font-size:1.5rem;font-weight:600;margin:8px 0 4px'>Invest Agent</div>"
         "<div style='font-size:0.85rem;color:#888'>行情 + 财务 + 新闻交叉验证 · 登录后开始使用</div>"
         "</div>",
         unsafe_allow_html=True,
@@ -154,40 +154,145 @@ with st.sidebar:
         st.session_state.pop("user_email", None)
         st.rerun()
 
-st.title("科学理财 Agent")
-st.caption("行情数据 + 财务数据 + 新闻资讯，AI 交叉核实后呈现依据链 —— 不直接给买卖建议，判断权始终在你手里。")
+st.markdown(
+    """
+    <div style='background:#e02020;margin:-1rem -1rem 0 -1rem;padding:14px 24px;
+                display:flex;align-items:center;justify-content:space-between'>
+        <span style='color:#fff;font-size:1.3rem;font-weight:700;letter-spacing:.02em'>☰ &nbsp;Invest Agent</span>
+        <span style='color:#fff;font-size:0.8rem;opacity:0.85'>行情 · 财务 · 新闻交叉验证</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _index_snapshot(idx_market: str):
+    end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
+    df = get_benchmark_history(start, end, market=idx_market)
+    if df is None or len(df) < 2:
+        return None
+    last, prev = float(df.iloc[-1]["收盘"]), float(df.iloc[-2]["收盘"])
+    change = last - prev
+    pct = change / prev * 100 if prev else 0
+    return last, change, pct
+
+
+_INDEX_LABELS = {"A": "上证指数", "HK": "恒生指数", "US": "标普500"}
+idx_pick = st.radio("大盘指数", list(_INDEX_LABELS.values()), horizontal=True, key="_idx_pick", label_visibility="collapsed")
+idx_market_pick = {v: k for k, v in _INDEX_LABELS.items()}[idx_pick]
+try:
+    idx_snap = _index_snapshot(idx_market_pick)
+except Exception:
+    idx_snap = None
+if idx_snap:
+    idx_last, idx_change, idx_pct = idx_snap
+    idx_color = "#e02020" if idx_change >= 0 else "#22a06b"
+    st.markdown(
+        f"<div style='margin:-8px 0 12px'>"
+        f"<span style='font-size:1.4rem;font-weight:700;color:{idx_color}'>{idx_last:,.2f}</span>&nbsp;"
+        f"<span style='color:{idx_color}'>{idx_change:+.2f} ({idx_pct:+.2f}%)</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _auto_detect_market(q: str) -> str | None:
+    if re.match(r"^\d{6}$", q):
+        return "A"
+    if re.match(r"^\d{4,5}$", q):
+        return "HK"
+    if re.match(r"^[A-Za-z.]{1,6}$", q):
+        return "US"
+    return None
+
+
+qcol, bcol = st.columns([5, 1])
+quick_query = qcol.text_input(
+    "🔍 快速搜索代码，跳K线图（按名称搜索请用下面「新建分析」）",
+    value="", key="_quick_search", placeholder="600519 / 00700 / AAPL",
+)
+if bcol.button("搜索", key="_quick_search_btn", use_container_width=True) and quick_query:
+    q = quick_query.strip()
+    detected = _auto_detect_market(q)
+    if detected is None:
+        st.warning("这个格式看着像名称，快速搜索只支持直接输代码——用下面「新建分析」标签页按名称搜。")
+    else:
+        sym = q.zfill(5) if detected == "HK" else (q.upper() if detected == "US" else q)
+        st.session_state["_active_symbol"] = sym
+        st.session_state["_active_market"] = detected
+        st.session_state.pop("_analysis_cache", None)
+        st.success(f"已定位到 {sym}（{ {'A':'A股','HK':'港股','US':'美股'}[detected] }），切换到「新建分析」标签页查看结果。")
 
 tab_watchlist, tab_analyze, tab_compare, tab_history = st.tabs(["自选股", "新建分析", "多股对比", "历史回看"])
 
 with tab_watchlist:
     _email = st.session_state["user_email"]
     watched = get_watchlist(_email)
+
     if not watched:
-        st.write("还没有关注任何股票——去「新建分析」分析一只股票，结果页顶部能一键加入自选。")
-    else:
+        st.write("")
+        _, mid_empty, _ = st.columns([1, 2, 1])
+        with mid_empty:
+            st.markdown(
+                "<div style='text-align:center;color:#888;padding:20px 0 10px'>还没有关注任何股票</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("＋ 新增自选股", type="primary", use_container_width=True, key="wl_empty_add"):
+                st.session_state["_show_wl_add"] = True
+
+    if watched or st.session_state.get("_show_wl_add"):
+        with st.expander("＋ 新增自选股", expanded=not watched and st.session_state.get("_show_wl_add", False)):
+            addcol1, addcol2, addcol3 = st.columns([2, 1, 1])
+            add_query = addcol1.text_input("代码（如 600519 / 00700 / AAPL）", key="_wl_add_query")
+            add_market_label = addcol2.selectbox("市场", ["A股", "港股", "美股"], key="_wl_add_market")
+            if addcol3.button("添加", key="_wl_add_btn", use_container_width=True) and add_query:
+                add_market_code = {"A股": "A", "港股": "HK", "美股": "US"}[add_market_label]
+                q = add_query.strip()
+                add_symbol = q.zfill(5) if add_market_code == "HK" else (q.upper() if add_market_code == "US" else q)
+                try:
+                    add_spot = get_stock_realtime(add_symbol, market=add_market_code)
+                except Exception:
+                    add_spot = {}
+                if not add_spot or not add_spot.get("最新价"):
+                    st.error(f"没查到「{add_symbol}」的行情，检查一下代码对不对。")
+                else:
+                    add_to_watchlist(_email, add_symbol, add_spot.get("名称", add_symbol), market=add_market_code)
+                    st.session_state["_show_wl_add"] = False
+                    st.rerun()
+
+    if watched:
+        header = st.columns([2, 1.2, 1.2, 1.2, 1, 1])
+        for col, label in zip(header, ["名称/代码", "最新价", "涨跌额", "涨跌幅", "", ""]):
+            col.markdown(f"**{label}**")
+
         for item in watched:
-            wc1, wc2, wc3, wc4 = st.columns([2, 2, 1, 1])
+            item_market = item.get("market", "A")
             try:
-                wspot = get_stock_realtime(item["symbol"])
+                wspot = get_stock_realtime(item["symbol"], market=item_market)
             except Exception:
                 wspot = {}
+
+            wc1, wc2, wc3, wc4, wc5, wc6 = st.columns([2, 1.2, 1.2, 1.2, 1, 1])
             wc1.write(f"**{item['name']}**（{item['symbol']}）")
             if wspot and wspot.get("最新价"):
                 wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
                 wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
-                color = "red" if wchange >= 0 else "green"
-                wc2.markdown(
-                    f"{wspot['最新价']:.2f} "
-                    f"<span style='color:{color}'>{wchange:+.2f} ({wchange_pct:+.2f}%)</span>",
-                    unsafe_allow_html=True,
-                )
+                color = "#e02020" if wchange >= 0 else "#22a06b"
+                wc2.markdown(f"<span style='color:{color}'>{wspot['最新价']:.2f}</span>", unsafe_allow_html=True)
+                wc3.markdown(f"<span style='color:{color}'>{wchange:+.2f}</span>", unsafe_allow_html=True)
+                wc4.markdown(f"<span style='color:{color}'>{wchange_pct:+.2f}%</span>", unsafe_allow_html=True)
             else:
-                wc2.write("行情获取失败")
-            if wc3.button("分析", key=f"wl_analyze_{item['symbol']}"):
+                wc2.write("—")
+                wc3.write("—")
+                wc4.write("—")
+            if wc5.button("分析", key=f"wl_analyze_{item['symbol']}"):
                 st.session_state["_active_symbol"] = item["symbol"]
+                st.session_state["_active_market"] = item_market
                 st.session_state.pop("_analysis_cache", None)
-                st.info("已定位到该股票，切换到「新建分析」标签页查看结果。")
-            if wc4.button("移除", key=f"wl_remove_{item['symbol']}"):
+                st.info("已定位，切换到「新建分析」标签页查看结果。")
+            if wc6.button("移除", key=f"wl_remove_{item['symbol']}"):
                 remove_from_watchlist(_email, item["symbol"])
                 st.rerun()
 
@@ -377,7 +482,9 @@ with tab_analyze:
                         st.rerun()
                 else:
                     if st.button("加入自选", key="wl_toggle"):
-                        add_to_watchlist(st.session_state["user_email"], symbol, spot.get("名称", symbol))
+                        add_to_watchlist(
+                            st.session_state["user_email"], symbol, spot.get("名称", symbol), market=active_market
+                        )
                         st.rerun()
             st.caption(f"更新时间：{spot.get('更新时间', '未知')}（新浪实时行情，非收盘价）")
 

@@ -46,21 +46,26 @@ def init_db():
                 email TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 name TEXT NOT NULL DEFAULT '',
+                market TEXT NOT NULL DEFAULT 'A',
                 added_at TEXT NOT NULL,
                 UNIQUE(email, symbol)
             )
             """
         )
+        # 老库升级：多市场之前建的自选表没有 market 列，统一按A股兼容
+        wcols = [r[1] for r in c.execute("PRAGMA table_info(watchlist)").fetchall()]
+        if "market" not in wcols:
+            c.execute("ALTER TABLE watchlist ADD COLUMN market TEXT NOT NULL DEFAULT 'A'")
         c.commit()
 
 
-def add_to_watchlist(email: str, symbol: str, name: str) -> bool:
+def add_to_watchlist(email: str, symbol: str, name: str, market: str = "A") -> bool:
     init_db()
     with closing(_conn()) as c:
         try:
             c.execute(
-                "INSERT INTO watchlist (email, symbol, name, added_at) VALUES (?, ?, ?, ?)",
-                (email, symbol, name, datetime.now(timezone.utc).isoformat()),
+                "INSERT INTO watchlist (email, symbol, name, market, added_at) VALUES (?, ?, ?, ?, ?)",
+                (email, symbol, name, market, datetime.now(timezone.utc).isoformat()),
             )
             c.commit()
             return True
