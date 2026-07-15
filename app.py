@@ -134,6 +134,165 @@ if not st.session_state.get("logged_in"):
     _show_login_page()
     st.stop()
 
+
+def _build_stock_analysis(symbol: str, market: str, email: str) -> dict:
+    """拉数据+跑AI分析，返回结果字典。详情页和「新建分析」标签页各自独立调用，
+    互不影响缓存生命周期（各自决定什么时候该重新拉数据）。"""
+    end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+
+    hist = get_stock_history(symbol, start, end, market=market)
+    if hist is None or hist.empty:
+        raise RuntimeError("没有获取到行情数据，检查一下股票代码是否正确。")
+
+    try:
+        spot = get_stock_realtime(symbol, market=market)
+    except Exception:
+        spot = {}
+    try:
+        fin = get_financial_abstract(symbol, market=market)
+    except Exception:
+        fin = None
+    try:
+        stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
+        news = get_stock_news(stock_name, limit=8)
+    except Exception:
+        news = None
+    try:
+        benchmark = get_benchmark_history(start, end, market=market)
+    except Exception:
+        benchmark = None
+
+    stats = compute_stats(hist)
+    history_summary = hist.tail(20).to_string(index=False)
+    if spot and spot.get("最新价"):
+        history_summary += (
+            f"\n\n实时行情快照（用户此刻正在看到的价格，{spot.get('更新时间', '')}）："
+            f"最新价{spot['最新价']}，今开{spot.get('今开')}，"
+            f"最高{spot.get('最高')}，最低{spot.get('最低')}，昨收{spot.get('昨收')}"
+        )
+    history_summary += "\n\n统计指标（本地计算，非AI生成）：" + "，".join(f"{k}={v}" for k, v in stats.items())
+    financial_summary = fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
+    news_summary = (
+        "\n".join(f"- {row['新闻标题']}：{row['新闻内容'][:100]}" for _, row in news.iterrows())
+        if news is not None and not news.empty else "无相关新闻"
+    )
+
+    result = cross_validate(symbol, history_summary, financial_summary, news_summary)
+
+    fin_summary_text = ""
+    if fin is not None and not fin.empty:
+        try:
+            fin_summary_text = summarize_financials(symbol, financial_summary)
+        except Exception:
+            fin_summary_text = ""
+
+    current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
+    log_analysis(email, symbol, float(current_price), result)
+
+    return {
+        "hist": hist, "spot": spot, "fin": fin, "news": news,
+        "benchmark": benchmark, "stats": stats, "result": result,
+        "fin_summary_text": fin_summary_text,
+    }
+
+
+def _render_stock_detail(symbol: str, market: str, name: str):
+    if st.button("← 返回自选股"):
+        st.session_state.pop("_detail_symbol", None)
+        st.session_state.pop("_detail_market", None)
+        st.session_state.pop("_detail_name", None)
+        st.rerun()
+
+    st.markdown(
+        f"""
+        <div style='background:#e02020;margin:-1rem -1rem 0 -1rem;padding:14px 24px'>
+            <div style='color:#fff;font-size:1.2rem;font-weight:700'>{name}</div>
+            <div style='color:#fff;font-size:0.85rem;opacity:0.85'>{symbol} · {market}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    cache_key = f"_detail_cache_{symbol}_{market}"
+    if cache_key not in st.session_state:
+        with st.spinner("加载中..."):
+            try:
+                st.session_state[cache_key] = _build_stock_analysis(symbol, market, st.session_state["user_email"])
+            except Exception as e:
+                st.error(f"加载失败：{e}")
+                return
+
+    cache = st.session_state[cache_key]
+    hist, spot, fin = cache["hist"], cache["spot"], cache["fin"]
+    benchmark, stats, result = cache["benchmark"], cache["stats"], cache["result"]
+    fin_summary_text = cache.get("fin_summary_text", "")
+
+    if spot and spot.get("最新价"):
+        change = spot["最新价"] - spot.get("昨收", spot["最新价"])
+        change_pct = change / spot["昨收"] * 100 if spot.get("昨收") else 0
+        color = "#e02020" if change >= 0 else "#22a06b"
+        st.markdown(
+            f"<div style='margin:12px 0'>"
+            f"<span style='font-size:2rem;font-weight:700;color:{color}'>{spot['最新价']:.2f}</span>&nbsp;&nbsp;"
+            f"<span style='font-size:1.1rem;color:{color}'>{change:+.2f} ({change_pct:+.2f}%)</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        hcol1, hcol2, hcol3 = st.columns(3)
+        hcol1.metric("最高", f"{spot.get('最高', 0):.2f}")
+        hcol2.metric("最低", f"{spot.get('最低', 0):.2f}")
+        hcol3.metric("今开", f"{spot.get('今开', 0):.2f}")
+
+    st.divider()
+    if market == "A":
+        period_options = {"分时K（今日）": ("5", 1), "日K": ("d", 90), "周K": ("w", 730), "月K": ("m", 1825)}
+        period_label = st.radio("K线周期", list(period_options.keys()), horizontal=True, key="_detail_kline_period")
+        freq, days_back = period_options[period_label]
+        c_end = datetime.now().strftime("%Y%m%d")
+        c_start = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+        try:
+            chart_hist = get_stock_history(symbol, c_start, c_end, frequency=freq, market=market)
+        except Exception:
+            chart_hist = hist
+    else:
+        chart_hist = hist
+    if chart_hist is not None and not chart_hist.empty:
+        st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+
+    st.divider()
+    st.subheader("AI 分析")
+    with st.container(border=True):
+        st.markdown(result)
+
+    st.subheader("财务摘要")
+    if fin is not None and not fin.empty:
+        st.dataframe(fin, use_container_width=True, hide_index=True)
+        if fin_summary_text:
+            st.markdown(fin_summary_text)
+    else:
+        st.caption("暂无财务数据。")
+
+
+@st.dialog("确认删除")
+def _confirm_delete_dialog(email: str, symbol: str, name: str):
+    st.write(f"确定要把「{name}」（{symbol}）从自选股里删除吗？")
+    dc1, dc2 = st.columns(2)
+    if dc1.button("确认删除", type="primary", use_container_width=True):
+        remove_from_watchlist(email, symbol)
+        st.rerun()
+    if dc2.button("取消", use_container_width=True):
+        st.rerun()
+
+
+if st.session_state.get("_detail_symbol"):
+    _render_stock_detail(
+        st.session_state["_detail_symbol"],
+        st.session_state.get("_detail_market", "A"),
+        st.session_state.get("_detail_name", st.session_state["_detail_symbol"]),
+    )
+    st.stop()
+
 with st.sidebar:
     _uemail = st.session_state.get("user_email", "")
     _uemail_safe = _uemail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -263,8 +422,8 @@ with tab_watchlist:
                     st.rerun()
 
     if watched:
-        header = st.columns([2, 1.2, 1.2, 1.2, 1, 1])
-        for col, label in zip(header, ["名称/代码", "最新价", "涨跌额", "涨跌幅", "", ""]):
+        header = st.columns([2, 1.2, 1.2, 1.2, 0.6])
+        for col, label in zip(header, ["名称/代码", "最新价", "涨跌额", "涨跌幅", ""]):
             col.markdown(f"**{label}**")
 
         for item in watched:
@@ -274,8 +433,12 @@ with tab_watchlist:
             except Exception:
                 wspot = {}
 
-            wc1, wc2, wc3, wc4, wc5, wc6 = st.columns([2, 1.2, 1.2, 1.2, 1, 1])
-            wc1.write(f"**{item['name']}**（{item['symbol']}）")
+            wc1, wc2, wc3, wc4, wc5 = st.columns([2, 1.2, 1.2, 1.2, 0.6])
+            if wc1.button(f"{item['name']}（{item['symbol']}）", key=f"wl_open_{item['symbol']}"):
+                st.session_state["_detail_symbol"] = item["symbol"]
+                st.session_state["_detail_market"] = item_market
+                st.session_state["_detail_name"] = item["name"]
+                st.rerun()
             if wspot and wspot.get("最新价"):
                 wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
                 wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
@@ -287,14 +450,8 @@ with tab_watchlist:
                 wc2.write("—")
                 wc3.write("—")
                 wc4.write("—")
-            if wc5.button("分析", key=f"wl_analyze_{item['symbol']}"):
-                st.session_state["_active_symbol"] = item["symbol"]
-                st.session_state["_active_market"] = item_market
-                st.session_state.pop("_analysis_cache", None)
-                st.info("已定位，切换到「新建分析」标签页查看结果。")
-            if wc6.button("移除", key=f"wl_remove_{item['symbol']}"):
-                remove_from_watchlist(_email, item["symbol"])
-                st.rerun()
+            if wc5.button("✕", key=f"wl_remove_{item['symbol']}"):
+                _confirm_delete_dialog(_email, item["symbol"], item["name"])
 
 with tab_analyze:
     market = st.radio("市场", ["A股", "港股", "美股"], horizontal=True, key="_market_select")
