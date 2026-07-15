@@ -197,7 +197,7 @@ with tab_analyze:
     placeholder = {"A股": "600519 / 贵州茅台", "港股": "00700（腾讯控股）", "美股": "AAPL（苹果）"}[market]
 
     if market_code != "A":
-        st.caption("港股/美股目前只支持直接输代码，暂不支持按名称搜索、财务摘要和新闻（后续再补）。")
+        st.caption("港股/美股目前只支持直接输代码，暂不支持按名称搜索；K线周期切换也暂时只有日K。")
 
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -273,29 +273,26 @@ with tab_analyze:
                     st.warning(f"实时快照获取失败（不影响后续分析）：{e}")
                     spot = {}
 
-            if active_market == "A":
-                with st.spinner("拉取财务数据..."):
-                    try:
-                        fin = get_financial_abstract(symbol)
-                    except Exception as e:
-                        st.warning(f"财务数据获取失败（不影响后续分析）：{e}")
-                        fin = None
+            with st.spinner("拉取财务数据..."):
+                try:
+                    fin = get_financial_abstract(symbol, market=active_market)
+                except Exception as e:
+                    st.warning(f"财务数据获取失败（不影响后续分析）：{e}")
+                    fin = None
 
-                with st.spinner("拉取相关新闻..."):
-                    try:
-                        stock_name = get_stock_name(symbol)
-                        news = get_stock_news(stock_name, limit=8)
-                    except Exception as e:
-                        st.warning(f"新闻获取失败（不影响后续分析）：{e}")
-                        news = None
+            with st.spinner("拉取相关新闻..."):
+                try:
+                    stock_name = get_stock_name(symbol) if active_market == "A" else spot.get("名称", symbol)
+                    news = get_stock_news(stock_name, limit=8)
+                except Exception as e:
+                    st.warning(f"新闻获取失败（不影响后续分析）：{e}")
+                    news = None
 
-                with st.spinner("拉取沪深300基准..."):
-                    try:
-                        benchmark = get_benchmark_history(start, end)
-                    except Exception:
-                        benchmark = None
-            else:
-                fin, news, benchmark = None, None, None
+            with st.spinner("拉取基准指数..."):
+                try:
+                    benchmark = get_benchmark_history(start, end, market=active_market)
+                except Exception:
+                    benchmark = None
 
             if hist is None or hist.empty:
                 st.error("没有获取到行情数据，检查一下股票代码是否正确。")
@@ -313,16 +310,12 @@ with tab_analyze:
             history_summary += "\n\n统计指标（本地计算，非AI生成）：" + "，".join(
                 f"{k}={v}" for k, v in stats.items()
             )
-            if active_market != "A":
-                financial_summary = "暂不支持（港股/美股财务数据接口还没接，仅先支持行情分析）"
-                news_summary = "暂不支持（港股/美股新闻源还没接）"
-            else:
-                financial_summary = fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
-                news_summary = (
-                    "\n".join(f"- {row['新闻标题']}：{row['新闻内容'][:100]}" for _, row in news.iterrows())
-                    if news is not None and not news.empty
-                    else "无相关新闻"
-                )
+            financial_summary = fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
+            news_summary = (
+                "\n".join(f"- {row['新闻标题']}：{row['新闻内容'][:100]}" for _, row in news.iterrows())
+                if news is not None and not news.empty
+                else "无相关新闻"
+            )
 
             with st.spinner("AI 正在交叉核实新闻与数据..."):
                 try:
@@ -409,19 +402,20 @@ with tab_analyze:
             for col, (label, value) in zip(cols, stats.items()):
                 col.metric(label, value)
 
+            benchmark_name = {"A": "沪深300", "HK": "恒生指数", "US": "标普500"}[active_market]
             chart_col1, chart_col2 = st.columns(2)
             with chart_col1:
                 st.markdown("**每日涨跌幅分布**")
                 st.plotly_chart(build_return_histogram(hist), use_container_width=True)
             with chart_col2:
-                if active_market != "A":
-                    st.markdown("**基准对比**")
-                    st.caption("港股/美股暂不支持基准指数对比。")
-                elif benchmark is not None and not benchmark.empty:
-                    st.markdown("**对比沪深300（起点=100）**")
-                    st.plotly_chart(build_benchmark_comparison(hist, benchmark), use_container_width=True)
+                if benchmark is not None and not benchmark.empty:
+                    st.markdown(f"**对比{benchmark_name}（起点=100）**")
+                    st.plotly_chart(
+                        build_benchmark_comparison(hist, benchmark, benchmark_name=benchmark_name),
+                        use_container_width=True,
+                    )
                 else:
-                    st.markdown("**对比沪深300**")
+                    st.markdown(f"**对比{benchmark_name}**")
                     st.caption("基准数据暂时获取不到，不影响其他分析。")
 
         st.subheader("财务摘要")

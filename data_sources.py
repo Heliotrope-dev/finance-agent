@@ -179,9 +179,7 @@ def _fetch_history_sina(symbol: str, start_date: str, end_date: str) -> pd.DataF
     return df[["日期", "开盘", "收盘", "最高", "最低", "成交量"]]
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def get_benchmark_history(start_date: str, end_date: str, index_code: str = "sh.000300") -> pd.DataFrame:
-    """基准指数历史收盘价，默认沪深300，用于跟个股走势对比。"""
+def _benchmark_history_a(start_date: str, end_date: str, index_code: str) -> pd.DataFrame:
     start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
     end = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
     with contextlib.redirect_stdout(io.StringIO()):
@@ -201,6 +199,24 @@ def get_benchmark_history(start_date: str, end_date: str, index_code: str = "sh.
     df["日期"] = pd.to_datetime(df["日期"])
     df["收盘"] = pd.to_numeric(df["收盘"])
     return df
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_benchmark_history(start_date: str, end_date: str, market: str = "A") -> pd.DataFrame:
+    """基准指数历史收盘价：A股用沪深300，港股用恒生指数，美股用标普500。"""
+    if market == "HK":
+        df = ak.stock_hk_index_daily_sina(symbol="HSI")
+        df = df.rename(columns={"date": "日期", "close": "收盘"})
+        df["日期"] = pd.to_datetime(df["日期"])
+        start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
+        return df[(df["日期"] >= start) & (df["日期"] <= end)][["日期", "收盘"]]
+    if market == "US":
+        df = ak.index_us_stock_sina(symbol=".INX")
+        df = df.rename(columns={"date": "日期", "close": "收盘"})
+        df["日期"] = pd.to_datetime(df["日期"])
+        start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
+        return df[(df["日期"] >= start) & (df["日期"] <= end)][["日期", "收盘"]]
+    return _benchmark_history_a(start_date, end_date, "sh.000300")
 
 
 def _fetch_history_hk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -328,8 +344,13 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def get_financial_abstract(symbol: str) -> pd.DataFrame:
-    """财务摘要指标。"""
+def get_financial_abstract(symbol: str, market: str = "A") -> pd.DataFrame:
+    """财务摘要指标。A股是东财"股票财务摘要"接口；港股/美股是东财对应的分析指标接口，
+    字段跟A股完全不是一回事（更细、列更多），直接原样返回给AI消化，不强行对齐格式。"""
+    if market == "HK":
+        return _with_retry(lambda: ak.stock_financial_hk_analysis_indicator_em(symbol=symbol, indicator="年度"))
+    if market == "US":
+        return _with_retry(lambda: ak.stock_financial_us_analysis_indicator_em(symbol=symbol, indicator="年报"))
     return _with_retry(lambda: ak.stock_financial_abstract(symbol=symbol))
 
 
