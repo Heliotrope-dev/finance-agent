@@ -384,7 +384,71 @@ if bcol.button("搜索", key="_quick_search_btn", use_container_width=True) and 
         st.session_state.pop("_analysis_cache", None)
         st.success(f"已定位到 {sym}（{ {'A':'A股','HK':'港股','US':'美股'}[detected] }），切换到「新建分析」标签页查看结果。")
 
-tab_watchlist, tab_analyze, tab_compare, tab_history = st.tabs(["自选股", "新建分析", "多股对比", "历史回看"])
+tab_market, tab_watchlist, tab_analyze, tab_compare, tab_history = st.tabs(
+    ["行情", "自选股", "新建分析", "多股对比", "历史回看"]
+)
+
+with tab_market:
+    mkt_pick = st.radio("市场", ["A股", "港股", "美股"], horizontal=True, key="_market_overview_pick")
+    mkt_code = {"A股": "A", "港股": "HK", "美股": "US"}[mkt_pick]
+
+    try:
+        idx_list = get_multi_index_snapshot(mkt_code)
+    except Exception:
+        idx_list = []
+
+    if idx_list:
+        idx_cols = st.columns(len(idx_list))
+        for col, idx in zip(idx_cols, idx_list):
+            color = "#e02020" if idx["涨跌"] >= 0 else "#22a06b"
+            with col:
+                st.markdown(
+                    f"<div style='background:#f8f8f8;border-radius:8px;padding:12px;text-align:center'>"
+                    f"<div style='font-size:0.8rem;color:#666'>{idx['名称']}</div>"
+                    f"<div style='font-size:1.3rem;font-weight:700;color:{color}'>{idx['最新']:,.2f}</div>"
+                    f"<div style='font-size:0.85rem;color:{color}'>{idx['涨跌']:+.2f} ({idx['涨跌幅']:+.2f}%)</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+    else:
+        st.caption("指数数据暂时获取不到。")
+
+    st.divider()
+
+    if mkt_code != "A":
+        st.caption(f"{mkt_pick}没有涨跌停限制制度，这块统计只适用于A股，暂不显示。")
+    else:
+        try:
+            breadth = get_market_breadth()
+        except Exception:
+            breadth = {}
+        if breadth:
+            bcols = st.columns(6)
+            for col, key in zip(bcols, ["上涨", "下跌", "涨停", "跌停", "平盘", "活跃度"]):
+                col.metric(key, breadth.get(key, "—"))
+            st.caption(f"统计时间：{breadth.get('统计日期', '未知')}（数据来自乐咕乐股网）")
+
+        st.divider()
+        up_col, down_col = st.columns(2)
+        show_n = 30 if st.session_state.get("_show_more_limit_pool") else 10
+        with up_col:
+            st.markdown("**涨停股池**")
+            try:
+                up_pool = get_limit_pool("up", show_n)
+                st.dataframe(up_pool, use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.caption(f"获取失败：{e}")
+        with down_col:
+            st.markdown("**跌停股池**")
+            try:
+                down_pool = get_limit_pool("down", show_n)
+                st.dataframe(down_pool, use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.caption(f"获取失败：{e}")
+        if not st.session_state.get("_show_more_limit_pool"):
+            if st.button("显示更多（前30）", key="_more_limit_pool"):
+                st.session_state["_show_more_limit_pool"] = True
+                st.rerun()
 
 with tab_watchlist:
     _email = st.session_state["user_email"]

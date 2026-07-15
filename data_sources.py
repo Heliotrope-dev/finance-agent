@@ -219,6 +219,72 @@ def get_benchmark_history(start_date: str, end_date: str, market: str = "A") -> 
     return _benchmark_history_a(start_date, end_date, "sh.000300")
 
 
+_MULTI_INDICES = {
+    "A": [("上证指数", "sh.000001"), ("深证成指", "sz.399001"), ("创业板指", "sz.399006")],
+    "HK": [("恒生指数", "HSI"), ("恒生科技", "HSTECH")],
+    "US": [("标普500", ".INX"), ("纳斯达克100", ".NDX"), ("道琼斯", ".DJI")],
+}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_multi_index_snapshot(market: str) -> list[dict]:
+    """给行情页顶部的指数卡片用：每个市场固定几个核心指数，各自最新值+涨跌。"""
+    results = []
+    for name, code in _MULTI_INDICES.get(market, []):
+        try:
+            if market == "A":
+                start = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+                end = datetime.now().strftime("%Y-%m-%d")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    bs.login()
+                    try:
+                        rs = bs.query_history_k_data_plus(code, "date,close", start_date=start, end_date=end, frequency="d")
+                        rows = []
+                        while rs.next():
+                            rows.append(rs.get_row_data())
+                    finally:
+                        bs.logout()
+                if len(rows) < 2:
+                    continue
+                last, prev = float(rows[-1][1]), float(rows[-2][1])
+            elif market == "HK":
+                df = ak.stock_hk_index_daily_sina(symbol=code)
+                if len(df) < 2:
+                    continue
+                last, prev = float(df.iloc[-1]["close"]), float(df.iloc[-2]["close"])
+            else:
+                df = ak.index_us_stock_sina(symbol=code)
+                if len(df) < 2:
+                    continue
+                last, prev = float(df.iloc[-1]["close"]), float(df.iloc[-2]["close"])
+            change = last - prev
+            pct = change / prev * 100 if prev else 0
+            results.append({"名称": name, "最新": last, "涨跌": change, "涨跌幅": pct})
+        except Exception:
+            continue
+    return results
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_market_breadth() -> dict:
+    """A股大盘涨跌家数统计（上涨/下跌/涨停/跌停/活跃度）。只有A股有这个概念。"""
+    df = _with_retry(ak.stock_market_activity_legu)
+    return dict(zip(df["item"], df["value"]))
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_limit_pool(kind: str = "up", limit: int = 10) -> pd.DataFrame:
+    """涨停股池(kind='up')/跌停股池(kind='down')，按涨跌幅排序取前 limit 条。只有A股有这个概念。"""
+    date_str = datetime.now().strftime("%Y%m%d")
+    fn = ak.stock_zt_pool_em if kind == "up" else ak.stock_zt_pool_dtgc_em
+    df = _with_retry(lambda: fn(date=date_str))
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.sort_values("涨跌幅", ascending=(kind != "up")).head(limit)
+    keep = [c for c in ("代码", "名称", "涨跌幅", "最新价", "换手率") if c in df.columns]
+    return df[keep].reset_index(drop=True)
+
+
 def _fetch_history_hk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """港股日线，新浪源。stock_hk_daily 不接受日期范围参数，返回全部历史，本地按日期筛。"""
     try:
