@@ -221,7 +221,7 @@ def get_benchmark_history(start_date: str, end_date: str, market: str = "A") -> 
 
 _MULTI_INDICES = {
     "A": [("上证指数", "sh.000001"), ("深证成指", "sz.399001"), ("创业板指", "sz.399006")],
-    "HK": [("恒生指数", "HSI"), ("恒生科技", "HSTECH")],
+    "HK": [("恒生指数", "HSI"), ("恒生科技", "HSTECH"), ("国企指数", "HSCEI")],
     "US": [("标普500", ".INX"), ("纳斯达克100", ".NDX"), ("道琼斯", ".DJI")],
 }
 
