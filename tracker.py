@@ -38,7 +38,59 @@ def init_db():
         cols = [r[1] for r in c.execute("PRAGMA table_info(analyses)").fetchall()]
         if "email" not in cols:
             c.execute("ALTER TABLE analyses ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                added_at TEXT NOT NULL,
+                UNIQUE(email, symbol)
+            )
+            """
+        )
         c.commit()
+
+
+def add_to_watchlist(email: str, symbol: str, name: str) -> bool:
+    init_db()
+    with closing(_conn()) as c:
+        try:
+            c.execute(
+                "INSERT INTO watchlist (email, symbol, name, added_at) VALUES (?, ?, ?, ?)",
+                (email, symbol, name, datetime.now(timezone.utc).isoformat()),
+            )
+            c.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False  # 已经在自选里了，不重复加
+
+
+def remove_from_watchlist(email: str, symbol: str):
+    with closing(_conn()) as c:
+        c.execute("DELETE FROM watchlist WHERE email = ? AND symbol = ?", (email, symbol))
+        c.commit()
+
+
+def is_in_watchlist(email: str, symbol: str) -> bool:
+    init_db()
+    with closing(_conn()) as c:
+        row = c.execute(
+            "SELECT 1 FROM watchlist WHERE email = ? AND symbol = ?", (email, symbol)
+        ).fetchone()
+        return row is not None
+
+
+def get_watchlist(email: str) -> list[dict]:
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM watchlist WHERE email = ? ORDER BY added_at DESC", (email,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def log_analysis(email: str, symbol: str, price_at_analysis: float, analysis_text: str) -> int:

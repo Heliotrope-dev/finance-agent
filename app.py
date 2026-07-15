@@ -17,7 +17,10 @@ from data_sources import (
     check_stock_valid,
 )
 from analysis import cross_validate, summarize_financials
-from tracker import log_analysis, get_history, get_due_for_review, record_review
+from tracker import (
+    log_analysis, get_history, get_due_for_review, record_review,
+    add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
+)
 from charts import build_candlestick, compute_stats, build_return_histogram, build_benchmark_comparison
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
@@ -150,7 +153,39 @@ with st.sidebar:
 st.title("科学理财 Agent")
 st.caption("行情数据 + 财务数据 + 新闻资讯，AI 交叉核实后呈现依据链 —— 不直接给买卖建议，判断权始终在你手里。")
 
-tab_analyze, tab_history = st.tabs(["新建分析", "历史回看"])
+tab_watchlist, tab_analyze, tab_history = st.tabs(["自选股", "新建分析", "历史回看"])
+
+with tab_watchlist:
+    _email = st.session_state["user_email"]
+    watched = get_watchlist(_email)
+    if not watched:
+        st.write("还没有关注任何股票——去「新建分析」分析一只股票，结果页顶部能一键加入自选。")
+    else:
+        for item in watched:
+            wc1, wc2, wc3, wc4 = st.columns([2, 2, 1, 1])
+            try:
+                wspot = get_stock_realtime(item["symbol"])
+            except Exception:
+                wspot = {}
+            wc1.write(f"**{item['name']}**（{item['symbol']}）")
+            if wspot and wspot.get("最新价"):
+                wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
+                wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
+                color = "red" if wchange >= 0 else "green"
+                wc2.markdown(
+                    f"{wspot['最新价']:.2f} "
+                    f"<span style='color:{color}'>{wchange:+.2f} ({wchange_pct:+.2f}%)</span>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                wc2.write("行情获取失败")
+            if wc3.button("分析", key=f"wl_analyze_{item['symbol']}"):
+                st.session_state["_active_symbol"] = item["symbol"]
+                st.session_state.pop("_analysis_cache", None)
+                st.info("已定位到该股票，切换到「新建分析」标签页查看结果。")
+            if wc4.button("移除", key=f"wl_remove_{item['symbol']}"):
+                remove_from_watchlist(_email, item["symbol"])
+                st.rerun()
 
 with tab_analyze:
     col1, col2 = st.columns([2, 1])
@@ -298,7 +333,7 @@ with tab_analyze:
         if spot and spot.get("最新价"):
             change = spot["最新价"] - spot["昨收"]
             change_pct = change / spot["昨收"] * 100 if spot["昨收"] else 0
-            qcol1, qcol2, qcol3, qcol4 = st.columns([2, 1, 1, 1])
+            qcol1, qcol2, qcol3, qcol4, qcol5 = st.columns([2, 1, 1, 1, 1])
             qcol1.metric(
                 spot.get("名称", symbol),
                 f"{spot['最新价']:.2f}",
@@ -307,6 +342,17 @@ with tab_analyze:
             qcol2.metric("今开", f"{spot.get('今开', 0):.2f}")
             qcol3.metric("最高", f"{spot.get('最高', 0):.2f}")
             qcol4.metric("最低", f"{spot.get('最低', 0):.2f}")
+            with qcol5:
+                st.write("")
+                _watched_now = is_in_watchlist(st.session_state["user_email"], symbol)
+                if _watched_now:
+                    if st.button("移除自选", key="wl_toggle"):
+                        remove_from_watchlist(st.session_state["user_email"], symbol)
+                        st.rerun()
+                else:
+                    if st.button("加入自选", key="wl_toggle"):
+                        add_to_watchlist(st.session_state["user_email"], symbol, spot.get("名称", symbol))
+                        st.rerun()
             st.caption(f"更新时间：{spot.get('更新时间', '未知')}（新浪实时行情，非收盘价）")
 
         st.divider()
