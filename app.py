@@ -29,12 +29,14 @@ from data_sources import (
     get_us_famous_movers,
     resolve_symbol_by_name,
 )
-from analysis import cross_validate, summarize_financials, summarize_news, summarize_benchmark
+from analysis import cross_validate, summarize_financials, summarize_news, summarize_benchmark, extract_verdict
 from tracker import (
-    log_analysis,
+    log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
     add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
 )
-from charts import build_candlestick, build_intraday_line, compute_stats, build_benchmark_comparison
+from charts import (
+    build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, build_benchmark_comparison,
+)
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
     _invalidate_token, _hash_pw, _user_exists,
@@ -210,9 +212,15 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                         if news is not None and not news.empty else "无相关新闻"
                     )
 
-                    ai_text = cross_validate(symbol, history_summary, financial_summary, news_summary)
+                    technical_summary = compute_technical_signal(hist)
+                    ai_text = cross_validate(symbol, history_summary, financial_summary, news_summary, technical_summary)
                     current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
-                    log_analysis(st.session_state["user_email"], symbol, float(current_price), ai_text)
+                    verdict = extract_verdict(ai_text)
+                    stock_name = spot.get("名称", symbol) if spot else symbol
+                    log_analysis(
+                        st.session_state["user_email"], symbol, float(current_price), ai_text,
+                        verdict=verdict, market=market, name=stock_name,
+                    )
                     st.session_state[mod_key] = {"ai_text": ai_text}
             except Exception as e:
                 st.error(f"分析失败：{e}")
@@ -515,6 +523,42 @@ else:
                 st.session_state["logged_in"] = False
                 st.session_state.pop("user_email", None)
                 st.rerun()
+
+            st.divider()
+            with st.expander("历史回看"):
+                st.caption("每次点开个股「数据分析」时会记录当时价格和方向倾向，"
+                           "满7天后自动补上现在的价格做对照。仅供参考，不是投资建议，"
+                           "过去的方向一致率不代表未来表现。")
+                due = get_due_for_review(_uemail, min_age_days=7)
+                for item in due:
+                    try:
+                        spot = get_stock_realtime(item["symbol"], market=item.get("market", "A"))
+                        if spot and spot.get("最新价"):
+                            record_review(item["id"], float(spot["最新价"]))
+                    except Exception:
+                        continue
+
+                stats = get_accuracy_stats(_uemail)
+                if stats["总数"] > 0:
+                    st.metric(
+                        "方向一致率", f"{stats['一致率']:.0f}%",
+                        help=f"过去 {stats['总数']} 次有方向判断的分析里，{stats['一致数']} 次跟事后价格走势一致",
+                    )
+                else:
+                    st.caption("还没有满7天可回看的记录。")
+
+                history = get_history(_uemail, limit=10)
+                for h in history:
+                    verdict_color = {"偏多": "#e02020", "偏空": "#22a06b", "中性": "#888"}.get(h["verdict"], "#888")
+                    line = f"{h.get('name') or h['symbol']}（{h['symbol']}） {h['created_at'][:10]}"
+                    st.markdown(
+                        f"<div style='font-size:0.78rem;margin:6px 0'>{line}　"
+                        f"<span style='color:{verdict_color}'>{h['verdict']}</span>　"
+                        f"当时{h['price_at_analysis']:.2f}"
+                        + (f" → 现在{h['review_price']:.2f}" if h.get("review_price") else "（未到7天）")
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
 
         st.markdown(
             """

@@ -1,8 +1,9 @@
 """追踪层 —— 记录每次分析发生时的价格，方便日后回看走势对照。
 
-刻意不做"预测准确率"打分：analysis.py 的输出是"依据链"而非"买卖信号"，
-强行给它打对错分数既不严谨也会变成变相荐股。这里只做客观记录，
-"当时分析怎么说、后来价格怎么走"，让用户自己判断，回看页面展示原始对照。
+这里存了AI输出里解析出的"方向倾向"（偏多/偏空/中性）跟事后价格实际涨跌方向做
+比对，算一个"方向一致率"。用户明确要这个功能，知道风险（可能被解读成"AI荐股
+胜率"）后仍然选择要，所以做了——但界面上要清楚标注这不是投资建议、不保证未来
+表现，只是历史记录的客观统计，避免误导。
 """
 
 import sqlite3
@@ -26,9 +27,12 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL DEFAULT '',
                 symbol TEXT NOT NULL,
+                market TEXT NOT NULL DEFAULT 'A',
+                name TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 price_at_analysis REAL,
                 analysis_text TEXT NOT NULL,
+                verdict TEXT NOT NULL DEFAULT '中性',
                 review_price REAL,
                 review_at TEXT
             )
@@ -38,6 +42,12 @@ def init_db():
         cols = [r[1] for r in c.execute("PRAGMA table_info(analyses)").fetchall()]
         if "email" not in cols:
             c.execute("ALTER TABLE analyses ADD COLUMN email TEXT NOT NULL DEFAULT ''")
+        if "verdict" not in cols:
+            c.execute("ALTER TABLE analyses ADD COLUMN verdict TEXT NOT NULL DEFAULT '中性'")
+        if "market" not in cols:
+            c.execute("ALTER TABLE analyses ADD COLUMN market TEXT NOT NULL DEFAULT 'A'")
+        if "name" not in cols:
+            c.execute("ALTER TABLE analyses ADD COLUMN name TEXT NOT NULL DEFAULT ''")
 
         c.execute(
             """
@@ -98,13 +108,16 @@ def get_watchlist(email: str) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def log_analysis(email: str, symbol: str, price_at_analysis: float, analysis_text: str) -> int:
+def log_analysis(
+    email: str, symbol: str, price_at_analysis: float, analysis_text: str,
+    verdict: str = "中性", market: str = "A", name: str = "",
+) -> int:
     init_db()
     with closing(_conn()) as c:
         cur = c.execute(
-            "INSERT INTO analyses (email, symbol, created_at, price_at_analysis, analysis_text) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (email, symbol, datetime.now(timezone.utc).isoformat(), price_at_analysis, analysis_text),
+            "INSERT INTO analyses (email, symbol, market, name, created_at, price_at_analysis, analysis_text, verdict) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (email, symbol, market, name, datetime.now(timezone.utc).isoformat(), price_at_analysis, analysis_text, verdict),
         )
         c.commit()
         return cur.lastrowid
@@ -146,3 +159,28 @@ def record_review(analysis_id: int, review_price: float):
             (review_price, datetime.now(timezone.utc).isoformat(), analysis_id),
         )
         c.commit()
+
+
+def get_accuracy_stats(email: str) -> dict:
+    """方向倾向 vs 实际价格走势的一致率——只统计已经回访过（review_price不为空）
+    且verdict不是"中性"的记录（中性不算方向判断，不参与统计）。
+
+    这不是"AI荐股胜率"，是历史方向标签和事后价格的客观比对，页面上展示时
+    必须带"不代表未来表现"的说明，避免被理解成投资建议或收益承诺。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM analyses WHERE email = ? AND review_price IS NOT NULL AND verdict != '中性'",
+            (email,),
+        ).fetchall()
+    rows = [dict(r) for r in rows]
+    if not rows:
+        return {"总数": 0, "一致数": 0, "一致率": None}
+    match = 0
+    for r in rows:
+        went_up = r["review_price"] > r["price_at_analysis"]
+        if (r["verdict"] == "偏多" and went_up) or (r["verdict"] == "偏空" and not went_up):
+            match += 1
+    return {"总数": len(rows), "一致数": match, "一致率": match / len(rows) * 100}

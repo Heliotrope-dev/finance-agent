@@ -206,6 +206,42 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def compute_technical_signal(hist: pd.DataFrame) -> str:
+    """本地算好的技术面信号摘要，喂给AI做交叉验证用——逼AI去对照这几条硬信号，
+    而不是自由发挥写一段"技术面尚可"这种空话。均线/MACD都是本地pandas算的，
+    跟AI的判断是两条独立证据链，AI只是被要求去核对这几条信号跟消息面是否一致。
+    """
+    close = hist["收盘"].astype(float)
+    if len(close) < 20:
+        return "数据不足20天，均线信号暂不可靠。"
+    ma5 = close.rolling(5).mean()
+    ma20 = close.rolling(20).mean()
+    macd = _compute_macd(close)
+
+    ma_cross = "无明显交叉"
+    if len(ma5) >= 2:
+        prev_diff = ma5.iloc[-2] - ma20.iloc[-2]
+        curr_diff = ma5.iloc[-1] - ma20.iloc[-1]
+        if prev_diff <= 0 < curr_diff:
+            ma_cross = "MA5上穿MA20（金叉，短期转强信号）"
+        elif prev_diff >= 0 > curr_diff:
+            ma_cross = "MA5下穿MA20（死叉，短期转弱信号）"
+        elif curr_diff > 0:
+            ma_cross = "MA5位于MA20上方（多头排列）"
+        else:
+            ma_cross = "MA5位于MA20下方（空头排列）"
+
+    macd_bar = macd["MACD"].iloc[-1]
+    macd_state = f"MACD柱{'为正' if macd_bar >= 0 else '为负'}（{'多头动能' if macd_bar >= 0 else '空头动能'}）"
+
+    price_vs_ma20 = "高于" if close.iloc[-1] >= ma20.iloc[-1] else "低于"
+
+    return (
+        f"{ma_cross}；{macd_state}；当前价格{price_vs_ma20}MA20"
+        f"（现价{close.iloc[-1]:.2f}，MA20为{ma20.iloc[-1]:.2f}）。"
+    )
+
+
 def compute_stats(hist: pd.DataFrame) -> dict:
     """真正的统计计算：区间收益率、年化波动率、最大回撤、夏普比率(简化版)。"""
     close = hist["收盘"].astype(float)
