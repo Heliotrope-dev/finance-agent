@@ -836,6 +836,34 @@ def _futu_ensure_subscribed(ctx, code: str) -> bool:
     return True
 
 
+def _futu_last_day_intraday(ctx, code: str) -> pd.DataFrame:
+    """今日没有分时数据时（周末/节假日/还没开盘）的兜底——用历史1分钟K线接口
+    （不需要订阅），取最近一个交易日的分钟线当分时用。跟只剩日K比，好歹还是
+    分时的形状。这条路径本来就有超时保护，卡了也就是这次兜底没拿到，不影响别的。
+    """
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    result = _run_with_timeout(
+        lambda: ctx.request_history_kline(
+            code, start=start, end=end, ktype=ft.KLType.K_1M, autype=ft.AuType.QFQ, max_count=1000,
+        ),
+        timeout=8, default=None,
+    )
+    if result is None:
+        return pd.DataFrame()
+    ret, data, _ = result
+    if ret != ft.RET_OK or data is None or data.empty:
+        return pd.DataFrame()
+    data = data.rename(columns={"time_key": "时间", "close": "价格", "volume": "成交量"})
+    data["时间"] = pd.to_datetime(data["时间"])
+    data["日期_only"] = data["时间"].dt.date
+    last_date = data["日期_only"].max()
+    data = data[data["日期_only"] == last_date]
+    data["价格"] = data["价格"].astype(float)
+    data["成交量"] = data["成交量"].astype(float)
+    return data[["时间", "价格", "成交量"]]
+
+
 def _futu_intraday_by_code(code: str) -> pd.DataFrame:
     """真分时数据的公共取数逻辑，个股和指数都走这条路，区别只在 code 怎么拼。"""
     ctx = _get_futu_ctx()
@@ -844,11 +872,13 @@ def _futu_intraday_by_code(code: str) -> pd.DataFrame:
     if not _futu_ensure_subscribed(ctx, code):
         return pd.DataFrame()
     result = _run_with_timeout(lambda: ctx.get_rt_data(code), timeout=8, default=None)
-    if result is None:
-        return pd.DataFrame()
-    ret, data = result
-    if ret != ft.RET_OK or data is None or data.empty:
-        return pd.DataFrame()
+    data = None
+    if result is not None:
+        ret, raw = result
+        if ret == ft.RET_OK and raw is not None and not raw.empty:
+            data = raw
+    if data is None:
+        return _futu_last_day_intraday(ctx, code)
     # is_blank=True 是午间休市那种没有真实成交的占位行（价格是拿上一个真实价格填的），
     # 保留会在图上画出一段假的平线——这些行本来就不该出现在真分时曲线里。
     if "is_blank" in data.columns:
@@ -858,19 +888,29 @@ def _futu_intraday_by_code(code: str) -> pd.DataFrame:
     df["价格"] = df["价格"].astype(float)
     df["成交量"] = df["成交量"].astype(float)
     df = df[df["价格"] > 0]
+    if df.empty:
+        return _futu_last_day_intraday(ctx, code)
     return df[["时间", "价格", "成交量"]]
 
 
 def _sina_minute_intraday(sina_code: str) -> pd.DataFrame:
-    """新浪分钟线的公共取数逻辑，个股和指数都走这条路，区别只在代码格式怎么拼。"""
+    """新浪分钟线的公共取数逻辑，个股和指数都走这条路，区别只在代码格式怎么拼。
+
+    今天没有分时数据（周末/节假日/还没开盘）就退到接口返回的历史里最近一个
+    交易日的分时——跟只剩日K比，好歹还是分时的形状，视觉上更一致。
+    """
     df = ak.stock_zh_a_minute(symbol=sina_code, period="1")
     if df is None or df.empty:
         return pd.DataFrame()
     today = datetime.now().strftime("%Y-%m-%d")
-    df = df[df["day"].str.startswith(today)]
-    if df.empty:
+    todays = df[df["day"].str.startswith(today)]
+    if todays.empty:
+        date_only = df["day"].str[:10]
+        last_date = date_only.max()
+        todays = df[date_only == last_date]
+    if todays.empty:
         return pd.DataFrame()
-    df = df.rename(columns={"day": "时间", "close": "价格", "volume": "成交量"})
+    df = todays.rename(columns={"day": "时间", "close": "价格", "volume": "成交量"})
     df["时间"] = pd.to_datetime(df["时间"])
     df["价格"] = df["价格"].astype(float)
     df["成交量"] = df["成交量"].astype(float)
