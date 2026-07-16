@@ -19,6 +19,103 @@ def _compute_macd(close: pd.Series) -> pd.DataFrame:
     return pd.DataFrame({"DIF": dif, "DEA": dea, "MACD": hist_bar})
 
 
+def _session_minutes(market: str) -> list[str]:
+    """一个交易日按分钟展开的时间框架，用来给分时图垫底——同花顺分时图的横轴
+    从开盘一直画到收盘，不是画到"你几点点进来看"；港股还要跳过午间休市那一段，
+    不能在图上空出一大截白板。"""
+    if market == "A":
+        morning = pd.date_range("09:30", "11:30", freq="1min").strftime("%H:%M").tolist()
+        afternoon = pd.date_range("13:00", "15:00", freq="1min").strftime("%H:%M").tolist()
+        return morning + afternoon
+    if market == "HK":
+        morning = pd.date_range("09:30", "12:00", freq="1min").strftime("%H:%M").tolist()
+        afternoon = pd.date_range("13:00", "16:00", freq="1min").strftime("%H:%M").tolist()
+        return morning + afternoon
+    return pd.date_range("09:30", "16:00", freq="1min").strftime("%H:%M").tolist()
+
+
+def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None, market: str = "HK") -> go.Figure:
+    """真正的分时走势图——价格折线 + 均价线 + 成交量，跟K线柱状图是两种图。
+
+    intraday 需要有 时间/价格/成交量 列。参照同花顺分时图的习惯：
+    - 横轴铺满整个交易时段（含港股午休跳过），不是只画到当前实际拿到数据的那一分钟
+    - Y轴按价格实际波动范围缩放，不是从0起——不然涨跌趋势在图上会被压成一条直线
+    - 加一条均价线（成交量加权累计均价，同花顺"均价"字段的算法）
+    - 价格线/填充色跟着涨跌变红绿（相对昨收），不是死一种颜色
+    - 成交量柱子逐笔按涨跌上色（这一笔比上一笔涨→红，跌→绿），不是统一灰色
+    """
+    df = intraday.copy()
+    df["hm"] = df["时间"].dt.strftime("%H:%M")
+    df = df.drop_duplicates(subset="hm", keep="last")
+
+    last_price = float(df["价格"].iloc[-1])
+    base = prev_close if prev_close else float(df["价格"].iloc[0])
+    up = last_price >= base
+    line_color = "#e02020" if up else "#22a06b"
+    fill_color = "rgba(224,32,32,0.08)" if up else "rgba(34,160,107,0.08)"
+
+    cum_amount = (df["价格"] * df["成交量"]).cumsum()
+    cum_volume = df["成交量"].cumsum().replace(0, pd.NA)
+    df["均价"] = (cum_amount / cum_volume).ffill().fillna(df["价格"])
+
+    prev_tick = df["价格"].shift(1).fillna(base)
+    df["量色"] = ["#e02020" if p >= pt else "#22a06b" for p, pt in zip(df["价格"], prev_tick)]
+
+    # 铺满整个交易时段的时间框架，实际数据按 hm（HH:MM）左连接上去——还没走到的
+    # 分钟自然是空值，图上就是留白，而不是把横轴压缩到"现在"就截断。
+    session = pd.DataFrame({"hm": _session_minutes(market)})
+    merged = session.merge(df[["hm", "价格", "均价", "成交量", "量色"]], on="hm", how="left")
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.7, 0.3], vertical_spacing=0.08,
+        subplot_titles=("", "成交量"),
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=merged["hm"], y=merged["价格"], mode="lines", connectgaps=False,
+            line=dict(width=1.5, color=line_color), name="价格",
+            fill="tozeroy", fillcolor=fill_color,
+        ),
+        row=1, col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=merged["hm"], y=merged["均价"], mode="lines", connectgaps=False,
+            line=dict(width=1, color="#f59e0b"), name="均价",
+        ),
+        row=1, col=1,
+    )
+    if prev_close:
+        fig.add_hline(y=prev_close, line=dict(width=1, color="#999", dash="dash"), row=1, col=1)
+
+    price_min = min(df["价格"].min(), prev_close or df["价格"].min())
+    price_max = max(df["价格"].max(), prev_close or df["价格"].max())
+    pad = max((price_max - price_min) * 0.15, price_max * 0.005)
+    fig.update_yaxes(range=[price_min - pad, price_max + pad], side="right", row=1, col=1)
+
+    # 成交量按同花顺习惯换算成"万"为单位显示，柱子细一点、轴放右边，
+    # hover 直接显示"量: X万"，不是原始股数那种一长串数字。
+    vol_wan = merged["成交量"] / 10000
+    fig.add_trace(
+        go.Bar(
+            x=merged["hm"], y=vol_wan, marker_color=merged["量色"], name="成交量",
+            hovertemplate="%{x}<br>量: %{y:.2f}万<extra></extra>",
+        ),
+        row=2, col=1,
+    )
+    fig.update_yaxes(side="right", ticksuffix="万", row=2, col=1)
+    fig.update_xaxes(type="category", nticks=8, row=1, col=1)
+    fig.update_xaxes(type="category", nticks=8, row=2, col=1)
+    fig.update_layout(
+        height=480,
+        margin=dict(l=10, r=10, t=20, b=10),
+        showlegend=False,
+        bargap=0.15,
+    )
+    return fig
+
+
 def build_candlestick(hist: pd.DataFrame) -> go.Figure:
     """K线图 + MA5/MA20 + 成交量 + MACD，三个子图。hist 需要有 日期/开盘/收盘/最高/最低/成交量 列。"""
     df = hist.copy()
@@ -28,7 +125,7 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
 
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True,
-        row_heights=[0.55, 0.18, 0.27], vertical_spacing=0.03,
+        row_heights=[0.5, 0.2, 0.3], vertical_spacing=0.09,
         subplot_titles=("", "成交量", "MACD"),
     )
 
@@ -84,11 +181,12 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
     )
 
     fig.update_layout(
-        height=680,
+        height=820,
         margin=dict(l=10, r=10, t=30, b=10),
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
+    fig.update_yaxes(title_standoff=8)
     return fig
 
 

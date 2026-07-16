@@ -1,5 +1,6 @@
 """Invest Agent —— 行情+财务+新闻交叉验证，不做黑箱荐股。"""
 
+import json
 import os
 import re
 import streamlit as st
@@ -7,6 +8,13 @@ import streamlit.components.v1 as _cv1
 from datetime import datetime, timedelta
 
 from data_sources import (
+    _MULTI_INDICES,
+    get_stock_kline_futu,
+    get_stock_intraday_futu,
+    get_stock_intraday_a,
+    get_index_history,
+    get_index_intraday_futu,
+    get_index_intraday_a,
     get_stock_history,
     get_stock_realtime,
     get_financial_abstract,
@@ -18,13 +26,14 @@ from data_sources import (
     get_limit_pool,
     get_hk_famous_movers,
     get_us_famous_movers,
+    resolve_symbol_by_name,
 )
 from analysis import cross_validate, summarize_financials, summarize_news, summarize_benchmark
 from tracker import (
     log_analysis,
     add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
 )
-from charts import build_candlestick, compute_stats, build_benchmark_comparison
+from charts import build_candlestick, build_intraday_line, compute_stats, build_benchmark_comparison
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
     _invalidate_token, _hash_pw, _user_exists,
@@ -232,7 +241,42 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
         st.markdown(data["ai_text"])
 
 
+def _inject_auto_refresh(seconds: int, key: str):
+    """定时自动刷新——分时价格/图表这些字段缓存TTL就20-30秒，光靠用户手动交互
+    触发rerun的话，数字看着就像"点进来那一刻定住了"。用JS定时器点一个隐藏按钮
+    触发rerun，配合后端缓存TTL自然过期重新拉数据，效果上数字就会自己动起来。
+    """
+    marker = f"自动刷新-{key}"
+    if st.button(marker, key=f"_autorefresh_trigger_{key}"):
+        pass
+    _cv1.html(
+        f"""
+        <script>
+        (function() {{
+            function bind(attemptsLeft) {{
+                const doc = window.parent.document;
+                const buttons = Array.from(doc.querySelectorAll('button'));
+                const hiddenBtn = buttons.find(function(b) {{ return b.innerText.trim() === "{marker}"; }});
+                if (hiddenBtn) {{
+                    const wrap = hiddenBtn.closest('[data-testid="stButton"]');
+                    if (wrap) wrap.style.display = 'none';
+                    const flagKey = "_autorefresh_timer_{key}";
+                    if (window.parent[flagKey]) {{ clearInterval(window.parent[flagKey]); }}
+                    window.parent[flagKey] = setInterval(function() {{ hiddenBtn.click(); }}, {seconds * 1000});
+                }} else if (attemptsLeft > 0) {{
+                    setTimeout(function() {{ bind(attemptsLeft - 1); }}, 200);
+                }}
+            }}
+            bind(15);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def _render_stock_detail(symbol: str, market: str, name: str):
+    _inject_auto_refresh(20, f"stock_{symbol}_{market}")
     if st.button("返回自选股"):
         for k in ("_detail_symbol", "_detail_market", "_detail_name", "_detail_module"):
             st.session_state.pop(k, None)
@@ -282,6 +326,8 @@ def _render_stock_detail(symbol: str, market: str, name: str):
             f"</div>",
             unsafe_allow_html=True,
         )
+        _src = "Futu 实时" if spot.get("数据源") == "Futu实时" else "延迟行情"
+        st.caption(f"{_src} · 更新于 {spot.get('更新时间', '-')}")
         hcol1, hcol2, hcol3 = st.columns(3)
         hcol1.metric("最高", f"{spot.get('最高', 0):.2f}")
         hcol2.metric("最低", f"{spot.get('最低', 0):.2f}")
@@ -298,9 +344,21 @@ def _render_stock_detail(symbol: str, market: str, name: str):
                 st.rerun()
 
     st.divider()
-    if market == "A":
-        period_options = {"分时K（今日）": ("5", 1), "日K": ("d", 90), "周K": ("w", 730), "月K": ("m", 1825)}
-        period_label = st.radio("K线周期", list(period_options.keys()), horizontal=True, key="_detail_kline_period")
+    period_labels = ["分时K（今日）", "日K", "周K", "月K"]
+    period_label = st.radio("K线周期", period_labels, index=0, horizontal=True, key="_detail_kline_period")
+
+    if market == "A" and period_label == "分时K（今日）":
+        intraday = get_stock_intraday_a(symbol)
+        if intraday.empty:
+            st.caption("今天的分时数据暂时取不到，展示日K替代。")
+            if hist is not None and not hist.empty:
+                st.plotly_chart(build_candlestick(hist), use_container_width=True)
+        else:
+            st.plotly_chart(
+                build_intraday_line(intraday, spot.get("昨收") if spot else None, market), use_container_width=True,
+            )
+    elif market == "A":
+        period_options = {"日K": ("d", 90), "周K": ("w", 730), "月K": ("m", 1825)}
         freq, days_back = period_options[period_label]
         c_end = datetime.now().strftime("%Y%m%d")
         c_start = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
@@ -308,10 +366,25 @@ def _render_stock_detail(symbol: str, market: str, name: str):
             chart_hist = get_stock_history(symbol, c_start, c_end, frequency=freq, market=market)
         except Exception:
             chart_hist = hist
+        if chart_hist is not None and not chart_hist.empty:
+            st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+    elif period_label == "分时K（今日）":
+        intraday = get_stock_intraday_futu(symbol, market)
+        if intraday.empty:
+            st.caption("分时数据需要本地 Futu OpenD 连接、且当前有实时推送，暂时展示日K替代。")
+            if hist is not None and not hist.empty:
+                st.plotly_chart(build_candlestick(hist), use_container_width=True)
+        else:
+            st.plotly_chart(
+                build_intraday_line(intraday, spot.get("昨收") if spot else None, market), use_container_width=True,
+            )
     else:
-        chart_hist = hist
-    if chart_hist is not None and not chart_hist.empty:
-        st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+        chart_hist = get_stock_kline_futu(symbol, market, period_label)
+        if chart_hist.empty:
+            chart_hist = hist
+            st.caption("该周期需要本地 Futu OpenD 连接，当前展示日K替代。")
+        if chart_hist is not None and not chart_hist.empty:
+            st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
 
     st.divider()
     st.subheader("深入分析")
@@ -327,6 +400,69 @@ def _render_stock_detail(symbol: str, market: str, name: str):
             _render_module(active_module, symbol, market, hist, spot)
 
 
+def _render_index_detail(name: str, code: str, market: str):
+    _inject_auto_refresh(20, f"index_{code}_{market}")
+    if st.button("返回", key="idx_back"):
+        for k in ("_index_detail_code", "_index_detail_market", "_index_detail_name"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
+    st.markdown(
+        f"""
+        <div style='background:#e02020;margin:-1rem -1rem 0 -1rem;padding:14px 24px'>
+            <div style='color:#fff;font-size:1.2rem;font-weight:700'>{name}</div>
+            <div style='color:#fff;font-size:0.85rem;opacity:0.85'>{code} · {market}指数</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    try:
+        idx_snap = next((i for i in get_multi_index_snapshot(market) if i["名称"] == name), None)
+    except Exception:
+        idx_snap = None
+
+    if idx_snap:
+        color = "#e02020" if idx_snap["涨跌"] >= 0 else "#22a06b"
+        st.markdown(
+            f"<div style='margin:12px 0'>"
+            f"<span style='font-size:2rem;font-weight:700;color:{color}'>{idx_snap['最新']:,.2f}</span>&nbsp;&nbsp;"
+            f"<span style='font-size:1.1rem;color:{color}'>{idx_snap['涨跌']:+.2f} ({idx_snap['涨跌幅']:+.2f}%)</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+    period_label = st.radio(
+        "K线周期", ["分时K（今日）", "日K", "周K", "月K"], index=0, horizontal=True, key="_idx_kline_period",
+    )
+
+    base_price = idx_snap.get("最新") - idx_snap.get("涨跌") if idx_snap else None
+
+    if period_label == "分时K（今日）":
+        intraday = get_index_intraday_a(code) if market == "A" else get_index_intraday_futu(name, market, base_price)
+        if intraday.empty:
+            st.caption("今天的分时数据暂时取不到，展示日K替代。")
+            try:
+                chart_hist = get_index_history(code, market, "日K")
+            except Exception:
+                chart_hist = None
+            if chart_hist is not None and not chart_hist.empty:
+                st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+        else:
+            st.plotly_chart(
+                build_intraday_line(intraday, base_price, market), use_container_width=True,
+            )
+    else:
+        try:
+            chart_hist = get_index_history(code, market, period_label)
+        except Exception as e:
+            chart_hist = None
+            st.error(f"K线加载失败：{e}")
+        if chart_hist is not None and not chart_hist.empty:
+            st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+
+
 @st.dialog("确认删除")
 def _confirm_delete_dialog(email: str, symbol: str, name: str):
     st.write(f"确定要把「{name}」（{symbol}）从自选股里删除吗？")
@@ -338,272 +474,405 @@ def _confirm_delete_dialog(email: str, symbol: str, name: str):
         st.rerun()
 
 
+_page_slot = st.empty()
+
 if st.session_state.get("_detail_symbol"):
-    _render_stock_detail(
-        st.session_state["_detail_symbol"],
-        st.session_state.get("_detail_market", "A"),
-        st.session_state.get("_detail_name", st.session_state["_detail_symbol"]),
-    )
-    st.stop()
-
-with st.sidebar:
-    _uemail = st.session_state.get("user_email", "")
-    _uemail_safe = _uemail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    st.markdown(f"<p style='font-size:0.8rem;color:#888'>{_uemail_safe}</p>", unsafe_allow_html=True)
-    if st.button("退出登录", use_container_width=True):
-        _tok = st.session_state.pop("_token", None)
-        if _tok:
-            _invalidate_token(_tok)
-        try:
-            del st.query_params["_auth"]
-        except Exception:
-            pass
-        _cv1.html(
-            '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");}catch(e){}</script>',
-            height=1,
+    with _page_slot.container():
+        _render_stock_detail(
+            st.session_state["_detail_symbol"],
+            st.session_state.get("_detail_market", "A"),
+            st.session_state.get("_detail_name", st.session_state["_detail_symbol"]),
         )
-        st.session_state["logged_in"] = False
-        st.session_state.pop("user_email", None)
-        st.rerun()
-
-st.markdown(
-    """
-    <div style='background:#e02020;margin:-1rem -1rem 0 -1rem;padding:14px 24px;
-                display:flex;align-items:center;justify-content:space-between'>
-        <span style='color:#fff;font-size:1.3rem;font-weight:700;letter-spacing:.02em'>Invest Agent</span>
-        <span style='color:#fff;font-size:0.8rem;opacity:0.85'>行情 · 财务 · 新闻交叉验证</span>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def _index_snapshot(idx_market: str):
-    end = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
-    df = get_benchmark_history(start, end, market=idx_market)
-    if df is None or len(df) < 2:
-        return None
-    last, prev = float(df.iloc[-1]["收盘"]), float(df.iloc[-2]["收盘"])
-    change = last - prev
-    pct = change / prev * 100 if prev else 0
-    return last, change, pct
-
-
-_INDEX_LABELS = {"A": "上证指数", "HK": "恒生指数", "US": "标普500"}
-idx_pick = st.radio("大盘指数", list(_INDEX_LABELS.values()), horizontal=True, key="_idx_pick", label_visibility="collapsed")
-idx_market_pick = {v: k for k, v in _INDEX_LABELS.items()}[idx_pick]
-try:
-    idx_snap = _index_snapshot(idx_market_pick)
-except Exception:
-    idx_snap = None
-if idx_snap:
-    idx_last, idx_change, idx_pct = idx_snap
-    idx_color = "#e02020" if idx_change >= 0 else "#22a06b"
-    st.markdown(
-        f"<div style='margin:-8px 0 12px'>"
-        f"<span style='font-size:1.4rem;font-weight:700;color:{idx_color}'>{idx_last:,.2f}</span>&nbsp;"
-        f"<span style='color:{idx_color}'>{idx_change:+.2f} ({idx_pct:+.2f}%)</span>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-
-def _auto_detect_market(q: str) -> str | None:
-    if re.match(r"^\d{6}$", q):
-        return "A"
-    if re.match(r"^\d{4,5}$", q):
-        return "HK"
-    if re.match(r"^[A-Za-z.]{1,6}$", q):
-        return "US"
-    return None
-
-
-qcol, bcol = st.columns([5, 1])
-quick_query = qcol.text_input(
-    "快速搜索代码，直接进详情页",
-    value="", key="_quick_search", placeholder="600519 / 00700 / AAPL",
-)
-if bcol.button("搜索", key="_quick_search_btn", use_container_width=True) and quick_query:
-    q = quick_query.strip()
-    detected = _auto_detect_market(q)
-    if detected is None:
-        st.warning("这个格式看着不像代码——快速搜索目前只支持直接输代码。")
-    else:
-        sym = q.zfill(5) if detected == "HK" else (q.upper() if detected == "US" else q)
-        st.session_state["_detail_symbol"] = sym
-        st.session_state["_detail_market"] = detected
-        st.session_state["_detail_name"] = sym
-        st.rerun()
-
-tab_market, tab_watchlist = st.tabs(["行情", "自选股"])
-
-def _style_movers_table(df):
-    """涨跌幅/涨跌额红涨绿跌上色，数字统一两位小数，涨跌幅带%号——表格别一片黑。"""
-    if df is None or df.empty:
-        return df
-
-    def _color(v):
-        try:
-            v = float(v)
-        except Exception:
-            return ""
-        return f"color: {'#e02020' if v >= 0 else '#22a06b'}"
-
-    fmt = {}
-    if "最新价" in df.columns:
-        fmt["最新价"] = "{:.2f}"
-    if "涨跌额" in df.columns:
-        fmt["涨跌额"] = "{:+.2f}"
-    if "涨跌幅" in df.columns:
-        fmt["涨跌幅"] = "{:+.2f}%"
-    if "换手率" in df.columns:
-        fmt["换手率"] = "{:.2f}%"
-
-    color_cols = [c for c in ("涨跌额", "涨跌幅") if c in df.columns]
-    return df.style.format(fmt).map(_color, subset=color_cols)
-
-
-with tab_market:
-    mkt_pick = st.radio("市场", ["A股", "港股", "美股"], horizontal=True, key="_market_overview_pick")
-    mkt_code = {"A股": "A", "港股": "HK", "美股": "US"}[mkt_pick]
-
-    try:
-        idx_list = get_multi_index_snapshot(mkt_code)
-    except Exception:
-        idx_list = []
-
-    if idx_list:
-        idx_cols = st.columns(len(idx_list))
-        for col, idx in zip(idx_cols, idx_list):
-            color = "#e02020" if idx["涨跌"] >= 0 else "#22a06b"
-            with col:
-                st.markdown(
-                    f"<div style='background:#f8f8f8;border-radius:8px;padding:12px;text-align:center'>"
-                    f"<div style='font-size:0.8rem;color:#666'>{idx['名称']}</div>"
-                    f"<div style='font-size:1.3rem;font-weight:700;color:{color}'>{idx['最新']:,.2f}</div>"
-                    f"<div style='font-size:0.85rem;color:{color}'>{idx['涨跌']:+.2f} ({idx['涨跌幅']:+.2f}%)</div>"
-                    f"</div>",
-                    unsafe_allow_html=True,
+elif st.session_state.get("_index_detail_code"):
+    with _page_slot.container():
+        _render_index_detail(
+            st.session_state.get("_index_detail_name", ""),
+            st.session_state["_index_detail_code"],
+            st.session_state.get("_index_detail_market", "A"),
+        )
+else:
+    with _page_slot.container():
+        with st.sidebar:
+            _uemail = st.session_state.get("user_email", "")
+            _uemail_safe = _uemail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            st.markdown(f"<p style='font-size:0.8rem;color:#888'>{_uemail_safe}</p>", unsafe_allow_html=True)
+            if st.button("退出登录", use_container_width=True):
+                _tok = st.session_state.pop("_token", None)
+                if _tok:
+                    _invalidate_token(_tok)
+                try:
+                    del st.query_params["_auth"]
+                except Exception:
+                    pass
+                _cv1.html(
+                    '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");}catch(e){}</script>',
+                    height=1,
                 )
-    else:
-        st.caption("指数数据暂时获取不到。")
-
-    st.divider()
-
-    if mkt_code == "A":
-        try:
-            breadth = get_market_breadth()
-        except Exception:
-            breadth = {}
-        if breadth:
-            bcols = st.columns(6)
-            for col, key in zip(bcols, ["上涨", "下跌", "涨停", "跌停", "平盘", "活跃度"]):
-                col.metric(key, breadth.get(key, "—"))
-            st.caption(f"统计时间：{breadth.get('统计日期', '未知')}（数据来自乐咕乐股网）")
-
-        st.divider()
-        up_col, down_col = st.columns(2)
-        show_n = 30 if st.session_state.get("_show_more_limit_pool") else 10
-        with up_col:
-            st.markdown("**涨停股池**")
-            try:
-                up_pool = get_limit_pool("up", show_n)
-                st.dataframe(_style_movers_table(up_pool), use_container_width=True, hide_index=True)
-            except Exception as e:
-                st.caption(f"获取失败：{e}")
-        with down_col:
-            st.markdown("**跌停股池**")
-            try:
-                down_pool = get_limit_pool("down", show_n)
-                st.dataframe(_style_movers_table(down_pool), use_container_width=True, hide_index=True)
-            except Exception as e:
-                st.caption(f"获取失败：{e}")
-        if not st.session_state.get("_show_more_limit_pool"):
-            if st.button("显示更多（前30）", key="_more_limit_pool"):
-                st.session_state["_show_more_limit_pool"] = True
+                st.session_state["logged_in"] = False
+                st.session_state.pop("user_email", None)
                 st.rerun()
 
-    elif mkt_code == "HK":
-        st.caption("港股没有涨跌停限制制度，这里改成知名股涨跌幅榜。")
+        st.markdown(
+            """
+            <div style='background:#e02020;margin:-1rem -1rem 0 -1rem;padding:14px 24px;
+                        display:flex;align-items:center;justify-content:space-between'>
+                <span style='color:#fff;font-size:1.3rem;font-weight:700;letter-spacing:.02em'>Invest Agent</span>
+                <span style='color:#fff;font-size:0.8rem;opacity:0.85'>行情 · 财务 · 新闻交叉验证</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+        @st.cache_data(ttl=60, show_spinner=False)
+        def _index_snapshot(idx_market: str):
+            end = datetime.now().strftime("%Y%m%d")
+            start = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
+            df = get_benchmark_history(start, end, market=idx_market)
+            if df is None or len(df) < 2:
+                return None
+            last, prev = float(df.iloc[-1]["收盘"]), float(df.iloc[-2]["收盘"])
+            change = last - prev
+            pct = change / prev * 100 if prev else 0
+            return last, change, pct
+
+
+        _INDEX_LABELS = {"A": "上证指数", "HK": "恒生指数", "US": "标普500"}
+        idx_pick = st.radio("大盘指数", list(_INDEX_LABELS.values()), horizontal=True, key="_idx_pick", label_visibility="collapsed")
+        idx_market_pick = {v: k for k, v in _INDEX_LABELS.items()}[idx_pick]
         try:
-            with st.spinner("加载中（第一次会慢一些）..."):
-                hk_movers = get_hk_famous_movers(15)
-            st.dataframe(_style_movers_table(hk_movers), use_container_width=True, hide_index=True)
-        except Exception as e:
-            st.caption(f"获取失败：{e}")
-
-    else:
-        st.caption("美股同样没有涨跌停制度，这里也是知名股涨跌幅榜。")
-        try:
-            us_movers = get_us_famous_movers(15)
-            st.dataframe(_style_movers_table(us_movers), use_container_width=True, hide_index=True)
-        except Exception as e:
-            st.caption(f"获取失败：{e}")
-
-with tab_watchlist:
-    _email = st.session_state["user_email"]
-    watched = get_watchlist(_email)
-
-    if not watched:
-        st.write("")
-        _, mid_empty, _ = st.columns([1, 2, 1])
-        with mid_empty:
+            idx_snap = _index_snapshot(idx_market_pick)
+        except Exception:
+            idx_snap = None
+        if idx_snap:
+            idx_last, idx_change, idx_pct = idx_snap
+            idx_color = "#e02020" if idx_change >= 0 else "#22a06b"
             st.markdown(
-                "<div style='text-align:center;color:#888;padding:20px 0 10px'>还没有关注任何股票</div>",
+                f"<div style='margin:-8px 0 12px'>"
+                f"<span style='font-size:1.4rem;font-weight:700;color:{idx_color}'>{idx_last:,.2f}</span>&nbsp;"
+                f"<span style='color:{idx_color}'>{idx_change:+.2f} ({idx_pct:+.2f}%)</span>"
+                f"</div>",
                 unsafe_allow_html=True,
             )
-            if st.button("新增自选股", type="primary", use_container_width=True, key="wl_empty_add"):
-                st.session_state["_show_wl_add"] = True
 
-    if watched or st.session_state.get("_show_wl_add"):
-        with st.expander("新增自选股", expanded=not watched and st.session_state.get("_show_wl_add", False)):
-            addcol1, addcol2, addcol3 = st.columns([2, 1, 1])
-            add_query = addcol1.text_input("代码（如 600519 / 00700 / AAPL）", key="_wl_add_query")
-            add_market_label = addcol2.selectbox("市场", ["A股", "港股", "美股"], key="_wl_add_market")
-            if addcol3.button("添加", key="_wl_add_btn", use_container_width=True) and add_query:
-                add_market_code = {"A股": "A", "港股": "HK", "美股": "US"}[add_market_label]
-                q = add_query.strip()
-                add_symbol = q.zfill(5) if add_market_code == "HK" else (q.upper() if add_market_code == "US" else q)
-                try:
-                    add_spot = get_stock_realtime(add_symbol, market=add_market_code)
-                except Exception:
-                    add_spot = {}
-                if not add_spot or not add_spot.get("最新价"):
-                    st.error(f"没查到「{add_symbol}」的行情，检查一下代码对不对。")
+
+        def _auto_detect_market(q: str) -> str | None:
+            if re.match(r"^\d{6}$", q):
+                return "A"
+            if re.match(r"^\d{4,5}$", q):
+                return "HK"
+            if re.match(r"^[A-Za-z.]{1,6}$", q):
+                return "US"
+            return None
+
+
+        qcol, bcol = st.columns([5, 1])
+        quick_query = qcol.text_input(
+            "快速搜索代码、指数名称或知名公司名称，直接进详情页",
+            value="", key="_quick_search", placeholder="600519 / 00700 / AAPL / 腾讯 / 特斯拉 / 恒生指数",
+        )
+        if bcol.button("搜索", key="_quick_search_btn", use_container_width=True) and quick_query:
+            q = quick_query.strip()
+            idx_hit = None
+            for _mkt, _idx_list in _MULTI_INDICES.items():
+                for _name, _code in _idx_list:
+                    if q == _name or q.lower() == _name.lower():
+                        idx_hit = (_name, _code, _mkt)
+                        break
+                if idx_hit:
+                    break
+            if idx_hit:
+                idx_name, idx_code, idx_mkt = idx_hit
+                st.session_state["_index_detail_code"] = idx_code
+                st.session_state["_index_detail_market"] = idx_mkt
+                st.session_state["_index_detail_name"] = idx_name
+                st.rerun()
+            else:
+                # 名称匹配优先——不然"Tesla"这种纯字母输入会被代码格式的正则先一步误判成
+                # "看着像美股代码"，根本轮不到名称匹配生效。
+                name_hit = resolve_symbol_by_name(q, "HK") or resolve_symbol_by_name(q, "US")
+                if name_hit:
+                    sym, detected = name_hit, ("HK" if name_hit.isdigit() else "US")
                 else:
-                    add_to_watchlist(_email, add_symbol, add_spot.get("名称", add_symbol), market=add_market_code)
-                    st.session_state["_show_wl_add"] = False
+                    detected = _auto_detect_market(q)
+                    sym = (q.zfill(5) if detected == "HK" else (q.upper() if detected == "US" else q)) if detected else None
+                if detected is None:
+                    st.warning("没识别出来——支持直接输代码、指数名称，或者知名公司的中英文名称（覆盖范围有限，查不到不代表没上市）。")
+                else:
+                    st.session_state["_detail_symbol"] = sym
+                    st.session_state["_detail_market"] = detected
+                    st.session_state["_detail_name"] = sym
                     st.rerun()
 
-    if watched:
-        header = st.columns([4, 0.5])
-        header[0].markdown("**名称/代码/最新价/涨跌**")
+        # 用 radio 手动实现 tab 切换，不用 st.tabs()——st.tabs() 选中哪个是纯前端状态，
+        # 代码控制不了；从自选股点进详情页再返回时，需要能把选中项强制拨回"自选股"。
+        st.session_state.setdefault("_active_section", "行情")
+        active_section = st.radio(
+            "分区", ["行情", "自选股"], key="_active_section", horizontal=True, label_visibility="collapsed",
+        )
 
-        for item in watched:
-            item_market = item.get("market", "A")
+        def _style_movers_table(df):
+            """涨跌幅/涨跌额红涨绿跌上色，数字统一两位小数，涨跌幅带%号——表格别一片黑。"""
+            if df is None or df.empty:
+                return df
+
+            def _color(v):
+                try:
+                    v = float(v)
+                except Exception:
+                    return ""
+                return f"color: {'#e02020' if v >= 0 else '#22a06b'}"
+
+            fmt = {}
+            if "最新价" in df.columns:
+                fmt["最新价"] = "{:.2f}"
+            if "涨跌额" in df.columns:
+                fmt["涨跌额"] = "{:+.2f}"
+            if "涨跌幅" in df.columns:
+                fmt["涨跌幅"] = "{:+.2f}%"
+            if "换手率" in df.columns:
+                fmt["换手率"] = "{:.2f}%"
+
+            color_cols = [c for c in ("涨跌额", "涨跌幅") if c in df.columns]
+            return df.style.format(fmt).map(_color, subset=color_cols)
+
+
+        if active_section == "行情":
+            mkt_pick = st.radio("市场", ["A股", "港股", "美股"], horizontal=True, key="_market_overview_pick")
+            mkt_code = {"A股": "A", "港股": "HK", "美股": "US"}[mkt_pick]
+
             try:
-                wspot = get_stock_realtime(item["symbol"], market=item_market)
+                idx_list = get_multi_index_snapshot(mkt_code)
             except Exception:
-                wspot = {}
+                idx_list = []
 
-            row_col, del_col = st.columns([4, 0.5])
-            if wspot and wspot.get("最新价"):
-                wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
-                wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
-                arrow = "▲" if wchange >= 0 else "▼"
-                row_label = (
-                    f"{item['name']}（{item['symbol']}）　"
-                    f"{wspot['最新价']:.2f}　{arrow} {wchange:+.2f} ({wchange_pct:+.2f}%)"
+            _idx_code_by_name = dict(_MULTI_INDICES.get(mkt_code, []))
+
+            if idx_list:
+                st.markdown(
+                    "<div style='display:flex;padding:4px 8px;font-size:0.78rem;color:#888;border-bottom:1px solid #eee'>"
+                    "<div style='flex:2.4'>指数</div>"
+                    "<div style='flex:1;text-align:right'>最新</div>"
+                    "<div style='flex:1;text-align:right'>涨幅</div>"
+                    "<div style='flex:1;text-align:right'>涨跌</div>"
+                    "</div>",
+                    unsafe_allow_html=True,
                 )
+                for idx in idx_list:
+                    name_col, num_col = st.columns([2.4, 3])
+                    if name_col.button(idx["名称"], key=f"idx_open_{mkt_code}_{idx['名称']}", use_container_width=True):
+                        st.session_state["_index_detail_code"] = _idx_code_by_name.get(idx["名称"], "")
+                        st.session_state["_index_detail_market"] = mkt_code
+                        st.session_state["_index_detail_name"] = idx["名称"]
+                        st.rerun()
+                    color = "#e02020" if idx["涨跌"] >= 0 else "#22a06b"
+                    num_col.markdown(
+                        f"<div style='display:flex;padding-top:8px'>"
+                        f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{idx['最新']:,.2f}</div>"
+                        f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
+                        f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌']:+.2f}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
             else:
-                row_label = f"{item['name']}（{item['symbol']}）　—"
+                st.caption("指数数据暂时获取不到。")
 
-            if row_col.button(row_label, key=f"wl_open_{item['symbol']}", use_container_width=True):
-                st.session_state["_detail_symbol"] = item["symbol"]
-                st.session_state["_detail_market"] = item_market
-                st.session_state["_detail_name"] = item["name"]
-                st.rerun()
-            if del_col.button("×", key=f"wl_remove_{item['symbol']}", use_container_width=True):
-                _confirm_delete_dialog(_email, item["symbol"], item["name"])
+            st.divider()
+
+            if mkt_code == "A":
+                try:
+                    breadth = get_market_breadth()
+                except Exception:
+                    breadth = {}
+                if breadth:
+                    bcols = st.columns(6)
+                    for col, key in zip(bcols, ["上涨", "下跌", "涨停", "跌停", "平盘", "活跃度"]):
+                        col.metric(key, breadth.get(key, "—"))
+                    st.caption(f"统计时间：{breadth.get('统计日期', '未知')}（数据来自乐咕乐股网）")
+
+                st.divider()
+                up_col, down_col = st.columns(2)
+                show_n = 30 if st.session_state.get("_show_more_limit_pool") else 10
+                with up_col:
+                    st.markdown("**涨停股池**")
+                    try:
+                        up_pool = get_limit_pool("up", show_n)
+                        st.dataframe(_style_movers_table(up_pool), use_container_width=True, hide_index=True)
+                    except Exception as e:
+                        st.caption(f"获取失败：{e}")
+                with down_col:
+                    st.markdown("**跌停股池**")
+                    try:
+                        down_pool = get_limit_pool("down", show_n)
+                        st.dataframe(_style_movers_table(down_pool), use_container_width=True, hide_index=True)
+                    except Exception as e:
+                        st.caption(f"获取失败：{e}")
+                if not st.session_state.get("_show_more_limit_pool"):
+                    if st.button("显示更多（前30）", key="_more_limit_pool"):
+                        st.session_state["_show_more_limit_pool"] = True
+                        st.rerun()
+
+            elif mkt_code == "HK":
+                st.caption("港股没有涨跌停限制制度，这里改成知名股涨跌幅榜。")
+                try:
+                    with st.spinner("加载中（第一次会慢一些）..."):
+                        hk_movers = get_hk_famous_movers(15)
+                    st.dataframe(_style_movers_table(hk_movers), use_container_width=True, hide_index=True)
+                except Exception as e:
+                    st.caption(f"获取失败：{e}")
+
+            else:
+                st.caption("美股同样没有涨跌停制度，这里也是知名股涨跌幅榜。")
+                try:
+                    us_movers = get_us_famous_movers(15)
+                    st.dataframe(_style_movers_table(us_movers), use_container_width=True, hide_index=True)
+                except Exception as e:
+                    st.caption(f"获取失败：{e}")
+
+        elif active_section == "自选股":
+            _email = st.session_state["user_email"]
+            watched = get_watchlist(_email)
+
+            if not watched:
+                st.write("")
+                _, mid_empty, _ = st.columns([1, 2, 1])
+                with mid_empty:
+                    st.markdown(
+                        "<div style='text-align:center;color:#888;padding:20px 0 10px'>还没有关注任何股票</div>",
+                        unsafe_allow_html=True,
+                    )
+                    if st.button("新增自选股", type="primary", use_container_width=True, key="wl_empty_add"):
+                        st.session_state["_show_wl_add"] = True
+
+            if watched or st.session_state.get("_show_wl_add"):
+                with st.expander("新增自选股", expanded=not watched and st.session_state.get("_show_wl_add", False)):
+                    addcol1, addcol2, addcol3 = st.columns([2, 1, 1])
+                    add_query = addcol1.text_input("代码或名称（如 600519 / 腾讯 / 特斯拉）", key="_wl_add_query")
+                    add_market_label = addcol2.selectbox("市场", ["A股", "港股", "美股"], key="_wl_add_market")
+                    if addcol3.button("添加", key="_wl_add_btn", use_container_width=True) and add_query:
+                        add_market_code = {"A股": "A", "港股": "HK", "美股": "US"}[add_market_label]
+                        q = add_query.strip()
+                        by_name = resolve_symbol_by_name(q, add_market_code)
+                        if by_name:
+                            add_symbol = by_name
+                        else:
+                            add_symbol = q.zfill(5) if add_market_code == "HK" else (q.upper() if add_market_code == "US" else q)
+                        try:
+                            add_spot = get_stock_realtime(add_symbol, market=add_market_code)
+                        except Exception:
+                            add_spot = {}
+                        if not add_spot or not add_spot.get("最新价"):
+                            st.error(f"没查到「{q}」的行情——检查一下代码对不对，或者这家公司没上市（比如私营公司本来就没有股票代码）。")
+                        else:
+                            add_to_watchlist(_email, add_symbol, add_spot.get("名称", add_symbol), market=add_market_code)
+                            st.session_state["_show_wl_add"] = False
+                            st.rerun()
+
+            if watched:
+                st.markdown(
+                    "<div style='display:flex;padding:4px 8px;font-size:0.78rem;color:#888;border-bottom:1px solid #eee'>"
+                    "<div style='flex:2.4'>名称/代码</div>"
+                    "<div style='flex:1;text-align:right'>最新</div>"
+                    "<div style='flex:1;text-align:right'>涨幅</div>"
+                    "<div style='flex:1;text-align:right'>涨跌</div>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+                st.caption("长按股票 3 秒可删除自选")
+
+                wl_symbols = []
+                for item in watched:
+                    item_market = item.get("market", "A")
+                    try:
+                        wspot = get_stock_realtime(item["symbol"], market=item_market)
+                    except Exception:
+                        wspot = {}
+
+                    name_col, num_col = st.columns([2.4, 3])
+                    row_label = f"{item['name']}（{item['symbol']}）"
+                    if name_col.button(row_label, key=f"wl_open_{item['symbol']}", use_container_width=True):
+                        st.session_state["_detail_symbol"] = item["symbol"]
+                        st.session_state["_detail_market"] = item_market
+                        st.session_state["_detail_name"] = item["name"]
+                        st.rerun()
+
+                    if wspot and wspot.get("最新价"):
+                        wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
+                        wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
+                        color = "#e02020" if wchange >= 0 else "#22a06b"
+                        num_col.markdown(
+                            f"<div style='display:flex;padding-top:8px'>"
+                            f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{wspot['最新价']:.2f}</div>"
+                            f"<div style='flex:1;text-align:right;color:{color}'>{wchange_pct:+.2f}%</div>"
+                            f"<div style='flex:1;text-align:right;color:{color}'>{wchange:+.2f}</div>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        num_col.markdown(
+                            "<div style='text-align:right;padding-top:8px;color:#999'>—</div>", unsafe_allow_html=True
+                        )
+
+                    if st.button(f"长按删除-{item['symbol']}", key=f"wl_lp_trigger_{item['symbol']}"):
+                        _confirm_delete_dialog(_email, item["symbol"], item["name"])
+
+                    wl_symbols.append(item["symbol"])
+
+                if wl_symbols:
+                    _cv1.html(
+                        f"""
+                        <script>
+                        (function() {{
+                            const symbols = {json.dumps(wl_symbols)};
+                            function bind(attemptsLeft) {{
+                                const doc = window.parent.document;
+                                const buttons = Array.from(doc.querySelectorAll('button'));
+                                let allBound = true;
+                                symbols.forEach(function(sym) {{
+                                    const marker = "长按删除-" + sym;
+                                    const hiddenBtn = buttons.find(function(b) {{ return b.innerText.trim() === marker; }});
+                                    const rowBtn = buttons.find(function(b) {{ return b.innerText.indexOf("（" + sym + "）") !== -1; }});
+                                    if (hiddenBtn) {{
+                                        const wrap = hiddenBtn.closest('[data-testid="stButton"]');
+                                        if (wrap) wrap.style.display = 'none';
+                                    }}
+                                    if (rowBtn && hiddenBtn) {{
+                                        if (!rowBtn.dataset.lpBound) {{
+                                            rowBtn.dataset.lpBound = "1";
+                                            let timer = null;
+                                            let fired = false;
+                                            const start = function() {{
+                                                fired = false;
+                                                timer = setTimeout(function() {{
+                                                    fired = true;
+                                                    hiddenBtn.click();
+                                                }}, 3000);
+                                            }};
+                                            const cancel = function() {{
+                                                if (timer) {{ clearTimeout(timer); timer = null; }}
+                                            }};
+                                            const end = function(e) {{
+                                                if (fired) {{ e.preventDefault(); e.stopPropagation(); }}
+                                                cancel();
+                                            }};
+                                            rowBtn.addEventListener('touchstart', start, {{passive: true}});
+                                            rowBtn.addEventListener('touchend', end);
+                                            rowBtn.addEventListener('touchmove', cancel);
+                                            rowBtn.addEventListener('mousedown', start);
+                                            rowBtn.addEventListener('mouseup', end);
+                                            rowBtn.addEventListener('mouseleave', cancel);
+                                        }}
+                                    }} else {{
+                                        allBound = false;
+                                    }}
+                                }});
+                                if (!allBound && attemptsLeft > 0) {{
+                                    setTimeout(function() {{ bind(attemptsLeft - 1); }}, 200);
+                                }}
+                            }}
+                            bind(15);
+                        }})();
+                        </script>
+                        """,
+                        height=0,
+                    )
