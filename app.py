@@ -25,6 +25,7 @@ from data_sources import (
     get_market_breadth,
     get_limit_pool,
     get_hk_famous_movers,
+    get_southbound_flow,
     get_us_famous_movers,
     resolve_symbol_by_name,
 )
@@ -100,26 +101,29 @@ def _show_login_page():
 
 
 # ── localStorage 自动登录（关闭浏览器后用书签/快捷方式打开也能恢复）────────────
-_cv1.html("""
-<script>
-(function() {
-    try {
-        var url = new URL(window.parent.location.href);
-        if (!url.searchParams.get('_auth')) {
-            var t = window.parent.localStorage.getItem('fa_auth_tok');
-            if (t) {
-                url.searchParams.set('_auth', t);
-                window.parent.history.replaceState(null, '', url.toString());
-                setTimeout(function() {
-                    if (!new URL(window.parent.location.href).searchParams.get('_auth')) return;
-                    window.parent.location.replace(url.toString());
-                }, 800);
+# 只在还没登录时注入这个iframe——登录之后每次rerun（尤其分时图20秒自动刷新那种
+# 高频rerun）都重建一次这个iframe纯属浪费，是页面变卡的一个来源。
+if not st.session_state.get("logged_in"):
+    _cv1.html("""
+    <script>
+    (function() {
+        try {
+            var url = new URL(window.parent.location.href);
+            if (!url.searchParams.get('_auth')) {
+                var t = window.parent.localStorage.getItem('fa_auth_tok');
+                if (t) {
+                    url.searchParams.set('_auth', t);
+                    window.parent.history.replaceState(null, '', url.toString());
+                    setTimeout(function() {
+                        if (!new URL(window.parent.location.href).searchParams.get('_auth')) return;
+                        window.parent.location.replace(url.toString());
+                    }, 800);
+                }
             }
-        }
-    } catch(e) {}
-})();
-</script>
-""", height=1)
+        } catch(e) {}
+    })();
+    </script>
+    """, height=1)
 
 _stored_token = st.query_params.get("_auth", "") or ""
 if _stored_token and not st.session_state.get("logged_in"):
@@ -276,7 +280,7 @@ def _inject_auto_refresh(seconds: int, key: str):
 
 
 def _render_stock_detail(symbol: str, market: str, name: str):
-    _inject_auto_refresh(20, f"stock_{symbol}_{market}")
+    _inject_auto_refresh(30, f"stock_{symbol}_{market}")
     if st.button("返回自选股"):
         for k in ("_detail_symbol", "_detail_market", "_detail_name", "_detail_module"):
             st.session_state.pop(k, None)
@@ -401,7 +405,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
 
 
 def _render_index_detail(name: str, code: str, market: str):
-    _inject_auto_refresh(20, f"index_{code}_{market}")
+    _inject_auto_refresh(30, f"index_{code}_{market}")
     if st.button("返回", key="idx_back"):
         for k in ("_index_detail_code", "_index_detail_market", "_index_detail_name"):
             st.session_state.pop(k, None)
@@ -713,6 +717,18 @@ else:
                         st.rerun()
 
             elif mkt_code == "HK":
+                try:
+                    south = get_southbound_flow()
+                except Exception:
+                    south = None
+                if south:
+                    _s_color = "#e02020" if south["净买额"] >= 0 else "#22a06b"
+                    st.markdown(
+                        f"<div style='margin:4px 0 12px'>南向资金净买额　"
+                        f"<span style='color:{_s_color};font-weight:700;font-size:1.2rem'>"
+                        f"{south['净买额']:+.2f}亿</span></div>",
+                        unsafe_allow_html=True,
+                    )
                 st.caption("港股没有涨跌停限制制度，这里改成知名股涨跌幅榜。")
                 try:
                     with st.spinner("加载中（第一次会慢一些）..."):

@@ -54,9 +54,17 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
     line_color = "#e02020" if up else "#22a06b"
     fill_color = "rgba(224,32,32,0.08)" if up else "rgba(34,160,107,0.08)"
 
-    cum_amount = (df["价格"] * df["成交量"]).cumsum()
-    cum_volume = df["成交量"].cumsum().replace(0, pd.NA)
-    df["均价"] = (cum_amount / cum_volume).ffill().fillna(df["价格"])
+    # 指数没有真实成交量（指数本身不是被直接交易的标的，Futu的分时接口对指数
+    # 返回的成交量是0），这种情况下按成交量加权算均价没有意义——分母全是0，
+    # 之前的写法会 fillna 成价格本身，均价线跟价格线完全重合，橙线糊住红绿线。
+    # 有真实成交量就用成交量加权均价，没有就退化成普通累计均价。
+    has_volume = df["成交量"].sum() > 0
+    if has_volume:
+        cum_amount = (df["价格"] * df["成交量"]).cumsum()
+        cum_volume = df["成交量"].cumsum().replace(0, pd.NA)
+        df["均价"] = (cum_amount / cum_volume).ffill().fillna(df["价格"])
+    else:
+        df["均价"] = df["价格"].expanding().mean()
 
     prev_tick = df["价格"].shift(1).fillna(base)
     df["量色"] = ["#e02020" if p >= pt else "#22a06b" for p, pt in zip(df["价格"], prev_tick)]
@@ -66,11 +74,17 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
     session = pd.DataFrame({"hm": _session_minutes(market)})
     merged = session.merge(df[["hm", "价格", "均价", "成交量", "量色"]], on="hm", how="left")
 
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.7, 0.3], vertical_spacing=0.08,
-        subplot_titles=("", "成交量"),
-    )
+    # 指数没有真实成交量，成交量面板画出来就是一片空白——不如干脆不画这个面板，
+    # 图表只留价格这一部分，比留一个空面板更诚实、也更好看。
+    if has_volume:
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.7, 0.3], vertical_spacing=0.08,
+            subplot_titles=("", "成交量"),
+        )
+    else:
+        fig = make_subplots(rows=1, cols=1)
+
     fig.add_trace(
         go.Scatter(
             x=merged["hm"], y=merged["价格"], mode="lines", connectgaps=False,
@@ -93,22 +107,24 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
     price_max = max(df["价格"].max(), prev_close or df["价格"].max())
     pad = max((price_max - price_min) * 0.15, price_max * 0.005)
     fig.update_yaxes(range=[price_min - pad, price_max + pad], side="right", row=1, col=1)
-
-    # 成交量按同花顺习惯换算成"万"为单位显示，柱子细一点、轴放右边，
-    # hover 直接显示"量: X万"，不是原始股数那种一长串数字。
-    vol_wan = merged["成交量"] / 10000
-    fig.add_trace(
-        go.Bar(
-            x=merged["hm"], y=vol_wan, marker_color=merged["量色"], name="成交量",
-            hovertemplate="%{x}<br>量: %{y:.2f}万<extra></extra>",
-        ),
-        row=2, col=1,
-    )
-    fig.update_yaxes(side="right", ticksuffix="万", row=2, col=1)
     fig.update_xaxes(type="category", nticks=8, row=1, col=1)
-    fig.update_xaxes(type="category", nticks=8, row=2, col=1)
+
+    if has_volume:
+        # 成交量按同花顺习惯换算成"万"为单位显示，柱子细一点、轴放右边，
+        # hover 直接显示"量: X万"，不是原始股数那种一长串数字。
+        vol_wan = merged["成交量"] / 10000
+        fig.add_trace(
+            go.Bar(
+                x=merged["hm"], y=vol_wan, marker_color=merged["量色"], name="成交量",
+                hovertemplate="%{x}<br>量: %{y:.2f}万<extra></extra>",
+            ),
+            row=2, col=1,
+        )
+        fig.update_yaxes(side="right", ticksuffix="万", row=2, col=1)
+        fig.update_xaxes(type="category", nticks=8, row=2, col=1)
+
     fig.update_layout(
-        height=480,
+        height=480 if has_volume else 340,
         margin=dict(l=10, r=10, t=20, b=10),
         showlegend=False,
         bargap=0.15,

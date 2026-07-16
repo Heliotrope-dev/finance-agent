@@ -33,6 +33,8 @@ requests.Session.request = _session_request_with_timeout
 _MIN_INTERVAL_SEC = 3  # 东财接口对高频请求会临时封IP，两次请求之间留够间隔
 _last_call_ts = 0.0
 
+_baostock_lock = threading.Lock()  # BaoStock的login/logout是全局会话，并发调用要加锁
+
 
 def _throttle():
     global _last_call_ts
@@ -234,59 +236,67 @@ _MULTI_INDICES = {
 }
 
 
+def _one_index_snapshot(market: str, name: str, code: str) -> dict | None:
+    """单个指数的快照，给 get_multi_index_snapshot 并发调用用（3个指数不再串行等）。"""
+    try:
+        if market == "A":
+            sina_snap = _a_index_snapshot_sina(code)
+            if sina_snap:
+                return {"名称": name, **sina_snap}
+            # 新浪实时快照失败时的兜底——BaoStock日线是EOD数据，交易时段内会滞后一天。
+            # BaoStock 的 login/logout 是全局会话，不是线程安全的；这里3个指数是并发
+            # 跑的，加锁避免真走到这条兜底路径时多个线程同时login/logout互相打架。
+            start = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+            end = datetime.now().strftime("%Y-%m-%d")
+            with _baostock_lock, contextlib.redirect_stdout(io.StringIO()):
+                bs.login()
+                try:
+                    rs = bs.query_history_k_data_plus(code, "date,close", start_date=start, end_date=end, frequency="d")
+                    rows = []
+                    while rs.next():
+                        rows.append(rs.get_row_data())
+                finally:
+                    bs.logout()
+            if len(rows) < 2:
+                return None
+            last, prev = float(rows[-1][1]), float(rows[-2][1])
+        elif market == "HK":
+            futu_snap = _hk_index_snapshot_futu(name)
+            if futu_snap:
+                return {"名称": name, **futu_snap}
+            # Futu不可用时的兜底——新浪的指数日线接口是EOD数据，交易时段内会滞后一天。
+            df = ak.stock_hk_index_daily_sina(symbol=code)
+            if len(df) < 2:
+                return None
+            last, prev = float(df.iloc[-1]["close"]), float(df.iloc[-2]["close"])
+        else:
+            df = ak.index_us_stock_sina(symbol=code)
+            if len(df) < 2:
+                return None
+            prev = float(df.iloc[-2]["close"])
+            futu_snap = _us_index_snapshot_futu(name, prev)
+            if futu_snap:
+                return {"名称": name, **futu_snap}
+            # Futu不支持美股原生指数代码，兜底走新浪日线（EOD，交易时段内滞后一天）。
+            last = float(df.iloc[-1]["close"])
+        change = last - prev
+        pct = change / prev * 100 if prev else 0
+        return {"名称": name, "最新": last, "涨跌": change, "涨跌幅": pct}
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def get_multi_index_snapshot(market: str) -> list[dict]:
-    """给行情页顶部的指数卡片用：每个市场固定几个核心指数，各自最新值+涨跌。"""
-    results = []
-    for name, code in _MULTI_INDICES.get(market, []):
-        try:
-            if market == "A":
-                sina_snap = _a_index_snapshot_sina(code)
-                if sina_snap:
-                    results.append({"名称": name, **sina_snap})
-                    continue
-                # 新浪实时快照失败时的兜底——BaoStock日线是EOD数据，交易时段内会滞后一天。
-                start = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
-                end = datetime.now().strftime("%Y-%m-%d")
-                with contextlib.redirect_stdout(io.StringIO()):
-                    bs.login()
-                    try:
-                        rs = bs.query_history_k_data_plus(code, "date,close", start_date=start, end_date=end, frequency="d")
-                        rows = []
-                        while rs.next():
-                            rows.append(rs.get_row_data())
-                    finally:
-                        bs.logout()
-                if len(rows) < 2:
-                    continue
-                last, prev = float(rows[-1][1]), float(rows[-2][1])
-            elif market == "HK":
-                futu_snap = _hk_index_snapshot_futu(name)
-                if futu_snap:
-                    results.append({"名称": name, **futu_snap})
-                    continue
-                # Futu不可用时的兜底——新浪的指数日线接口是EOD数据，交易时段内会滞后一天。
-                df = ak.stock_hk_index_daily_sina(symbol=code)
-                if len(df) < 2:
-                    continue
-                last, prev = float(df.iloc[-1]["close"]), float(df.iloc[-2]["close"])
-            else:
-                df = ak.index_us_stock_sina(symbol=code)
-                if len(df) < 2:
-                    continue
-                prev = float(df.iloc[-2]["close"])
-                futu_snap = _us_index_snapshot_futu(name, prev)
-                if futu_snap:
-                    results.append({"名称": name, **futu_snap})
-                    continue
-                # Futu不支持美股原生指数代码，兜底走新浪日线（EOD，交易时段内滞后一天）。
-                last = float(df.iloc[-1]["close"])
-            change = last - prev
-            pct = change / prev * 100 if prev else 0
-            results.append({"名称": name, "最新": last, "涨跌": change, "涨跌幅": pct})
-        except Exception:
-            continue
-    return results
+    """给行情页顶部的指数卡片用：每个市场固定几个核心指数，各自最新值+涨跌。
+
+    这里特意不用线程池并发拉——实测过一次，AkShare 内部某些接口用 py_mini_racer
+    （V8引擎，用来跑一段JS解密响应）做首次初始化不是线程安全的，多个线程同时
+    第一次触发会直接把整个 Streamlit 进程带崩（FATAL级别，不是能catch的异常）。
+    串行虽然慢一点，但这是能稳定跑的版本。
+    """
+    indices = _MULTI_INDICES.get(market, [])
+    return [r for r in (_one_index_snapshot(market, name, code) for name, code in indices) if r]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -348,14 +358,30 @@ def get_index_history(code: str, market: str, period: str = "日K") -> pd.DataFr
     return df[["日期", "开盘", "收盘", "最高", "最低", "成交量"]]
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_market_breadth() -> dict:
     """A股大盘涨跌家数统计（上涨/下跌/涨停/跌停/活跃度）。只有A股有这个概念。"""
     df = _with_retry(ak.stock_market_activity_legu)
     return dict(zip(df["item"], df["value"]))
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
+def get_southbound_flow() -> dict | None:
+    """南向资金（沪/深港股通合计净买额），只有港股有这个概念——内地资金通过港股通
+    买卖港股的净额，是港股市场常看的一个风向标。数据来自东财，跟同花顺展示的
+    同一份底层数据，口径可能有细微差异（分钟级更新时间点不同）。
+    """
+    df = _with_retry(ak.stock_hsgt_fund_flow_summary_em)
+    if df is None or df.empty or "资金方向" not in df.columns:
+        return None
+    south = df[df["资金方向"] == "南向"]
+    if south.empty:
+        return None
+    net_buy = float(south["成交净买额"].sum())
+    return {"净买额": net_buy, "交易日": south["交易日"].iloc[0] if "交易日" in south.columns else ""}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def get_limit_pool(kind: str = "up", limit: int = 10) -> pd.DataFrame:
     """涨停股池(kind='up')/跌停股池(kind='down')，按涨跌幅排序取前 limit 条。只有A股有这个概念。"""
     date_str = datetime.now().strftime("%Y%m%d")
