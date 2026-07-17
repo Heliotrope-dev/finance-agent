@@ -42,7 +42,7 @@ from tracker import (
     add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
 )
 from charts import (
-    build_candlestick, build_intraday_line, compute_stats, compute_technical_signal,
+    build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
     build_benchmark_comparison, build_return_histogram,
 )
 from auth import (
@@ -370,7 +370,14 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                     news, _ = _fetch_news_items(stock_name, symbol, market)
                     news_summary = _news_to_summary(news)
 
-                    technical_summary = compute_technical_signal(hist)
+                    try:
+                        _intraday_for_signal = (
+                            get_stock_intraday_a(symbol) if market == "A" else get_stock_intraday_futu(symbol, market)
+                        )
+                    except Exception:
+                        _intraday_for_signal = None
+                    realtime_signal = compute_realtime_signal(spot, _intraday_for_signal)
+                    technical_summary = compute_technical_signal(hist) + " 【盘中实时信号】" + realtime_signal
                     ai_text = cross_validate(symbol, history_summary, financial_summary, news_summary, technical_summary)
                     current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
                     verdict = extract_verdict(ai_text)
@@ -460,6 +467,102 @@ def _inject_auto_refresh(seconds: int, key: str):
     )
 
 
+_PRICE_FLASH_CSS = """
+<style>
+@keyframes priceFlashUp { 0% { background: rgba(224,32,32,0.28); } 100% { background: transparent; } }
+@keyframes priceFlashDown { 0% { background: rgba(34,160,107,0.28); } 100% { background: transparent; } }
+.price-flash-up { animation: priceFlashUp 1.4s ease-out; }
+.price-flash-down { animation: priceFlashDown 1.4s ease-out; }
+</style>
+"""
+
+
+@st.fragment(run_every=8)
+def _render_price_header(symbol: str, market: str):
+    """价格区块单独做成 fragment，每8秒自己刷新，不带动AI模块、新闻这些重的部分
+    一起重跑——之前全页面每30秒整体rerun一次，观感上像"每隔一阵闪一下"，跟
+    同花顺那种数字持续跳动的实时感完全不一样。数字真变了就闪一下背景色，
+    让"活着"这件事肉眼可见，不是纯靠脑补更新时间戳。
+    """
+    try:
+        spot = get_stock_realtime(symbol, market=market)
+    except Exception:
+        spot = {}
+    if not (spot and spot.get("最新价")):
+        st.caption("实时价格暂时取不到。")
+        return
+
+    change = spot["最新价"] - spot.get("昨收", spot["最新价"])
+    change_pct = change / spot["昨收"] * 100 if spot.get("昨收") else 0
+    color = "#e02020" if change >= 0 else "#22a06b"
+
+    flash_key = f"_last_price_{symbol}_{market}"
+    prev = st.session_state.get(flash_key)
+    st.session_state[flash_key] = spot["最新价"]
+    flash_class = ""
+    if prev is not None and prev != spot["最新价"]:
+        flash_class = "price-flash-up" if spot["最新价"] > prev else "price-flash-down"
+
+    st.markdown(
+        _PRICE_FLASH_CSS
+        + f"""
+        <div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:6px'>
+            <span style='font-size:2rem;font-weight:700;color:{color}'>{spot['最新价']:.2f}</span>&nbsp;&nbsp;
+            <span style='font-size:1.1rem;color:{color}'>{change:+.2f} ({change_pct:+.2f}%)</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _src = "Futu 实时" if spot.get("数据源") == "Futu实时" else "延迟行情"
+    st.caption(f"{_src} · {spot.get('更新时间', '-')} · 每 8 秒自动刷新")
+    hcol1, hcol2, hcol3 = st.columns(3)
+    hcol1.metric("最高", f"{spot.get('最高', 0):.2f}")
+    hcol2.metric("最低", f"{spot.get('最低', 0):.2f}")
+    hcol3.metric("今开", f"{spot.get('今开', 0):.2f}")
+
+    _watched_now = is_in_watchlist(st.session_state["user_email"], symbol)
+    if _watched_now:
+        if st.button("移除自选", key="wl_toggle"):
+            remove_from_watchlist(st.session_state["user_email"], symbol)
+            st.rerun()
+    else:
+        if st.button("加入自选", key="wl_toggle"):
+            add_to_watchlist(st.session_state["user_email"], symbol, spot.get("名称", symbol), market=market)
+            st.rerun()
+
+
+@st.fragment(run_every=8)
+def _render_index_price_header(name: str, market: str):
+    """指数版的实时价格区块，逻辑跟_render_price_header一样，独立的 fragment。"""
+    try:
+        idx_snap = next((i for i in get_multi_index_snapshot(market) if i["名称"] == name), None)
+    except Exception:
+        idx_snap = None
+    if not idx_snap:
+        st.caption("实时行情暂时取不到。")
+        return
+
+    color = "#e02020" if idx_snap["涨跌"] >= 0 else "#22a06b"
+    flash_key = f"_last_price_idx_{name}_{market}"
+    prev = st.session_state.get(flash_key)
+    st.session_state[flash_key] = idx_snap["最新"]
+    flash_class = ""
+    if prev is not None and prev != idx_snap["最新"]:
+        flash_class = "price-flash-up" if idx_snap["最新"] > prev else "price-flash-down"
+
+    st.markdown(
+        _PRICE_FLASH_CSS
+        + f"""
+        <div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:6px'>
+            <span style='font-size:2rem;font-weight:700;color:{color}'>{idx_snap['最新']:,.2f}</span>&nbsp;&nbsp;
+            <span style='font-size:1.1rem;color:{color}'>{idx_snap['涨跌']:+.2f} ({idx_snap['涨跌幅']:+.2f}%)</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption("每 8 秒自动刷新")
+
+
 def _render_stock_detail(symbol: str, market: str, name: str):
     _inject_auto_refresh(30, f"stock_{symbol}_{market}")
     if st.button("返回自选股"):
@@ -500,33 +603,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     core = st.session_state[core_key]
     hist, spot = core["hist"], core["spot"]
 
-    if spot and spot.get("最新价"):
-        change = spot["最新价"] - spot.get("昨收", spot["最新价"])
-        change_pct = change / spot["昨收"] * 100 if spot.get("昨收") else 0
-        color = "#e02020" if change >= 0 else "#22a06b"
-        st.markdown(
-            f"<div style='margin:12px 0'>"
-            f"<span style='font-size:2rem;font-weight:700;color:{color}'>{spot['最新价']:.2f}</span>&nbsp;&nbsp;"
-            f"<span style='font-size:1.1rem;color:{color}'>{change:+.2f} ({change_pct:+.2f}%)</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-        _src = "Futu 实时" if spot.get("数据源") == "Futu实时" else "延迟行情"
-        st.caption(f"{_src} · 更新于 {spot.get('更新时间', '-')}")
-        hcol1, hcol2, hcol3 = st.columns(3)
-        hcol1.metric("最高", f"{spot.get('最高', 0):.2f}")
-        hcol2.metric("最低", f"{spot.get('最低', 0):.2f}")
-        hcol3.metric("今开", f"{spot.get('今开', 0):.2f}")
-
-        _watched_now = is_in_watchlist(st.session_state["user_email"], symbol)
-        if _watched_now:
-            if st.button("移除自选", key="wl_toggle"):
-                remove_from_watchlist(st.session_state["user_email"], symbol)
-                st.rerun()
-        else:
-            if st.button("加入自选", key="wl_toggle"):
-                add_to_watchlist(st.session_state["user_email"], symbol, spot.get("名称", symbol), market=market)
-                st.rerun()
+    _render_price_header(symbol, market)
 
     st.divider()
     period_labels = ["分时K（今日）", "日K", "周K", "月K"]
@@ -627,15 +704,7 @@ def _render_index_detail(name: str, code: str, market: str):
     except Exception:
         idx_snap = None
 
-    if idx_snap:
-        color = "#e02020" if idx_snap["涨跌"] >= 0 else "#22a06b"
-        st.markdown(
-            f"<div style='margin:12px 0'>"
-            f"<span style='font-size:2rem;font-weight:700;color:{color}'>{idx_snap['最新']:,.2f}</span>&nbsp;&nbsp;"
-            f"<span style='font-size:1.1rem;color:{color}'>{idx_snap['涨跌']:+.2f} ({idx_snap['涨跌幅']:+.2f}%)</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+    _render_index_price_header(name, market)
 
     st.divider()
     period_label = st.radio(
@@ -697,6 +766,24 @@ def _render_index_detail(name: str, code: str, market: str):
                     has_hist = daily_hist is not None and not daily_hist.empty
                     technical_summary = compute_technical_signal(daily_hist) if has_hist else "暂无技术面数据"
                     stats = compute_stats(daily_hist) if has_hist and len(daily_hist) > 5 else {}
+
+                    try:
+                        _idx_snap_now = next((i for i in get_multi_index_snapshot(market) if i["名称"] == name), None)
+                        if _idx_snap_now:
+                            _idx_spot = {
+                                "最新价": _idx_snap_now["最新"],
+                                "昨收": _idx_snap_now["最新"] - _idx_snap_now["涨跌"],
+                            }
+                            _idx_intraday = (
+                                get_index_intraday_a(code) if market == "A"
+                                else get_index_intraday_futu(name, market, _idx_spot["昨收"])
+                            )
+                        else:
+                            _idx_spot, _idx_intraday = {}, None
+                    except Exception:
+                        _idx_spot, _idx_intraday = {}, None
+                    realtime_signal = compute_realtime_signal(_idx_spot, _idx_intraday)
+                    technical_summary += " 【盘中实时信号】" + realtime_signal
                     news_summary = st.session_state.get(f"{idx_ai_key}_news", {}).get("summary", "无相关新闻")
                     ai_text = analyze_index(name, technical_summary, news_summary)
                     st.session_state[f"{idx_ai_key}_cross"] = {

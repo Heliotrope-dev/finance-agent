@@ -242,6 +242,54 @@ def compute_technical_signal(hist: pd.DataFrame) -> str:
     )
 
 
+def compute_realtime_signal(spot: dict, intraday: pd.DataFrame | None = None) -> str:
+    """技术面信号（compute_technical_signal）只看日线收盘价，AI写出来的分析
+    就只能是"最近几天怎么样"这种偏宏观的话，看不出"今天这一刻"的走势。这里
+    专门算一段基于实时快照+分时数据的"盘中信号"：现价相对今日开盘/最高/最低
+    的位置、距离今日高低点的百分比，有分时数据的话再加一段最近这一段时间
+    （分时序列后半段 vs 前半段均价）的短期动量方向。全是本地算好的数字，
+    不是AI编的，喂给AI能让它把总结落到"今天具体怎么走的"，不是只谈天数级别
+    的宏观趋势。
+    """
+    if not spot or not spot.get("最新价"):
+        return "暂无实时快照数据。"
+
+    last = spot["最新价"]
+    open_p = spot.get("今开")
+    high = spot.get("最高")
+    low = spot.get("最低")
+    prev_close = spot.get("昨收")
+
+    parts = []
+    if prev_close:
+        chg_pct = (last - prev_close) / prev_close * 100
+        parts.append(f"现价{last:.2f}，较昨收{'上涨' if chg_pct >= 0 else '下跌'}{abs(chg_pct):.2f}%")
+    if open_p:
+        from_open = (last - open_p) / open_p * 100
+        parts.append(f"较今日开盘{'涨' if from_open >= 0 else '跌'}{abs(from_open):.2f}%")
+    if high and low and high > low:
+        pos_in_range = (last - low) / (high - low) * 100
+        parts.append(f"处于今日振幅区间的{pos_in_range:.0f}%位置（今高{high:.2f}/今低{low:.2f}）")
+        if high - last < (high - low) * 0.05:
+            parts.append("非常接近今日最高点")
+        elif last - low < (high - low) * 0.05:
+            parts.append("非常接近今日最低点")
+
+    if intraday is not None and not intraday.empty and "价格" in intraday.columns and len(intraday) >= 10:
+        prices = intraday["价格"].astype(float)
+        mid = len(prices) // 2
+        first_half_avg = prices.iloc[:mid].mean()
+        second_half_avg = prices.iloc[mid:].mean()
+        if second_half_avg > first_half_avg * 1.001:
+            parts.append("盘中后半段均价高于前半段，短期呈上行动量")
+        elif second_half_avg < first_half_avg * 0.999:
+            parts.append("盘中后半段均价低于前半段，短期呈下行动量")
+        else:
+            parts.append("盘中价格基本走平，没有明显方向")
+
+    return "；".join(parts) + "。" if parts else "实时数据字段不全，暂不能给出盘中信号。"
+
+
 def compute_stats(hist: pd.DataFrame) -> dict:
     """真正的统计计算：区间收益率、年化波动率、最大回撤、夏普比率(简化版)。"""
     close = hist["收盘"].astype(float)
