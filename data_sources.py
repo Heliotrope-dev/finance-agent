@@ -456,6 +456,9 @@ _US_FAMOUS_CODES = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "NFLX",
     "AMD", "INTC", "AVGO", "ORCL", "CRM", "ADBE", "PYPL", "UBER",
     "DIS", "KO", "PEP", "NKE",
+    "JPM", "V", "MA", "HD", "WMT", "JNJ", "PG", "XOM", "CVX", "BA",
+    "GS", "MS", "IBM", "QCOM", "TXN", "COST", "SBUX", "MCD", "LLY",
+    "UNH", "PFE", "T", "VZ", "CSCO", "GE", "CAT", "PLTR", "SNOW", "SHOP",
 ]
 
 _US_NAME_MAP = {
@@ -561,6 +564,60 @@ def get_us_famous_movers(limit: int = 15) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).head(limit).reset_index(drop=True)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_index_top_movers(market: str, limit: int = 30) -> pd.DataFrame:
+    """指数详情页"成分股"板块用——不是严格意义上的官方成分股名单（A股几个
+    宽基指数动辄几百上千只成分股，没法也没必要全拉一遍实时行情；港股/美股
+    压根没找到带股票代码的官方成分股免费源），而是"这个市场里涨幅最大的一批
+    股票"，按用户的说法："涨的最多的十个/三十个就好，不用都显示"——够用，
+    不用追求跟官方成分股名单逐一对应。
+
+    A股：stock_zh_a_spot_em 全市场快照（几千只），本地按涨跌幅排序取前limit名，
+    这个接口今晚东财那边不太稳定，走_with_retry扛一下。
+    港股：复用已经在用的东财人气榜（stock_hk_hot_rank_em，100只热门港股），
+    改成按涨跌幅排序而不是按人气排序。
+    美股：复用_US_FAMOUS_CODES这份手动维护的核心股名单（新浪批量行情），
+    按涨跌幅排序——没有找到带代码的美股热度/成分股免费源，只能退而求其次
+    用这份覆盖主要板块龙头的名单。
+    """
+    if market == "A":
+        df = _with_retry(ak.stock_zh_a_spot_em, retries=2, backoff=3)
+        if df is None or df.empty or "涨跌幅" not in df.columns:
+            return pd.DataFrame()
+        df = df.sort_values("涨跌幅", ascending=False).head(limit)
+        keep = [c for c in ("代码", "名称", "最新价", "涨跌幅") if c in df.columns]
+        return df[keep].reset_index(drop=True)
+
+    if market == "HK":
+        df = _with_retry(ak.stock_hk_hot_rank_em, retries=2, backoff=3)
+        if df is None or df.empty or "涨跌幅" not in df.columns:
+            return pd.DataFrame()
+        df = df.rename(columns={"股票名称": "名称"}).sort_values("涨跌幅", ascending=False).head(limit)
+        keep = [c for c in ("代码", "名称", "最新价", "涨跌幅") if c in df.columns]
+        return df[keep].reset_index(drop=True)
+
+    # US
+    codes = ",".join(f"gb_{c.lower()}" for c in _US_FAMOUS_CODES)
+    r = requests.get(
+        f"https://hq.sinajs.cn/list={codes}",
+        headers={"Referer": "https://finance.sina.com.cn"},
+        timeout=10,
+    )
+    text = r.content.decode("gbk", errors="ignore")
+    rows = []
+    for code, line in zip(_US_FAMOUS_CODES, text.strip().split("\n")):
+        if '"' not in line:
+            continue
+        raw = line.split('"')[1]
+        fields = raw.split(",")
+        if len(fields) < 27 or not fields[1]:
+            continue
+        rows.append({"代码": code, "名称": fields[0], "最新价": float(fields[1]), "涨跌幅": float(fields[2])})
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("涨跌幅", ascending=False).head(limit).reset_index(drop=True)
 
 
 def _fetch_history_hk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:

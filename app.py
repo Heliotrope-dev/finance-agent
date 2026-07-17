@@ -29,6 +29,7 @@ from data_sources import (
     get_market_breadth,
     get_limit_pool,
     get_hk_famous_movers,
+    get_index_top_movers,
     get_southbound_flow,
     get_us_famous_movers,
     resolve_symbol_by_name,
@@ -660,6 +661,77 @@ def _render_index_price_header(name: str, market: str):
     st.caption("每 15 秒自动刷新")
 
 
+def _render_index_top_movers(market: str):
+    """指数详情页的"成分股"板块——不是严格的官方成分股清单，是这个市场里
+    涨幅最大的一批股票（get_index_top_movers 的说明里有详细原因：A股几百上千
+    只成分股没法全拉一遍实时行情，港股/美股也没找到带股票代码的免费成分股源）。
+    默认显示前10，点"展开"再显示到前30，卡片样式跟自选股/指数列表一样，
+    点击直接跳去那只股票的详情页。
+    """
+    try:
+        movers = get_index_top_movers(market, limit=30)
+    except Exception:
+        movers = None
+    if movers is None or movers.empty:
+        st.caption("暂时获取不到数据。")
+        return
+
+    # wl-card-link 这个class的样式定义在_render_watchlist_rows里——如果用户
+    # 这次会话还没打开过自选股分区，样式压根没注入过。这里重复注入一遍
+    # （同一个class名，同样的规则，重复注入是幂等的，不会有副作用）。
+    st.markdown(
+        "<style>"
+        "a.wl-card-link, a.wl-card-link:link, a.wl-card-link:visited {"
+        "  text-decoration: none !important; color: inherit !important;"
+        "  display: block; cursor: pointer;"
+        "}"
+        "a.wl-card-link:hover { opacity: 0.85; }"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+
+    if market == "A":
+        st.caption("按当前A股全市场涨跌幅排序，不是这个指数的官方成分股名单。")
+    elif market == "HK":
+        st.caption("按港股热门个股的涨跌幅排序，不是这个指数的官方成分股名单。")
+    else:
+        st.caption("覆盖美股主要板块龙头股，按涨跌幅排序，不是这个指数的官方成分股名单。")
+
+    expand_key = f"_movers_expand_{market}"
+    show_n = 30 if st.session_state.get(expand_key) else 10
+
+    for _, row in movers.head(show_n).iterrows():
+        mv_symbol = str(row["代码"])
+        mv_color = "#e02020" if row["涨跌幅"] >= 0 else "#22a06b"
+        href = (
+            f"?open_symbol={urllib.parse.quote(mv_symbol)}"
+            f"&open_market={urllib.parse.quote(market)}"
+            f"&open_name={urllib.parse.quote(str(row['名称']))}"
+            f"{_auth_qs()}"
+        )
+        with st.container(border=True):
+            st.markdown(
+                f"<a class='wl-card-link' href='{href}' target='_self'>"
+                f"<div style='display:flex;align-items:center'>"
+                f"<div style='flex:2;font-weight:600;color:#0f172a;text-decoration:none'>"
+                f"{row['名称']}（{mv_symbol}）</div>"
+                f"<div style='flex:1;text-align:right;font-weight:600;color:{mv_color}'>{row['最新价']:.2f}</div>"
+                f"<div style='flex:1;text-align:right;color:{mv_color}'>{row['涨跌幅']:+.2f}%</div>"
+                f"</div></a>",
+                unsafe_allow_html=True,
+            )
+
+    if len(movers) > 10:
+        if not st.session_state.get(expand_key):
+            if st.button("展开（前30）", key=f"_movers_expand_btn_{market}"):
+                st.session_state[expand_key] = True
+                st.rerun()
+        else:
+            if st.button("收起", key=f"_movers_collapse_btn_{market}"):
+                st.session_state[expand_key] = False
+                st.rerun()
+
+
 def _render_stock_detail(symbol: str, market: str, name: str):
     _inject_auto_refresh(30, f"stock_{symbol}_{market}")
     if st.button("返回自选股"):
@@ -841,6 +913,10 @@ def _render_index_detail(name: str, code: str, market: str):
             st.error(f"K线加载失败：{e}")
         if chart_hist is not None and not chart_hist.empty:
             st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+
+    st.divider()
+    st.subheader("成分股")
+    _render_index_top_movers(market)
 
     st.divider()
     _render_news_section(name, is_index=True)
