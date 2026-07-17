@@ -159,6 +159,26 @@ if not st.session_state.get("logged_in"):
 _BENCHMARK_NAMES = {"A": "沪深300", "HK": "恒生指数", "US": "标普500"}
 
 
+def _fetch_news_items(keyword: str, symbol: str | None, market: str) -> tuple:
+    """页面展示和AI分析要用同一份新闻源，不然会出现页面上一手资讯明明有
+    （比如寒武纪的官方公告），AI资讯解读那栏却说"没有找到相关新闻"这种自相
+    矛盾的情况——A股优先走官方公告（get_stock_notices），没有才退回财新
+    关键词匹配（get_stock_news）。返回 (DataFrame, 是否来自官方公告)。
+    """
+    if market == "A" and symbol:
+        try:
+            notices = get_stock_notices(symbol)
+        except Exception:
+            notices = None
+        if notices is not None and not notices.empty:
+            return notices, True
+    try:
+        news = get_stock_news(keyword, limit=8)
+    except Exception:
+        news = None
+    return news, False
+
+
 def _render_news_section(keyword: str, symbol: str | None = None, market: str = "A", is_index: bool = False):
     """一手资讯单独成块，标题不截断——是AI解读的依据来源，放在AI解读前面让用户
     自己先看一手材料。A股优先用官方公告（监管强制披露，永远免费，比新闻评论
@@ -195,32 +215,23 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
             )
         return
 
-    if market == "A" and symbol:
-        try:
-            notices = get_stock_notices(symbol)
-        except Exception:
-            notices = None
-        if notices is not None and not notices.empty:
-            st.caption("来自东财公告中心的官方公告，监管强制披露，永远免费，点标题可跳转原文。")
-            for _, r in notices.iterrows():
-                st.markdown(
-                    f"<div style='margin:6px 0;font-size:0.9rem'>"
-                    f"<span style='color:#888;font-size:0.78rem'>{r.get('日期', '')}</span>　"
-                    f"<a href='{r.get('url', '')}' target='_blank' style='color:#0f172a;text-decoration:none'>{r['新闻标题']}</a>　"
-                    f"<span style='color:#888;font-size:0.75rem'>{r.get('分类', '')}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-            return
-
-    try:
-        news = get_stock_news(keyword, limit=8)
-    except Exception as e:
-        st.caption(f"获取失败：{e}")
-        return
+    news, _from_notices = _fetch_news_items(keyword, symbol, market)
     if news is None or news.empty:
         st.caption("这只股票近期没有查到直接相关的新闻，不代表没有热度，可能只是这个免费源没收录。")
         return
+    if _from_notices:
+        st.caption("来自东财公告中心的官方公告，监管强制披露，永远免费，点标题可跳转原文。")
+        for _, r in news.iterrows():
+            st.markdown(
+                f"<div style='margin:6px 0;font-size:0.9rem'>"
+                f"<span style='color:#888;font-size:0.78rem'>{r.get('日期', '')}</span>　"
+                f"<a href='{r.get('url', '')}' target='_blank' style='color:#0f172a;text-decoration:none'>{r['新闻标题']}</a>　"
+                f"<span style='color:#888;font-size:0.75rem'>{r.get('分类', '')}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        return
+
     st.caption("摘要来自财新，原文链接需要财新会员订阅才能打开全文，这里只展示摘要本身。")
     for _, r in news.iterrows():
         date = r.get("日期") or ""
@@ -244,7 +255,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
             try:
                 if module == "news":
                     stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
-                    news = get_stock_news(stock_name, limit=8)
+                    news, _ = _fetch_news_items(stock_name, symbol, market)
                     news_summary = (
                         "\n".join(f"- {r['新闻标题']}" for _, r in news.iterrows())
                         if news is not None and not news.empty else "无相关新闻"
@@ -290,7 +301,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                         fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
                     )
                     stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
-                    news = get_stock_news(stock_name, limit=8)
+                    news, _ = _fetch_news_items(stock_name, symbol, market)
                     news_summary = (
                         "\n".join(f"- {r['新闻标题']}" for _, r in news.iterrows())
                         if news is not None and not news.empty else "无相关新闻"
@@ -606,7 +617,7 @@ def _render_index_detail(name: str, code: str, market: str):
         if f"{idx_ai_key}_news" not in st.session_state:
             with st.spinner("分析中..."):
                 try:
-                    news = get_stock_news(name, limit=8)
+                    news = get_index_news(name, limit=8)
                     news_summary = (
                         "\n".join(f"- {r['新闻标题']}" for _, r in news.iterrows())
                         if news is not None and not news.empty else "无相关新闻"
