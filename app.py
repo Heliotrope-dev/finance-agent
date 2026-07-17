@@ -190,6 +190,55 @@ def _fetch_news_items(keyword: str, symbol: str | None, market: str) -> tuple:
     return news, "caixin"
 
 
+def _build_sparkline_svg(values: list, color: str, width: int = 60, height: int = 26) -> str:
+    """自选股行情列表里那种"一眼看趋势"的迷你走势图——不用plotly（每行一个太重，
+    列表长了会很卡），纯手算折线点位吐一段内联SVG，跟长桥/同花顺那种列表里的
+    小图一个意思。
+    """
+    vals = [v for v in values if v is not None]
+    if len(vals) < 2:
+        return "<span style='color:#ccc;font-size:0.7rem'>--</span>"
+    lo, hi = min(vals), max(vals)
+    rng = (hi - lo) or (abs(lo) * 0.01 or 1)
+    n = len(vals)
+    pts = [f"{(i / (n - 1) * width):.1f},{(height - (v - lo) / rng * height):.1f}" for i, v in enumerate(vals)]
+    points_str = " ".join(pts)
+    return (
+        f"<svg width='{width}' height='{height}' viewBox='0 0 {width} {height}' style='display:block'>"
+        f"<polyline points='{points_str}' fill='none' stroke='{color}' stroke-width='1.6' "
+        f"stroke-linejoin='round' stroke-linecap='round'/></svg>"
+    )
+
+
+def _fetch_sparkline_closes(symbol: str, market: str, days: int = 20) -> list:
+    """自选股迷你图用的近期收盘价——直接复用已有的历史行情接口（带缓存，5分钟
+    过期），不新开专门的接口，多取一倍自然日天数换算成够用的交易日数量。
+    """
+    try:
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=days * 2 + 10)).strftime("%Y%m%d")
+        hist = get_stock_history(symbol, start, end, market=market)
+        if hist is None or hist.empty:
+            return []
+        return hist["收盘"].astype(float).tail(days).tolist()
+    except Exception:
+        return []
+
+
+def _fmt_turnover(v) -> str:
+    if v is None:
+        return "—"
+    try:
+        v = float(v)
+    except Exception:
+        return "—"
+    if v >= 1e8:
+        return f"{v / 1e8:.2f}亿"
+    if v >= 1e4:
+        return f"{v / 1e4:.1f}万"
+    return f"{v:.0f}"
+
+
 def _news_to_summary(news) -> str:
     """喂给AI的新闻摘要——带上日期和分类，不只是光秃秃的标题，不然AI只能看着
     一行标题瞎总结，写不出具体内容，只能说"整体偏利好"这种空话。"""
@@ -910,38 +959,6 @@ else:
         )
 
 
-        @st.cache_data(ttl=60, show_spinner=False)
-        def _index_snapshot(idx_market: str):
-            end = datetime.now().strftime("%Y%m%d")
-            start = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
-            df = get_benchmark_history(start, end, market=idx_market)
-            if df is None or len(df) < 2:
-                return None
-            last, prev = float(df.iloc[-1]["收盘"]), float(df.iloc[-2]["收盘"])
-            change = last - prev
-            pct = change / prev * 100 if prev else 0
-            return last, change, pct
-
-
-        _INDEX_LABELS = {"A": "上证指数", "HK": "恒生指数", "US": "标普500"}
-        idx_pick = st.radio("大盘指数", list(_INDEX_LABELS.values()), horizontal=True, key="_idx_pick", label_visibility="collapsed")
-        idx_market_pick = {v: k for k, v in _INDEX_LABELS.items()}[idx_pick]
-        try:
-            idx_snap = _index_snapshot(idx_market_pick)
-        except Exception:
-            idx_snap = None
-        if idx_snap:
-            idx_last, idx_change, idx_pct = idx_snap
-            idx_color = "#e02020" if idx_change >= 0 else "#22a06b"
-            st.markdown(
-                f"<div style='margin:-8px 0 12px'>"
-                f"<span style='font-size:1.4rem;font-weight:700;color:{idx_color}'>{idx_last:,.2f}</span>&nbsp;"
-                f"<span style='color:{idx_color}'>{idx_change:+.2f} ({idx_pct:+.2f}%)</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-
-
         def _auto_detect_market(q: str) -> str | None:
             if re.match(r"^\d{6}$", q):
                 return "A"
@@ -1178,110 +1195,164 @@ else:
                             st.rerun()
 
             if watched:
-                st.markdown(
-                    "<div style='display:flex;padding:4px 8px;font-size:0.78rem;color:#888;border-bottom:1px solid #eee'>"
-                    "<div style='flex:2.4'>名称/代码</div>"
-                    "<div style='flex:1;text-align:right'>最新</div>"
-                    "<div style='flex:1;text-align:right'>涨幅</div>"
-                    "<div style='flex:1;text-align:right'>涨跌</div>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-                st.caption("长按股票 3 秒可删除自选")
-
-                wl_symbols = []
-                for item in watched:
-                    item_market = item.get("market", "A")
-                    try:
-                        wspot = get_stock_realtime(item["symbol"], market=item_market)
-                    except Exception:
-                        wspot = {}
-
-                    name_col, num_col = st.columns([2.4, 3])
-                    row_label = f"{item['name']}（{item['symbol']}）"
-                    if name_col.button(row_label, key=f"wl_open_{item['symbol']}", use_container_width=True):
-                        st.session_state["_detail_symbol"] = item["symbol"]
-                        st.session_state["_detail_market"] = item_market
-                        st.session_state["_detail_name"] = item["name"]
-                        st.rerun()
-
-                    if wspot and wspot.get("最新价"):
-                        wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
-                        wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
-                        color = "#e02020" if wchange >= 0 else "#22a06b"
-                        num_col.markdown(
-                            f"<div style='display:flex;padding-top:8px'>"
-                            f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{wspot['最新价']:.2f}</div>"
-                            f"<div style='flex:1;text-align:right;color:{color}'>{wchange_pct:+.2f}%</div>"
-                            f"<div style='flex:1;text-align:right;color:{color}'>{wchange:+.2f}</div>"
-                            f"</div>",
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        num_col.markdown(
-                            "<div style='text-align:right;padding-top:8px;color:#999'>—</div>", unsafe_allow_html=True
-                        )
-
-                    if st.button(f"长按删除-{item['symbol']}", key=f"wl_lp_trigger_{item['symbol']}"):
-                        _confirm_delete_dialog(_email, item["symbol"], item["name"])
-
-                    wl_symbols.append(item["symbol"])
-
-                if wl_symbols:
-                    _cv1.html(
-                        f"""
-                        <script>
-                        (function() {{
-                            const symbols = {json.dumps(wl_symbols)};
-                            function bind(attemptsLeft) {{
-                                const doc = window.parent.document;
-                                const buttons = Array.from(doc.querySelectorAll('button'));
-                                let allBound = true;
-                                symbols.forEach(function(sym) {{
-                                    const marker = "长按删除-" + sym;
-                                    const hiddenBtn = buttons.find(function(b) {{ return b.innerText.trim() === marker; }});
-                                    const rowBtn = buttons.find(function(b) {{ return b.innerText.indexOf("（" + sym + "）") !== -1; }});
-                                    if (hiddenBtn) {{
-                                        const wrap = hiddenBtn.closest('[data-testid="stButton"]');
-                                        if (wrap) wrap.style.display = 'none';
-                                    }}
-                                    if (rowBtn && hiddenBtn) {{
-                                        if (!rowBtn.dataset.lpBound) {{
-                                            rowBtn.dataset.lpBound = "1";
-                                            let timer = null;
-                                            let fired = false;
-                                            const start = function() {{
-                                                fired = false;
-                                                timer = setTimeout(function() {{
-                                                    fired = true;
-                                                    hiddenBtn.click();
-                                                }}, 3000);
-                                            }};
-                                            const cancel = function() {{
-                                                if (timer) {{ clearTimeout(timer); timer = null; }}
-                                            }};
-                                            const end = function(e) {{
-                                                if (fired) {{ e.preventDefault(); e.stopPropagation(); }}
-                                                cancel();
-                                            }};
-                                            rowBtn.addEventListener('touchstart', start, {{passive: true}});
-                                            rowBtn.addEventListener('touchend', end);
-                                            rowBtn.addEventListener('touchmove', cancel);
-                                            rowBtn.addEventListener('mousedown', start);
-                                            rowBtn.addEventListener('mouseup', end);
-                                            rowBtn.addEventListener('mouseleave', cancel);
-                                        }}
-                                    }} else {{
-                                        allBound = false;
-                                    }}
-                                }});
-                                if (!allBound && attemptsLeft > 0) {{
-                                    setTimeout(function() {{ bind(attemptsLeft - 1); }}, 200);
-                                }}
-                            }}
-                            bind(15);
-                        }})();
-                        </script>
-                        """,
-                        height=0,
+                _wl_markets_present = sorted({item.get("market", "A") for item in watched})
+                _wl_tab_labels = ["全部"] + [{"A": "A股", "HK": "港股", "US": "美股"}[m] for m in _wl_markets_present]
+                if len(_wl_tab_labels) > 2:
+                    wl_market_tab = st.radio(
+                        "市场筛选", _wl_tab_labels, key="_wl_market_tab", horizontal=True, label_visibility="collapsed",
                     )
+                else:
+                    wl_market_tab = "全部"
+                _wl_code_to_label = {"A": "A股", "HK": "港股", "US": "美股"}
+                watched_filtered = (
+                    watched if wl_market_tab == "全部"
+                    else [i for i in watched if _wl_code_to_label.get(i.get("market", "A")) == wl_market_tab]
+                )
+                st.caption("长按股票 3 秒可删除自选 · 每 8 秒自动刷新")
+                _render_watchlist_rows(watched_filtered, _email)
+
+
+@st.fragment(run_every=8)
+def _render_watchlist_rows(watched_filtered: list, _email: str):
+    """自选股列表本体单独做成 fragment，价格/涨跌幅每8秒自己刷新，效仿长桥的
+    紧凑列表样式：名称代码 + 迷你走势图 + 现价/成交额 + 涨跌幅色块。数字真变了
+    背景闪一下（复用详情页那套red/green flash动画），列表长按删除手势不受影响
+    （JS绑定逻辑本来就是幂等的，每次刷新重跑一遍不会重复绑定）。
+    """
+    if not watched_filtered:
+        st.caption("这个分类下暂时没有自选股。")
+        return
+
+    st.markdown(
+        _PRICE_FLASH_CSS
+        + "<div style='display:flex;align-items:center;padding:4px 8px;font-size:0.75rem;color:#888;border-bottom:1px solid #eee'>"
+        + "<div style='flex:2.1'>名称/代码</div>"
+        + "<div style='flex:1.1;text-align:center'>走势</div>"
+        + "<div style='flex:1.3;text-align:right'>最新/成交额</div>"
+        + "<div style='flex:1;text-align:right'>涨跌幅</div>"
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    wl_symbols = []
+    for item in watched_filtered:
+        item_market = item.get("market", "A")
+        symbol = item["symbol"]
+        try:
+            wspot = get_stock_realtime(symbol, market=item_market)
+        except Exception:
+            wspot = {}
+
+        name_col, spark_col, price_col, badge_col = st.columns([2.1, 1.1, 1.3, 1])
+        row_label = f"{item['name']}（{symbol}）"
+        if name_col.button(row_label, key=f"wl_open_{symbol}", use_container_width=True):
+            st.session_state["_detail_symbol"] = symbol
+            st.session_state["_detail_market"] = item_market
+            st.session_state["_detail_name"] = item["name"]
+            st.rerun()
+
+        closes = _fetch_sparkline_closes(symbol, item_market)
+        spark_color = "#999"
+        if wspot and wspot.get("最新价") and wspot.get("昨收"):
+            spark_color = "#e02020" if wspot["最新价"] >= wspot["昨收"] else "#22a06b"
+        spark_col.markdown(
+            f"<div style='display:flex;justify-content:center;padding-top:4px'>"
+            f"{_build_sparkline_svg(closes, spark_color)}</div>",
+            unsafe_allow_html=True,
+        )
+
+        if wspot and wspot.get("最新价"):
+            wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
+            wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
+            color = "#e02020" if wchange >= 0 else "#22a06b"
+
+            flash_key = f"_wl_last_price_{symbol}_{item_market}"
+            prev = st.session_state.get(flash_key)
+            st.session_state[flash_key] = wspot["最新价"]
+            flash_class = ""
+            if prev is not None and prev != wspot["最新价"]:
+                flash_class = "price-flash-up" if wspot["最新价"] > prev else "price-flash-down"
+
+            price_col.markdown(
+                f"<div class='{flash_class}' style='text-align:right;padding-top:2px;border-radius:4px'>"
+                f"<div style='font-weight:600;color:{color}'>{wspot['最新价']:.2f}</div>"
+                f"<div style='font-size:0.72rem;color:#999'>{_fmt_turnover(wspot.get('成交额'))}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            badge_col.markdown(
+                f"<div style='text-align:right;padding-top:6px'>"
+                f"<span style='background:{color};color:#fff;font-size:0.78rem;font-weight:600;"
+                f"padding:3px 7px;border-radius:5px;display:inline-block;min-width:58px;text-align:center'>"
+                f"{wchange_pct:+.2f}%</span></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            price_col.markdown(
+                "<div style='text-align:right;padding-top:4px;color:#999'>—</div>", unsafe_allow_html=True
+            )
+            badge_col.markdown("")
+
+        if st.button(f"长按删除-{symbol}", key=f"wl_lp_trigger_{symbol}"):
+            _confirm_delete_dialog(_email, symbol, item["name"])
+
+        wl_symbols.append(symbol)
+
+    if wl_symbols:
+        _cv1.html(
+            f"""
+            <script>
+            (function() {{
+                const symbols = {json.dumps(wl_symbols)};
+                function bind(attemptsLeft) {{
+                    const doc = window.parent.document;
+                    const buttons = Array.from(doc.querySelectorAll('button'));
+                    let allBound = true;
+                    symbols.forEach(function(sym) {{
+                        const marker = "长按删除-" + sym;
+                        const hiddenBtn = buttons.find(function(b) {{ return b.innerText.trim() === marker; }});
+                        const rowBtn = buttons.find(function(b) {{ return b.innerText.indexOf("（" + sym + "）") !== -1; }});
+                        if (hiddenBtn) {{
+                            const wrap = hiddenBtn.closest('[data-testid="stButton"]');
+                            if (wrap) wrap.style.display = 'none';
+                        }}
+                        if (rowBtn && hiddenBtn) {{
+                            if (!rowBtn.dataset.lpBound) {{
+                                rowBtn.dataset.lpBound = "1";
+                                let timer = null;
+                                let fired = false;
+                                const start = function() {{
+                                    fired = false;
+                                    timer = setTimeout(function() {{
+                                        fired = true;
+                                        hiddenBtn.click();
+                                    }}, 3000);
+                                }};
+                                const cancel = function() {{
+                                    if (timer) {{ clearTimeout(timer); timer = null; }}
+                                }};
+                                const end = function(e) {{
+                                    if (fired) {{ e.preventDefault(); e.stopPropagation(); }}
+                                    cancel();
+                                }};
+                                rowBtn.addEventListener('touchstart', start, {{passive: true}});
+                                rowBtn.addEventListener('touchend', end);
+                                rowBtn.addEventListener('touchmove', cancel);
+                                rowBtn.addEventListener('mousedown', start);
+                                rowBtn.addEventListener('mouseup', end);
+                                rowBtn.addEventListener('mouseleave', cancel);
+                            }}
+                        }} else {{
+                            allBound = false;
+                        }}
+                    }});
+                    if (!allBound && attemptsLeft > 0) {{
+                        setTimeout(function() {{ bind(attemptsLeft - 1); }}, 200);
+                    }}
+                }}
+                bind(15);
+            }})();
+            </script>
+            """,
+            height=0,
+        )

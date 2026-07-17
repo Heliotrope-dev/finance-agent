@@ -754,6 +754,7 @@ def get_stock_realtime_futu(symbol: str, market: str) -> dict:
         "最低": float(row["low_price"]),
         "涨跌额": last - prev_close,
         "涨跌幅": (last - prev_close) / prev_close * 100,
+        "成交额": float(row["turnover"]) if pd.notna(row.get("turnover")) else None,
         "更新时间": str(row["update_time"]),
         "数据源": "Futu实时",
     }
@@ -1177,6 +1178,7 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
                 "代码": symbol, "名称": fields[1],
                 "最新价": float(fields[6]), "今开": float(fields[2]),
                 "昨收": float(fields[3]), "最高": float(fields[4]), "最低": float(fields[5]),
+                "成交额": float(fields[11]) if fields[11] else None,
                 "更新时间": f"{fields[17]} {fields[18]}",
             }
         if market == "US":
@@ -1204,6 +1206,7 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
             "昨收": float(fields[2]),
             "最高": float(fields[4]),
             "最低": float(fields[5]),
+            "成交额": float(fields[9]) if fields[9] else None,
             "更新时间": f"{fields[30]} {fields[31]}",
         }
 
