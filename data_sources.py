@@ -768,19 +768,29 @@ def get_futu_news(keyword: str, max_count: int = 8) -> pd.DataFrame:
     只有本机/服务器跑了 OpenD 才能用，连不上就静默返回空，上层自然会退回
     财新兜底。用 NewsSubType.NEWS 过滤掉窝轮牛熊证估值公告这类噪音。
 
-    实测这个接口跟 request_history_kline 一样偶尔会异常久不返回（大概率是
-    富途那边资讯搜索本身要现查，不是本地缓存的行情快照那种毫秒级接口）——
-    跟 get_market_snapshot 不是同一类，不能裸调用，套 _run_with_timeout。
+    这里不复用全局共享的 _get_futu_ctx()——那个 ctx 是在后台线程里连接、
+    传回主线程长期持有的，别的地方都是同步直调，一旦再套一层 _run_with_timeout
+    去调用它的方法，就变成"连接和调用不是同一个线程"，实测会直接卡死（跟
+    get_stock_realtime_futu 那边记录的教训一样）。资讯搜索这个功能不追求
+    复用连接，干脆自己开一个独立短连接，连接+查询+关闭全在同一个子线程里
+    做完，既不碰共享 ctx，又有超时兜底，卡住了子线程自己泄漏，主线程最多
+    等 timeout 秒就拿到空结果退回财新兜底。
     """
-    ctx = _get_futu_ctx()
-    if ctx is None:
+    if not _FUTU_SDK_AVAILABLE:
         return pd.DataFrame()
 
-    def _search():
-        return ctx.get_search_news(keyword, max_count=max_count, news_sub_type=ft.NewsSubType.NEWS)
+    def _fetch():
+        ctx = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
+        try:
+            return ctx.get_search_news(keyword, max_count=max_count, news_sub_type=ft.NewsSubType.NEWS)
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
 
     try:
-        result = _run_with_timeout(_search, timeout=8, default=None)
+        result = _run_with_timeout(_fetch, timeout=8, default=None)
     except Exception:
         result = None
     if result is None:
