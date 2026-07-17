@@ -23,6 +23,7 @@ from data_sources import (
     get_benchmark_history,
     get_stock_name,
     get_index_news,
+    get_futu_news,
     search_stock_by_name,
     get_multi_index_snapshot,
     get_market_breadth,
@@ -34,7 +35,7 @@ from data_sources import (
 )
 from analysis import (
     cross_validate, summarize_financials, summarize_news, summarize_benchmark,
-    extract_verdict, analyze_index, summarize_overall,
+    extract_verdict, analyze_index, summarize_overall, extract_score,
 )
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
@@ -162,8 +163,10 @@ _BENCHMARK_NAMES = {"A": "沪深300", "HK": "恒生指数", "US": "标普500"}
 def _fetch_news_items(keyword: str, symbol: str | None, market: str) -> tuple:
     """页面展示和AI分析要用同一份新闻源，不然会出现页面上一手资讯明明有
     （比如寒武纪的官方公告），AI资讯解读那栏却说"没有找到相关新闻"这种自相
-    矛盾的情况——A股优先走官方公告（get_stock_notices），没有才退回财新
-    关键词匹配（get_stock_news）。返回 (DataFrame, 是否来自官方公告)。
+    矛盾的情况。优先级：A股官方公告（get_stock_notices，监管强制披露，永远
+    免费）> 富途资讯搜索（get_futu_news，真按关键词匹配，港股/美股/A股通吃，
+    链接免费可读）> 财新关键词匹配（get_stock_news，兜底，有付费墙）。
+    返回 (DataFrame, 来源标记："notices"/"futu"/"caixin")。
     """
     if market == "A" and symbol:
         try:
@@ -171,12 +174,72 @@ def _fetch_news_items(keyword: str, symbol: str | None, market: str) -> tuple:
         except Exception:
             notices = None
         if notices is not None and not notices.empty:
-            return notices, True
+            return notices, "notices"
+
+    try:
+        futu_news = get_futu_news(keyword, max_count=8)
+    except Exception:
+        futu_news = None
+    if futu_news is not None and not futu_news.empty:
+        return futu_news, "futu"
+
     try:
         news = get_stock_news(keyword, limit=8)
     except Exception:
         news = None
-    return news, False
+    return news, "caixin"
+
+
+def _news_to_summary(news) -> str:
+    """喂给AI的新闻摘要——带上日期和分类，不只是光秃秃的标题，不然AI只能看着
+    一行标题瞎总结，写不出具体内容，只能说"整体偏利好"这种空话。"""
+    if news is None or news.empty:
+        return "无相关新闻"
+    return "\n".join(
+        f"- [{r.get('日期', '') or '未知日期'}] ({r.get('分类', '') or '未分类'}) {r['新闻标题']}"
+        for _, r in news.iterrows()
+    )
+
+
+def _render_overall_summary(raw_text: str):
+    """总结性分析的展示——把AI输出末尾的[综合评分: 数字]标签解析出来，做成一条
+    可视化打分条摆在文字前面，分数一眼看出偏多偏空，不用读完整段文字才知道结论；
+    红涨绿跌是这个项目一贯的配色约定，这里偏多用红、偏空用绿，跟涨跌颜色语义保持一致。
+    """
+    import re
+    score = extract_score(raw_text)
+    display_text = re.sub(r"\[综合评分[：:]\s*\d{1,3}\]", "", raw_text).strip()
+
+    if score is not None:
+        if score >= 65:
+            color, zone = "#e02020", "偏多"
+        elif score <= 35:
+            color, zone = "#22a06b", "偏空"
+        else:
+            color, zone = "#888", "中性"
+        st.markdown(
+            f"""
+            <div style='margin-bottom:14px'>
+                <div style='display:flex;align-items:baseline;gap:8px;margin-bottom:6px'>
+                    <span style='font-size:1.6rem;font-weight:700;color:{color}'>{score}</span>
+                    <span style='font-size:0.85rem;color:#888'>/ 100
+                        <span style='color:{color};font-weight:600'>{zone}</span>
+                    </span>
+                </div>
+                <div style='position:relative;height:6px;border-radius:3px;
+                            background:linear-gradient(to right,#22a06b,#d8d8d8,#e02020)'>
+                    <div style='position:absolute;left:{score}%;top:-4px;width:14px;height:14px;
+                                border-radius:50%;background:#fff;border:3px solid {color};
+                                transform:translateX(-50%)'></div>
+                </div>
+                <div style='display:flex;justify-content:space-between;font-size:0.7rem;color:#aaa;margin-top:3px'>
+                    <span>偏空</span><span>中性</span><span>偏多</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.markdown(display_text)
 
 
 def _render_news_section(keyword: str, symbol: str | None = None, market: str = "A", is_index: bool = False):
@@ -186,61 +249,67 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
     免费公告聚合源，退回财新新闻摘要（有付费墙，已经标注清楚）。
 
     指数（is_index=True）没有公司名可以精确匹配，用 get_index_news 单独处理——
-    匹配不到指数名字面也不当成"没有资讯"，退回大盘概况原文（详见 get_index_news
-    的说明）。
+    优先走富途资讯搜索（真按这个指数的名字搜，免费可读），连不上才退回财新
+    严格关键词匹配，匹配不到就如实说没有，不再拿不相关的大盘资讯硬凑（详见
+    get_index_news 的说明）。
     """
     st.subheader("最新资讯")
 
     if is_index:
         try:
-            news = get_index_news(keyword, limit=8)
+            news, idx_source = get_index_news(keyword, limit=8)
         except Exception as e:
             st.caption(f"获取失败：{e}")
             return
         if news is None or news.empty:
-            st.caption("暂时没有查到相关的大盘资讯，可能只是这个免费源没收录。")
+            st.caption("暂时没有查到相关的资讯，可能只是这几个免费源都没收录。")
             return
-        st.caption(
-            "摘要来自财新的大盘资讯，不一定逐条点名这个指数——指数本身就是大盘的映射，"
-            "这里给的是最新大盘概况原文。原文链接需要财新会员订阅才能打开全文，这里只展示摘要。"
-        )
+        if idx_source == "futu":
+            st.caption("来自富途资讯搜索，按这个指数的名字精确匹配，免费可读，点标题可跳转原文。")
+        else:
+            st.caption("来自财新的关键词匹配资讯，原文链接需要财新会员订阅才能打开全文，这里只展示摘要。")
+        idx_clickable = idx_source == "futu"
         for _, r in news.iterrows():
+            _title = r["新闻标题"]
+            _title_html = (
+                f"<a href='{r.get('url', '')}' target='_blank' style='color:#0f172a;text-decoration:none'>{_title}</a>"
+                if idx_clickable else f"<span style='color:#0f172a'>{_title}</span>"
+            )
             st.markdown(
                 f"<div style='margin:6px 0;font-size:0.9rem'>"
                 f"<span style='color:#888;font-size:0.78rem'>{r.get('日期', '') or ''}</span>　"
-                f"<span style='color:#0f172a'>{r['新闻标题']}</span>　"
+                f"{_title_html}　"
                 f"<span style='color:#888;font-size:0.75rem'>{r.get('分类', '')}</span>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
         return
 
-    news, _from_notices = _fetch_news_items(keyword, symbol, market)
+    news, source = _fetch_news_items(keyword, symbol, market)
     if news is None or news.empty:
-        st.caption("这只股票近期没有查到直接相关的新闻，不代表没有热度，可能只是这个免费源没收录。")
-        return
-    if _from_notices:
-        st.caption("来自东财公告中心的官方公告，监管强制披露，永远免费，点标题可跳转原文。")
-        for _, r in news.iterrows():
-            st.markdown(
-                f"<div style='margin:6px 0;font-size:0.9rem'>"
-                f"<span style='color:#888;font-size:0.78rem'>{r.get('日期', '')}</span>　"
-                f"<a href='{r.get('url', '')}' target='_blank' style='color:#0f172a;text-decoration:none'>{r['新闻标题']}</a>　"
-                f"<span style='color:#888;font-size:0.75rem'>{r.get('分类', '')}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+        st.caption("这只股票近期没有查到直接相关的新闻，不代表没有热度，可能只是这几个免费源都没收录。")
         return
 
-    st.caption("摘要来自财新，原文链接需要财新会员订阅才能打开全文，这里只展示摘要本身。")
+    if source == "notices":
+        st.caption("来自东财公告中心的官方公告，监管强制披露，永远免费，点标题可跳转原文。")
+    elif source == "futu":
+        st.caption("来自富途资讯搜索，按关键词精确匹配，免费可读，点标题可跳转原文。")
+    else:
+        st.caption("摘要来自财新，原文链接需要财新会员订阅才能打开全文，这里只展示摘要本身。")
+
+    clickable = source in ("notices", "futu")
     for _, r in news.iterrows():
         date = r.get("日期") or ""
         title = r["新闻标题"]
         tag = r.get("分类", "")
+        title_html = (
+            f"<a href='{r.get('url', '')}' target='_blank' style='color:#0f172a;text-decoration:none'>{title}</a>"
+            if clickable else f"<span style='color:#0f172a'>{title}</span>"
+        )
         st.markdown(
             f"<div style='margin:6px 0;font-size:0.9rem'>"
             f"<span style='color:#888;font-size:0.78rem'>{date}</span>　"
-            f"{title}　"
+            f"{title_html}　"
             f"<span style='color:#888;font-size:0.75rem'>{tag}</span>"
             f"</div>",
             unsafe_allow_html=True,
@@ -256,10 +325,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                 if module == "news":
                     stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
                     news, _ = _fetch_news_items(stock_name, symbol, market)
-                    news_summary = (
-                        "\n".join(f"- {r['新闻标题']}" for _, r in news.iterrows())
-                        if news is not None and not news.empty else "无相关新闻"
-                    )
+                    news_summary = _news_to_summary(news)
                     ai_text = summarize_news(symbol, news_summary)
                     st.session_state[mod_key] = {"news": news, "ai_text": ai_text}
 
@@ -302,10 +368,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                     )
                     stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
                     news, _ = _fetch_news_items(stock_name, symbol, market)
-                    news_summary = (
-                        "\n".join(f"- {r['新闻标题']}" for _, r in news.iterrows())
-                        if news is not None and not news.empty else "无相关新闻"
-                    )
+                    news_summary = _news_to_summary(news)
 
                     technical_summary = compute_technical_signal(hist)
                     ai_text = cross_validate(symbol, history_summary, financial_summary, news_summary, technical_summary)
@@ -539,7 +602,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
                     st.session_state[summary_key] = summarize_overall(symbol, section_texts)
                 except Exception as e:
                     st.session_state[summary_key] = f"汇总失败：{e}"
-        st.markdown(st.session_state[summary_key])
+        _render_overall_summary(st.session_state[summary_key])
 
 
 def _render_index_detail(name: str, code: str, market: str):
@@ -617,11 +680,8 @@ def _render_index_detail(name: str, code: str, market: str):
         if f"{idx_ai_key}_news" not in st.session_state:
             with st.spinner("分析中..."):
                 try:
-                    news = get_index_news(name, limit=8)
-                    news_summary = (
-                        "\n".join(f"- {r['新闻标题']}" for _, r in news.iterrows())
-                        if news is not None and not news.empty else "无相关新闻"
-                    )
+                    news, _ = get_index_news(name, limit=8)
+                    news_summary = _news_to_summary(news)
                     ai_text = summarize_news(name, news_summary)
                     st.session_state[f"{idx_ai_key}_news"] = {"ai_text": ai_text, "summary": news_summary}
                 except Exception as e:
@@ -672,7 +732,7 @@ def _render_index_detail(name: str, code: str, market: str):
                     st.session_state[idx_summary_key] = summarize_overall(name, section_texts)
                 except Exception as e:
                     st.session_state[idx_summary_key] = f"汇总失败：{e}"
-        st.markdown(st.session_state[idx_summary_key])
+        _render_overall_summary(st.session_state[idx_summary_key])
 
 
 @st.dialog("确认删除")

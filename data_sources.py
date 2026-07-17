@@ -759,6 +759,45 @@ def get_stock_realtime_futu(symbol: str, market: str) -> dict:
     }
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_futu_news(keyword: str, max_count: int = 8) -> pd.DataFrame:
+    """走 Futu OpenD 的资讯搜索（get_search_news）——这是目前找到的最好的新闻源：
+    真按关键词匹配（不是财新那种整段大盘资讯里瞎找子串），A股/港股/美股通吃
+    （财新的公司新闻只覆盖到个别大公司，港股/美股基本没东西），链接指向
+    news.futunn.com（富途自己的资讯站，公开可读，不需要富途账号订阅）。
+    只有本机/服务器跑了 OpenD 才能用，连不上就静默返回空，上层自然会退回
+    财新兜底。用 NewsSubType.NEWS 过滤掉窝轮牛熊证估值公告这类噪音。
+    """
+    ctx = _get_futu_ctx()
+    if ctx is None:
+        return pd.DataFrame()
+    try:
+        ret, data = ctx.get_search_news(keyword, max_count=max_count, news_sub_type=ft.NewsSubType.NEWS)
+    except Exception:
+        return pd.DataFrame()
+    if ret != ft.RET_OK or data is None or data.empty:
+        return pd.DataFrame()
+
+    def _full_date(s: str) -> str:
+        # publish_time 只给"7/17"这种月/日，没有年份——都是最近的资讯，直接拼当前年份。
+        try:
+            m, d = s.strip().split("/")
+            today = datetime.now()
+            year = today.year
+            guess = datetime(year, int(m), int(d))
+            if guess > today + timedelta(days=1):
+                year -= 1
+            return f"{year}-{int(m):02d}-{int(d):02d}"
+        except Exception:
+            return s
+
+    df = data.copy()
+    df["日期"] = df["publish_time"].apply(_full_date)
+    df = df.sort_values("日期", ascending=False)
+    df = df.rename(columns={"title": "新闻标题", "source": "分类"})
+    return df[["日期", "新闻标题", "分类", "url"]]
+
+
 _FUTU_KTYPE_MAP = {"日K": "K_DAY", "周K": "K_WEEK", "月K": "K_MON"}
 _FUTU_DAYS_BACK = {"日K": 90, "周K": 730, "月K": 1825}
 
@@ -1198,31 +1237,34 @@ def get_market_news() -> pd.DataFrame:
     return _with_retry(ak.stock_news_main_cx)
 
 
-def get_index_news(name: str, limit: int = 10) -> pd.DataFrame:
-    """指数版的资讯——跟个股不一样，指数没有"公司名"这种精确关键词可以匹配。
-    财新这个源偏宏观/全球财经，报道大盘走势时常用"沪指""大盘""A股"这类简称，
-    很少直接出现"上证指数"这种官方全称字面——如果照搬个股那套"关键词包含"过滤，
-    大概率过滤成空，但这份大盘资讯本身对一个指数来说天然就是相关的（指数本来就是
-    整个大盘的映射，不需要精确点名）。所以这里先试关键词匹配，匹配不到就不再较真
-    过滤，直接给最新的大盘资讯原文，调用方负责标注清楚这是"大盘概况"而不是精确
-    点名这个指数的报道。
+def get_index_news(name: str, limit: int = 10) -> tuple:
+    """指数版的资讯，优先走 get_futu_news（真按"这个指数"关键词搜，港股/美股/A股
+    指数都覆盖得到，恒生科技指数不会被喂一堆跟它毫无关系的全球宏观新闻）。
+
+    Futu 连不上（本地没装 OpenD）时才退回财新兜底——但财新那份大盘资讯偏
+    全球宏观/A股，对港股/美股指数来说本来就文不对题，所以退回财新时只做
+    严格关键词匹配，匹配不到就如实说没有，不再拿不相关的资讯硬凑（这曾经
+    导致恒生科技指数页面显示一堆油价、谷歌股价这类完全不相关的内容）。
+    返回 (DataFrame, 来源标记："futu"/"caixin")。
     """
+    futu_news = get_futu_news(name, max_count=limit)
+    if futu_news is not None and not futu_news.empty:
+        return futu_news, "futu"
+
     df = get_market_news()
     if df is None or df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), "caixin"
 
     df = df.copy()
     df["日期"] = df["url"].str.extract(r"/(\d{4}-\d{2}-\d{2})/")
     df = df.sort_values("日期", ascending=False, na_position="last")
 
     matched = df[df["summary"].str.contains(name, na=False)]
-    if matched.empty:
-        matched = df
     result = matched.head(limit).copy()
     if result.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), "caixin"
     result = result.rename(columns={"summary": "新闻标题", "tag": "分类"})
-    return result[["日期", "新闻标题", "分类", "url"]]
+    return result[["日期", "新闻标题", "分类", "url"]], "caixin"
 
 
 @st.cache_data(ttl=600, show_spinner=False)
