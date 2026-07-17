@@ -34,7 +34,7 @@ from data_sources import (
     resolve_symbol_by_name,
 )
 from analysis import (
-    cross_validate, summarize_financials, summarize_news, summarize_benchmark,
+    cross_validate, summarize_financials, summarize_news, summarize_index_news, summarize_benchmark,
     extract_verdict, analyze_index, summarize_overall, extract_score,
 )
 from tracker import (
@@ -865,7 +865,7 @@ def _render_index_detail(name: str, code: str, market: str):
                 try:
                     news, _ = get_index_news(name, limit=8)
                     news_summary = _news_to_summary(news)
-                    ai_text = summarize_news(name, news_summary)
+                    ai_text = summarize_index_news(name, news_summary)
                     st.session_state[f"{idx_ai_key}_news"] = {"ai_text": ai_text, "summary": news_summary}
                 except Exception as e:
                     st.session_state[f"{idx_ai_key}_news"] = {"ai_text": f"获取失败：{e}", "summary": "无相关新闻"}
