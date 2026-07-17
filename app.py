@@ -1053,14 +1053,10 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         + "}"
         + "a.wl-card-link:hover { opacity: 0.85; }"
         # 删除键用type="tertiary"去掉了方框，但图标本身默认偏小，用户反馈要
-        # 大一点；还要求跟卡片内容垂直居中对齐（之前贴着顶部，看着跟下面的
-        # 名称/价格没对上）。用 key 生成的 st-key-* class精确定位，不影响
-        # 页面上其它按钮。
-        + "[class*='st-key-wl_del_'] button {"
-        + "  display: flex; align-items: center; justify-content: center;"
-        + "  height: 100%; min-height: 44px;"
-        + "}"
-        + "[class*='st-key-wl_del_'] button p { font-size: 1.4rem !important; font-weight: 700; }"
+        # 大一点、位置要跟卡片内容对齐。垂直对齐交给st.columns自己的
+        # vertical_alignment="center"处理（原生机制，比猜CSS高度靠谱），
+        # 这里只负责放大字号，用 key 生成的 st-key-* class精确定位。
+        + "[class*='st-key-wl_del_'] button p { font-size: 1.5rem !important; font-weight: 700; margin: 0; }"
         + "</style>",
         unsafe_allow_html=True,
     )
@@ -1080,15 +1076,23 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         unsafe_allow_html=True,
     )
 
-    for item in watched_filtered:
-        item_market = item.get("market", "A")
-        symbol = item["symbol"]
-        try:
-            wspot = get_stock_realtime(symbol, market=item_market)
-        except Exception:
-            wspot = {}
+    # 先把所有行的数据一次性取完（不带任何渲染），再统一画出来——之前是
+    # 边取数据边画一行，用户反馈"一个一个蹦出来很慢"。取数据本身的耗时省不掉
+    # （网络请求），但至少不会让用户看着页面一行一行往外挤，而是等一下之后
+    # 整批一起出现，观感上干脆很多。
+    _rows_data = []
+    with st.spinner("加载中..."):
+        for item in watched_filtered:
+            item_market = item.get("market", "A")
+            symbol = item["symbol"]
+            try:
+                wspot = get_stock_realtime(symbol, market=item_market)
+            except Exception:
+                wspot = {}
+            closes = _fetch_sparkline_closes(symbol, item_market)
+            _rows_data.append((item, item_market, symbol, wspot, closes))
 
-        closes = _fetch_sparkline_closes(symbol, item_market)
+    for item, item_market, symbol, wspot, closes in _rows_data:
         spark_color = "#999"
         if wspot and wspot.get("最新价") and wspot.get("昨收"):
             spark_color = "#e02020" if wspot["最新价"] >= wspot["昨收"] else "#22a06b"

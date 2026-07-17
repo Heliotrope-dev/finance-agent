@@ -44,11 +44,20 @@ def _throttle():
     _last_call_ts = time.time()
 
 
-def _with_retry(fn, retries=2, backoff=5):
+def _with_retry(fn, retries=2, backoff=5, throttle=True):
+    """throttle=True时，两次调用之间强制留至少_MIN_INTERVAL_SEC秒——这是专门
+    针对东财接口的保护（东财对高频请求会临时封IP），但这个函数被BaoStock/新浪/
+    财新等完全不需要这个保护的数据源也在用，之前不分青红皂白全部限流，导致
+    自选股这种一次要连续拉好几只股票实时行情+历史数据的场景，硬生生被这个
+    全局3秒间隔拖成"一个一个蹦出来"——实测这是今天好几次"页面好慢"反馈的
+    真正原因。现在只有明确传throttle=True（东财相关调用）才会真的限流，
+    其它数据源传throttle=False直接跳过等待。
+    """
     last_err = None
     for attempt in range(retries + 1):
         try:
-            _throttle()
+            if throttle:
+                _throttle()
             return fn()
         except Exception as e:  # noqa: BLE001 — 数据源异常统一兜底重试
             last_err = e
@@ -361,7 +370,7 @@ def get_index_history(code: str, market: str, period: str = "日K") -> pd.DataFr
 @st.cache_data(ttl=300, show_spinner=False)
 def get_market_breadth() -> dict:
     """A股大盘涨跌家数统计（上涨/下跌/涨停/跌停/活跃度）。只有A股有这个概念。"""
-    df = _with_retry(ak.stock_market_activity_legu)
+    df = _with_retry(ak.stock_market_activity_legu, throttle=False)  # 乐咕乐股网，不是东财
     return dict(zip(df["item"], df["value"]))
 
 
@@ -455,7 +464,7 @@ def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
     """热度榜挂了时的兜底——退回手动维护的知名港股名单+全市场快照，按涨跌幅排。
     这是get_hk_famous_movers改成热度榜之前的老实现，稳定性验证过很多次。
     """
-    df = _with_retry(ak.stock_hk_spot, retries=1)
+    df = _with_retry(ak.stock_hk_spot, retries=1, throttle=False)  # 新浪，不是东财
     if df is None or df.empty or "涨跌幅" not in df.columns:
         return pd.DataFrame()
     df = df[df["代码"].isin(_HK_FAMOUS_CODES)]
@@ -732,24 +741,24 @@ def get_stock_history(symbol: str, start_date: str, end_date: str, frequency: st
     自己有超时保护，卡住也只影响那一次点击，不会拖累首屏。
     """
     if market == "HK":
-        df = _with_retry(lambda: _fetch_history_hk(symbol, start_date, end_date))
+        df = _with_retry(lambda: _fetch_history_hk(symbol, start_date, end_date), throttle=False)  # 新浪
         return _append_today_bar(df, symbol, market) if frequency == "d" else df
     if market == "US":
-        df = _with_retry(lambda: _fetch_history_us(symbol, start_date, end_date))
+        df = _with_retry(lambda: _fetch_history_us(symbol, start_date, end_date), throttle=False)  # 新浪
         return _append_today_bar(df, symbol, market) if frequency == "d" else df
 
     if frequency != "d":
         return _fetch_history_baostock(symbol, start_date, end_date, frequency)
 
-    for fetch in (
-        lambda: _fetch_history_baostock(symbol, start_date, end_date, "d"),
-        lambda: ak.stock_zh_a_hist(
+    for fetch, _needs_throttle in (
+        (lambda: _fetch_history_baostock(symbol, start_date, end_date, "d"), False),  # BaoStock，不是东财
+        (lambda: ak.stock_zh_a_hist(
             symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq"
-        ),
-        lambda: _fetch_history_sina(symbol, start_date, end_date),
+        ), True),  # 东财，需要限流保护
+        (lambda: _fetch_history_sina(symbol, start_date, end_date), False),  # 新浪，不是东财
     ):
         try:
-            df = _with_retry(fetch, retries=1, backoff=3)
+            df = _with_retry(fetch, retries=1, backoff=3, throttle=_needs_throttle)
             if df is not None and not df.empty:
                 return _append_today_bar(df, symbol, market)
         except Exception:
@@ -1304,7 +1313,7 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
             "更新时间": f"{fields[30]} {fields[31]}",
         }
 
-    return _with_retry(_fetch, retries=1, backoff=2)
+    return _with_retry(_fetch, retries=1, backoff=2, throttle=False)  # 新浪，不是东财
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -1354,7 +1363,7 @@ def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
 @st.cache_data(ttl=300, show_spinner=False)
 def get_market_news() -> pd.DataFrame:
     """大盘/宏观资讯，补充个股新闻覆盖不到的面。"""
-    return _with_retry(ak.stock_news_main_cx)
+    return _with_retry(ak.stock_news_main_cx, throttle=False)  # 财新，不是东财
 
 
 def get_index_news(name: str, limit: int = 10) -> tuple:
