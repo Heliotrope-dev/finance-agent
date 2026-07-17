@@ -436,20 +436,44 @@ _HK_NAME_MAP = {
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
-    """港股核心股列表——按热度排（东财个股人气榜），不是按涨跌幅排。
-
-    之前是按涨跌幅排的"知名股涨跌幅榜"，但港股/美股本来就没有涨跌停制度，
-    按涨跌幅排没有A股那种"今天谁封板了"的信息量，改成按真实热度排更有意义。
-    stock_hk_hot_rank_em 是东财个股人气榜-港股市场，直接给排名+代码，不用
-    再自己维护名单去猜"知名股"是谁，人气本身就是市场自己投票出来的。
+def _get_hk_hot_rank_raw():
+    """东财人气榜-港股市场原始数据，实测这个接口不太稳定（有时候整个响应体
+    是空的，akshare内部json.loads直接炸"Expecting value"），单独抽出来方便
+    两个调用方（get_hk_famous_movers、get_index_top_movers）共用同一套
+    "热度榜失败就退回涨跌幅榜"的兜底逻辑，不用两边各写一次。
     """
-    df = _with_retry(ak.stock_hk_hot_rank_em, retries=2, backoff=3)
+    try:
+        df = _with_retry(ak.stock_hk_hot_rank_em, retries=2, backoff=3)
+    except Exception:
+        return None
     if df is None or df.empty:
+        return None
+    return df.rename(columns={"股票名称": "名称"})
+
+
+def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
+    """热度榜挂了时的兜底——退回手动维护的知名港股名单+全市场快照，按涨跌幅排。
+    这是get_hk_famous_movers改成热度榜之前的老实现，稳定性验证过很多次。
+    """
+    df = _with_retry(ak.stock_hk_spot, retries=1)
+    if df is None or df.empty or "涨跌幅" not in df.columns:
         return pd.DataFrame()
-    df = df.head(limit).rename(columns={"股票名称": "名称"})
-    keep = [c for c in ("当前排名", "代码", "名称", "最新价", "涨跌幅") if c in df.columns]
-    return df[keep].reset_index(drop=True)
+    df = df[df["代码"].isin(_HK_FAMOUS_CODES)]
+    df = df.sort_values("涨跌幅", ascending=False).head(limit)
+    keep = [c for c in ("代码", "中文名称", "最新价", "涨跌幅", "涨跌额") if c in df.columns]
+    return df[keep].rename(columns={"中文名称": "名称"}).reset_index(drop=True)
+
+
+def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
+    """港股核心股列表——优先按热度排（东财个股人气榜），这个接口不稳定时
+    退回按涨跌幅排的知名股名单，好过直接给用户看一坨Python异常。
+    """
+    df = _get_hk_hot_rank_raw()
+    if df is not None:
+        df = df.head(limit)
+        keep = [c for c in ("当前排名", "代码", "名称", "最新价", "涨跌幅") if c in df.columns]
+        return df[keep].reset_index(drop=True)
+    return _get_hk_movers_by_change(limit)
 
 
 _US_FAMOUS_CODES = [
@@ -583,7 +607,10 @@ def get_index_top_movers(market: str, limit: int = 30) -> pd.DataFrame:
     用这份覆盖主要板块龙头的名单。
     """
     if market == "A":
-        df = _with_retry(ak.stock_zh_a_spot_em, retries=2, backoff=3)
+        try:
+            df = _with_retry(ak.stock_zh_a_spot_em, retries=2, backoff=3)
+        except Exception:
+            return pd.DataFrame()
         if df is None or df.empty or "涨跌幅" not in df.columns:
             return pd.DataFrame()
         df = df.sort_values("涨跌幅", ascending=False).head(limit)
@@ -591,20 +618,25 @@ def get_index_top_movers(market: str, limit: int = 30) -> pd.DataFrame:
         return df[keep].reset_index(drop=True)
 
     if market == "HK":
-        df = _with_retry(ak.stock_hk_hot_rank_em, retries=2, backoff=3)
-        if df is None or df.empty or "涨跌幅" not in df.columns:
-            return pd.DataFrame()
-        df = df.rename(columns={"股票名称": "名称"}).sort_values("涨跌幅", ascending=False).head(limit)
-        keep = [c for c in ("代码", "名称", "最新价", "涨跌幅") if c in df.columns]
-        return df[keep].reset_index(drop=True)
+        df = _get_hk_hot_rank_raw()
+        if df is not None:
+            df = df.sort_values("涨跌幅", ascending=False).head(limit)
+            keep = [c for c in ("代码", "名称", "最新价", "涨跌幅") if c in df.columns]
+            return df[keep].reset_index(drop=True)
+        # 热度榜也挂了，退回涨跌幅榜兜底（跟get_hk_famous_movers共用同一份
+        # 兜底数据源，只是这里limit可以到30）。
+        return _get_hk_movers_by_change(limit)
 
     # US
-    codes = ",".join(f"gb_{c.lower()}" for c in _US_FAMOUS_CODES)
-    r = requests.get(
-        f"https://hq.sinajs.cn/list={codes}",
-        headers={"Referer": "https://finance.sina.com.cn"},
-        timeout=10,
-    )
+    try:
+        codes = ",".join(f"gb_{c.lower()}" for c in _US_FAMOUS_CODES)
+        r = requests.get(
+            f"https://hq.sinajs.cn/list={codes}",
+            headers={"Referer": "https://finance.sina.com.cn"},
+            timeout=10,
+        )
+    except Exception:
+        return pd.DataFrame()
     text = r.content.decode("gbk", errors="ignore")
     rows = []
     for code, line in zip(_US_FAMOUS_CODES, text.strip().split("\n")):
