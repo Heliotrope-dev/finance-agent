@@ -29,7 +29,7 @@ from data_sources import (
     get_us_famous_movers,
     resolve_symbol_by_name,
 )
-from analysis import cross_validate, summarize_financials, summarize_news, summarize_benchmark, extract_verdict
+from analysis import cross_validate, summarize_financials, summarize_news, summarize_benchmark, extract_verdict, analyze_index
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
     add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
@@ -399,17 +399,17 @@ def _render_stock_detail(symbol: str, market: str, name: str):
             st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
 
     st.divider()
-    st.subheader("深入分析")
-    mcol1, mcol2, mcol3, mcol4 = st.columns(4)
-    module_labels = [("news", "最新资讯"), ("financial", "财务摘要"), ("benchmark", "对比大盘"), ("cross", "数据分析")]
-    for col, (mod_key, mod_label) in zip((mcol1, mcol2, mcol3, mcol4), module_labels):
-        if col.button(mod_label, key=f"mod_btn_{mod_key}", use_container_width=True):
-            st.session_state["_detail_module"] = mod_key
-
-    active_module = st.session_state.get("_detail_module")
-    if active_module:
+    st.subheader("AI 深度分析")
+    st.caption(
+        "打开详情页自动生成，四个独立 AI 调用分别交叉验证新闻、财务、大盘对比、"
+        "技术面与消息面是否一致——只呈现数据和依据，不给买卖建议，请自行判断。"
+    )
+    for mod_key, mod_label in (
+        ("news", "最新资讯"), ("financial", "财务摘要"), ("benchmark", "对比大盘"), ("cross", "综合数据分析（交叉验证）"),
+    ):
         with st.container(border=True):
-            _render_module(active_module, symbol, market, hist, spot)
+            st.markdown(f"**{mod_label}**")
+            _render_module(mod_key, symbol, market, hist, spot)
 
 
 def _render_index_detail(name: str, code: str, market: str):
@@ -473,6 +473,45 @@ def _render_index_detail(name: str, code: str, market: str):
             st.error(f"K线加载失败：{e}")
         if chart_hist is not None and not chart_hist.empty:
             st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+
+    st.divider()
+    st.subheader("AI 深度分析")
+    st.caption("打开详情页自动生成，结合技术面信号和相关资讯做交叉验证——只呈现依据，不给操作建议。")
+
+    idx_ai_key = f"_idx_analysis_{code}_{market}"
+    with st.container(border=True):
+        st.markdown("**最新资讯**")
+        if f"{idx_ai_key}_news" not in st.session_state:
+            with st.spinner("分析中..."):
+                try:
+                    news = get_stock_news(name, limit=8)
+                    news_summary = (
+                        "\n".join(f"- {r['新闻标题']}：{r['新闻内容'][:100]}" for _, r in news.iterrows())
+                        if news is not None and not news.empty else "无相关新闻"
+                    )
+                    ai_text = summarize_news(name, news_summary)
+                    st.session_state[f"{idx_ai_key}_news"] = {"news": news, "ai_text": ai_text, "summary": news_summary}
+                except Exception as e:
+                    st.session_state[f"{idx_ai_key}_news"] = {"news": None, "ai_text": f"获取失败：{e}", "summary": "无相关新闻"}
+        news_data = st.session_state[f"{idx_ai_key}_news"]
+        st.markdown(news_data["ai_text"])
+        if news_data["news"] is not None and not news_data["news"].empty:
+            with st.expander("原始新闻列表"):
+                st.dataframe(news_data["news"], use_container_width=True)
+
+    with st.container(border=True):
+        st.markdown("**综合数据分析**")
+        if f"{idx_ai_key}_cross" not in st.session_state:
+            with st.spinner("分析中..."):
+                try:
+                    daily_hist = get_index_history(code, market, "日K")
+                    technical_summary = compute_technical_signal(daily_hist) if daily_hist is not None and not daily_hist.empty else "暂无技术面数据"
+                    news_summary = st.session_state.get(f"{idx_ai_key}_news", {}).get("summary", "无相关新闻")
+                    ai_text = analyze_index(name, technical_summary, news_summary)
+                    st.session_state[f"{idx_ai_key}_cross"] = ai_text
+                except Exception as e:
+                    st.session_state[f"{idx_ai_key}_cross"] = f"分析失败：{e}"
+        st.markdown(st.session_state[f"{idx_ai_key}_cross"])
 
 
 @st.dialog("确认删除")

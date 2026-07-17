@@ -43,13 +43,16 @@ _SYSTEM_PROMPT = """你是一个严谨的财经数据分析助手。你的任务
 最后必须单独另起一行，输出一个机器可解析的方向倾向标签，格式严格为：
 [方向倾向: 偏多] 或 [方向倾向: 偏空] 或 [方向倾向: 中性]
 这个标签是给客观历史记录用的，不是投资建议，判断依据是"综合数据信号，
-短期内哪个方向的证据更充分"，不确定就用"中性"，不要为了给出结论而勉强选边。"""
+短期内哪个方向的证据更充分"，不确定就用"中性"，不要为了给出结论而勉强选边。
+
+语气要求：像分析师写研判笔记一样直接说事，不要"作为一个AI"这类自我介绍开场，
+不要堆砌"值得注意的是""综合来看""不难看出"这类填充语，句子要有信息量。"""
 
 _FINANCIAL_SUMMARY_PROMPT = """你是财经数据分析助手。下面是一家上市公司的原始财务摘要表格
 （营收、净利润、毛利率等指标的历史数据），请用大白话写一段简短总结（150字以内），
 讲清楚：营收和利润是增长还是下滑、趋势如何、毛利率/净利率处于什么水平、有没有
 明显异常的地方。不要给投资建议，只客观转述数据说明的情况。关键数字用 Markdown
-加粗标出。"""
+加粗标出。直接说结论，不要"作为财经助手"这类开场白，不堆砌"值得注意的是"之类的填充语。"""
 
 
 def cross_validate(symbol: str, history_summary: str, financial_summary: str, news_summary: str, technical_summary: str = "") -> str:
@@ -106,11 +109,12 @@ def summarize_financials(symbol: str, financial_summary: str) -> str:
 _NEWS_SUMMARY_PROMPT = """你是财经资讯助手。下面是跟一家上市公司相关（或市场大盘相关）的
 最新新闻列表，请用大白话写一段简短总结（150字以内），讲清楚这些新闻整体上偏利好还是
 利空、有没有值得关注的具体事件。如果新闻列表明显跟这家公司关系不大（只是通用大盘资讯），
-要诚实说明"没有直接相关新闻，以下是大盘概况"，不要硬扯关系。不要给投资建议。"""
+要诚实说明"没有直接相关新闻，以下是大盘概况"，不要硬扯关系。不要给投资建议。
+直接说结论，不要"根据以上新闻"这类过渡句开场。"""
 
 _BENCHMARK_SUMMARY_PROMPT = """你是财经数据分析助手。下面给你一只股票和基准指数在同一段时间的
 涨跌幅数据，请用一两句话（80字以内）说清楚：这只股票跑赢还是跑输了基准，差距大不大。
-不要给投资建议，只客观描述数据对比结果。"""
+不要给投资建议，只客观描述数据对比结果。直接说数字和结论，不要铺垫。"""
 
 
 def summarize_news(symbol: str, news_summary: str) -> str:
@@ -135,6 +139,30 @@ def summarize_benchmark(symbol: str, stock_pct: float, benchmark_name: str, benc
             {
                 "role": "user",
                 "content": f"股票 {symbol} 区间涨跌幅：{stock_pct:+.2f}%\n{benchmark_name} 同期涨跌幅：{benchmark_pct:+.2f}%",
+            },
+        ],
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content
+
+
+_INDEX_ANALYSIS_PROMPT = """你是财经数据分析助手，分析对象是一个大盘指数（不是个股，没有财务报表
+这回事）。给你技术面信号（本地算好的均线/MACD）和近期相关新闻，写一段分析（200字以内），
+说清楚：技术面信号说明什么、新闻面整体偏向是什么、两者是否吻合。像写一段给同事看的
+研判笔记那样直接说结论和依据，不要"作为一个AI"这类自我介绍，不要"首先...其次...最后"
+这种僵硬的分段套话，也别堆砌"值得注意的是""综合来看"这类填充语，有话直说。
+不给买卖建议，关键判断用 Markdown 加粗标出。"""
+
+
+def analyze_index(name: str, technical_summary: str, news_summary: str) -> str:
+    """指数版的综合分析——没有财务、没有个股新闻，只有技术面+大盘相关资讯两条线。"""
+    resp = _client().chat.completions.create(
+        model=_MODEL,
+        messages=[
+            {"role": "system", "content": _INDEX_ANALYSIS_PROMPT},
+            {
+                "role": "user",
+                "content": f"指数：{name}\n\n技术面信号：\n{technical_summary}\n\n相关新闻：\n{news_summary}",
             },
         ],
         temperature=0.3,
