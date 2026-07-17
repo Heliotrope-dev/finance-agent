@@ -876,6 +876,16 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
 
     st.markdown(
         _PRICE_FLASH_CSS
+        + "<style>"
+        # 名称那个按钮本来是个看得见的小框——现在把它铺满整行、透明化，卡片
+        # 里点哪都能跳转详情页，右下角的删除键单独提高层级，不会被盖住点不到。
+        + '[class*="st-key-wl_row_"] { position: relative; }'
+        + '[class*="st-key-wl_open_"] { position: absolute; inset: 0; z-index: 1; margin: 0 !important; }'
+        + '[class*="st-key-wl_open_"] button {'
+        + "  width: 100%; height: 100%; opacity: 0; cursor: pointer; border: none; background: transparent;"
+        + "}"
+        + '[class*="st-key-wl_del_"] { position: relative; z-index: 2; }'
+        + "</style>"
         + "<div style='display:flex;align-items:center;padding:4px 8px 4px 20px;font-size:0.75rem;color:#888'>"
         + "<div style='flex:2.1'>名称/代码</div>"
         + "<div style='flex:1.1;text-align:center'>走势</div>"
@@ -894,10 +904,13 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         except Exception:
             wspot = {}
 
-        with st.container(border=True):
+        with st.container(border=True, key=f"wl_row_{symbol}"):
             name_col, spark_col, price_col, badge_col, del_col = st.columns([2.1, 1.1, 1.3, 1, 0.4])
-            row_label = f"{item['name']}（{symbol}）"
-            if name_col.button(row_label, key=f"wl_open_{symbol}", use_container_width=True):
+            name_col.markdown(
+                f"<div style='font-weight:600;padding-top:6px'>{item['name']}（{symbol}）</div>",
+                unsafe_allow_html=True,
+            )
+            if name_col.button("跳转", key=f"wl_open_{symbol}"):
                 st.session_state["_detail_symbol"] = symbol
                 st.session_state["_detail_market"] = item_market
                 st.session_state["_detail_name"] = item["name"]
