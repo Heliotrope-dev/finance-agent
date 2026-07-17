@@ -35,7 +35,8 @@ from tracker import (
     add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
 )
 from charts import (
-    build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, build_benchmark_comparison,
+    build_candlestick, build_intraday_line, compute_stats, compute_technical_signal,
+    build_benchmark_comparison, build_return_histogram,
 )
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
@@ -221,7 +222,9 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                         st.session_state["user_email"], symbol, float(current_price), ai_text,
                         verdict=verdict, market=market, name=stock_name,
                     )
-                    st.session_state[mod_key] = {"ai_text": ai_text}
+                    st.session_state[mod_key] = {
+                        "ai_text": ai_text, "stats": stats, "technical_summary": technical_summary,
+                    }
             except Exception as e:
                 st.error(f"分析失败：{e}")
                 return
@@ -229,14 +232,17 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
     data = st.session_state[mod_key]
 
     if module == "news":
-        st.markdown(data["ai_text"])
         if data["news"] is not None and not data["news"].empty:
-            with st.expander("原始新闻列表"):
-                st.dataframe(data["news"], use_container_width=True)
+            st.dataframe(data["news"], use_container_width=True, hide_index=True)
+        else:
+            st.caption("没有查到相关新闻。")
+        st.caption("AI 解读")
+        st.markdown(data["ai_text"])
     elif module == "financial":
         if data["fin"] is not None and not data["fin"].empty:
             st.dataframe(data["fin"], use_container_width=True, hide_index=True)
             if data["ai_text"]:
+                st.caption("AI 解读")
                 st.markdown(data["ai_text"])
         else:
             st.caption("暂无财务数据。")
@@ -246,10 +252,23 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                 build_benchmark_comparison(hist, data["benchmark"], benchmark_name=data["bm_name"]),
                 use_container_width=True,
             )
+            st.caption("AI 解读")
             st.markdown(data["ai_text"])
         else:
             st.caption("基准数据暂时获取不到。")
     else:
+        stats = data.get("stats") or {}
+        if stats:
+            scol1, scol2, scol3, scol4 = st.columns(4)
+            scol1.metric("区间收益率", stats.get("区间收益率", "—"))
+            scol2.metric("年化波动率", stats.get("年化波动率", "—"))
+            scol3.metric("最大回撤", stats.get("最大回撤", "—"))
+            scol4.metric("夏普比率(简化)", stats.get("夏普比率(简化)", "—"))
+        if data.get("technical_summary"):
+            st.markdown(f"**技术面信号**：{data['technical_summary']}")
+        if hist is not None and not hist.empty:
+            st.plotly_chart(build_return_histogram(hist), use_container_width=True)
+        st.caption("AI 解读（交叉验证消息面、财务、技术面是否一致）")
         st.markdown(data["ai_text"])
 
 

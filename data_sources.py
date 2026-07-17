@@ -1168,18 +1168,32 @@ def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
     伪装拦截没法靠改参数绕过，所以换成财新的大盘资讯源（get_market_news），
     本地按公司名关键词过滤出相关条目；如果一条都没提到这家公司，就退化成
     展示最新的大盘资讯，好过什么都不显示。
+
+    这个源本身不带发布时间字段，但 url 里嵌着日期（.../database.caixin.com/
+    2026-07-17/...），从这提取出日期用来排序——不然拿到的条目顺序不保证新旧，
+    可能把三五天前的旧闻排在最前面，用户根本看不出这是不是"最新"资讯。
     """
     df = get_market_news()
     if df is None or df.empty:
         return pd.DataFrame()
 
+    df = df.copy()
+    df["日期"] = df["url"].str.extract(r"/(\d{4}-\d{2}-\d{2})/")
+    df = df.sort_values("日期", ascending=False, na_position="last")
+
     matched = df[df["summary"].str.contains(keyword, na=False)]
-    result = matched if not matched.empty else df
+    if len(matched) >= limit:
+        result = matched
+    else:
+        # 关键词匹配到的不够多（甚至可能是好几天前的旧闻），拿最新大盘资讯补齐，
+        # 保证展示的内容里新鲜的占大头，不会被一条孤零零的旧闻占了最前面的位置。
+        filler = df[~df.index.isin(matched.index)]
+        result = pd.concat([matched, filler]).sort_values("日期", ascending=False, na_position="last")
 
     result = result.head(limit).copy()
     result["新闻标题"] = result["summary"].str.slice(0, 24) + "…"
     result = result.rename(columns={"summary": "新闻内容", "tag": "分类"})
-    return result[["新闻标题", "新闻内容", "分类"]]
+    return result[["日期", "新闻标题", "新闻内容", "分类"]]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
