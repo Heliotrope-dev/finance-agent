@@ -876,16 +876,6 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
 
     st.markdown(
         _PRICE_FLASH_CSS
-        + "<style>"
-        # 名称那个按钮本来是个看得见的小框——现在把它铺满整行、透明化，卡片
-        # 里点哪都能跳转详情页，右下角的删除键单独提高层级，不会被盖住点不到。
-        + '[class*="st-key-wl_row_"] { position: relative; }'
-        + '[class*="st-key-wl_open_"] { position: absolute; inset: 0; z-index: 1; margin: 0 !important; }'
-        + '[class*="st-key-wl_open_"] button {'
-        + "  width: 100%; height: 100%; opacity: 0; cursor: pointer; border: none; background: transparent;"
-        + "}"
-        + '[class*="st-key-wl_del_"] { position: relative; z-index: 2; }'
-        + "</style>"
         + "<div style='display:flex;align-items:center;padding:4px 8px 4px 20px;font-size:0.75rem;color:#888'>"
         + "<div style='flex:2.1'>名称/代码</div>"
         + "<div style='flex:1.1;text-align:center'>走势</div>"
@@ -896,6 +886,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         unsafe_allow_html=True,
     )
 
+    wl_symbols = []
     for item in watched_filtered:
         item_market = item.get("market", "A")
         symbol = item["symbol"]
@@ -904,13 +895,18 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         except Exception:
             wspot = {}
 
-        with st.container(border=True, key=f"wl_row_{symbol}"):
+        with st.container(border=True):
             name_col, spark_col, price_col, badge_col, del_col = st.columns([2.1, 1.1, 1.3, 1, 0.4])
             name_col.markdown(
                 f"<div style='font-weight:600;padding-top:6px'>{item['name']}（{symbol}）</div>",
                 unsafe_allow_html=True,
             )
-            if name_col.button("跳转", key=f"wl_open_{symbol}"):
+            # 这个按钮不直接展示——上次试过用CSS把它铺满整行做成透明覆盖层，
+            # 实测在真实浏览器里点不动（大概率是Streamlit的DOM结构跟猜测的
+            # 不一致）。改成跟"长按删除"那套一样、已经验证过可靠的JS方案：
+            # 按钮本身用文字精确匹配定位、隐藏掉，再往上找到卡片外层容器，
+            # 给整张卡片绑点击事件，点哪里（除了删除键）都触发这个按钮。
+            if name_col.button(f"跳转-{symbol}", key=f"wl_open_{symbol}"):
                 st.session_state["_detail_symbol"] = symbol
                 st.session_state["_detail_market"] = item_market
                 st.session_state["_detail_name"] = item["name"]
@@ -960,6 +956,46 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
 
             if del_col.button("×", key=f"wl_del_{symbol}", help="删除自选"):
                 _confirm_delete_dialog(_email, symbol, item["name"])
+
+        wl_symbols.append(symbol)
+
+    if wl_symbols:
+        _cv1.html(
+            f"""
+            <script>
+            (function() {{
+                const symbols = {wl_symbols!r};
+                function bind(attemptsLeft) {{
+                    const doc = window.parent.document;
+                    const buttons = Array.from(doc.querySelectorAll('button'));
+                    let allBound = true;
+                    symbols.forEach(function(sym) {{
+                        const marker = "跳转-" + sym;
+                        const hiddenBtn = buttons.find(function(b) {{ return b.innerText.trim() === marker; }});
+                        if (!hiddenBtn) {{ allBound = false; return; }}
+                        const wrap = hiddenBtn.closest('[data-testid="stButton"]');
+                        if (wrap) wrap.style.display = 'none';
+                        const card = hiddenBtn.closest('[data-testid="stVerticalBlockBorderWrapper"]');
+                        if (!card) {{ allBound = false; return; }}
+                        if (!card.dataset.rowBound) {{
+                            card.dataset.rowBound = "1";
+                            card.style.cursor = 'pointer';
+                            card.addEventListener('click', function(e) {{
+                                if (e.target.closest('[data-testid="stButton"]')) return;
+                                hiddenBtn.click();
+                            }});
+                        }}
+                    }});
+                    if (!allBound && attemptsLeft > 0) {{
+                        setTimeout(function() {{ bind(attemptsLeft - 1); }}, 200);
+                    }}
+                }}
+                bind(15);
+            }})();
+            </script>
+            """,
+            height=0,
+        )
 
 
 @st.dialog("确认删除")
