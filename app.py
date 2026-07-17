@@ -153,6 +153,37 @@ if not st.session_state.get("logged_in"):
 _BENCHMARK_NAMES = {"A": "沪深300", "HK": "恒生指数", "US": "标普500"}
 
 
+def _render_news_section(keyword: str):
+    """一手资讯单独成块，标题不截断，点标题直接跳原文——不是AI解读的附属品，
+    是AI解读的依据来源，放在AI解读前面让用户自己先看一手材料。
+    """
+    st.subheader("最新资讯")
+    try:
+        news = get_stock_news(keyword, limit=8)
+    except Exception as e:
+        st.caption(f"获取失败：{e}")
+        return
+    if news is None or news.empty:
+        st.caption("没有查到相关新闻。")
+        return
+    for _, r in news.iterrows():
+        date = r.get("日期") or ""
+        title = r["新闻标题"]
+        url = r.get("url", "")
+        tag = r.get("分类", "")
+        if url:
+            st.markdown(
+                f"<div style='margin:6px 0;font-size:0.9rem'>"
+                f"<span style='color:#888;font-size:0.78rem'>{date}</span>　"
+                f"<a href='{url}' target='_blank' style='color:#0f172a;text-decoration:none'>{title}</a>　"
+                f"<span style='color:#888;font-size:0.75rem'>{tag}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(f"<div style='margin:6px 0;font-size:0.9rem'>{date}　{title}</div>", unsafe_allow_html=True)
+
+
 def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
     """AI 模块按需加载：每个模块独立缓存，点开哪个才跑哪个的 AI 调用，不会一次性全跑。"""
     mod_key = f"_detail_mod_{symbol}_{market}_{module}"
@@ -163,7 +194,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                     stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
                     news = get_stock_news(stock_name, limit=8)
                     news_summary = (
-                        "\n".join(f"- {r['新闻标题']}：{r['新闻内容'][:100]}" for _, r in news.iterrows())
+                        "\n".join(f"- {r['新闻标题']}" for _, r in news.iterrows())
                         if news is not None and not news.empty else "无相关新闻"
                     )
                     ai_text = summarize_news(symbol, news_summary)
@@ -209,7 +240,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                     stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
                     news = get_stock_news(stock_name, limit=8)
                     news_summary = (
-                        "\n".join(f"- {r['新闻标题']}：{r['新闻内容'][:100]}" for _, r in news.iterrows())
+                        "\n".join(f"- {r['新闻标题']}" for _, r in news.iterrows())
                         if news is not None and not news.empty else "无相关新闻"
                     )
 
@@ -232,11 +263,8 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
     data = st.session_state[mod_key]
 
     if module == "news":
-        if data["news"] is not None and not data["news"].empty:
-            st.dataframe(data["news"], use_container_width=True, hide_index=True)
-        else:
-            st.caption("没有查到相关新闻。")
-        st.caption("AI 解读")
+        # 原始新闻列表已经在页面上方单独一块展示了（_render_news_section），
+        # 这里不重复摆一次，只放AI解读，避免同一份数据在页面上出现两遍。
         st.markdown(data["ai_text"])
     elif module == "financial":
         if data["fin"] is not None and not data["fin"].empty:
@@ -418,13 +446,17 @@ def _render_stock_detail(symbol: str, market: str, name: str):
             st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
 
     st.divider()
+    _stock_name_for_news = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
+    _render_news_section(_stock_name_for_news)
+
+    st.divider()
     st.subheader("AI 深度分析")
     st.caption(
-        "打开详情页自动生成，四个独立 AI 调用分别交叉验证新闻、财务、大盘对比、"
+        "打开详情页自动生成，多个独立 AI 调用分别交叉验证新闻、财务、大盘对比、"
         "技术面与消息面是否一致——只呈现数据和依据，不给买卖建议，请自行判断。"
     )
     for mod_key, mod_label in (
-        ("news", "最新资讯"), ("financial", "财务摘要"), ("benchmark", "对比大盘"), ("cross", "综合数据分析（交叉验证）"),
+        ("news", "资讯解读"), ("financial", "财务摘要"), ("benchmark", "对比大盘"), ("cross", "综合数据分析（交叉验证）"),
     ):
         with st.container(border=True):
             st.markdown(f"**{mod_label}**")
@@ -494,29 +526,28 @@ def _render_index_detail(name: str, code: str, market: str):
             st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
 
     st.divider()
+    _render_news_section(name)
+
+    st.divider()
     st.subheader("AI 深度分析")
     st.caption("打开详情页自动生成，结合技术面信号和相关资讯做交叉验证——只呈现依据，不给操作建议。")
 
     idx_ai_key = f"_idx_analysis_{code}_{market}"
     with st.container(border=True):
-        st.markdown("**最新资讯**")
+        st.markdown("**资讯解读**")
         if f"{idx_ai_key}_news" not in st.session_state:
             with st.spinner("分析中..."):
                 try:
                     news = get_stock_news(name, limit=8)
                     news_summary = (
-                        "\n".join(f"- {r['新闻标题']}：{r['新闻内容'][:100]}" for _, r in news.iterrows())
+                        "\n".join(f"- {r['新闻标题']}" for _, r in news.iterrows())
                         if news is not None and not news.empty else "无相关新闻"
                     )
                     ai_text = summarize_news(name, news_summary)
-                    st.session_state[f"{idx_ai_key}_news"] = {"news": news, "ai_text": ai_text, "summary": news_summary}
+                    st.session_state[f"{idx_ai_key}_news"] = {"ai_text": ai_text, "summary": news_summary}
                 except Exception as e:
-                    st.session_state[f"{idx_ai_key}_news"] = {"news": None, "ai_text": f"获取失败：{e}", "summary": "无相关新闻"}
-        news_data = st.session_state[f"{idx_ai_key}_news"]
-        st.markdown(news_data["ai_text"])
-        if news_data["news"] is not None and not news_data["news"].empty:
-            with st.expander("原始新闻列表"):
-                st.dataframe(news_data["news"], use_container_width=True)
+                    st.session_state[f"{idx_ai_key}_news"] = {"ai_text": f"获取失败：{e}", "summary": "无相关新闻"}
+        st.markdown(st.session_state[f"{idx_ai_key}_news"]["ai_text"])
 
     with st.container(border=True):
         st.markdown("**综合数据分析**")
@@ -524,13 +555,30 @@ def _render_index_detail(name: str, code: str, market: str):
             with st.spinner("分析中..."):
                 try:
                     daily_hist = get_index_history(code, market, "日K")
-                    technical_summary = compute_technical_signal(daily_hist) if daily_hist is not None and not daily_hist.empty else "暂无技术面数据"
+                    has_hist = daily_hist is not None and not daily_hist.empty
+                    technical_summary = compute_technical_signal(daily_hist) if has_hist else "暂无技术面数据"
+                    stats = compute_stats(daily_hist) if has_hist and len(daily_hist) > 5 else {}
                     news_summary = st.session_state.get(f"{idx_ai_key}_news", {}).get("summary", "无相关新闻")
                     ai_text = analyze_index(name, technical_summary, news_summary)
-                    st.session_state[f"{idx_ai_key}_cross"] = ai_text
+                    st.session_state[f"{idx_ai_key}_cross"] = {
+                        "ai_text": ai_text, "stats": stats, "technical_summary": technical_summary,
+                        "daily_hist": daily_hist if has_hist else None,
+                    }
                 except Exception as e:
-                    st.session_state[f"{idx_ai_key}_cross"] = f"分析失败：{e}"
-        st.markdown(st.session_state[f"{idx_ai_key}_cross"])
+                    st.session_state[f"{idx_ai_key}_cross"] = {"ai_text": f"分析失败：{e}", "stats": {}, "technical_summary": "", "daily_hist": None}
+        cross_data = st.session_state[f"{idx_ai_key}_cross"]
+        if cross_data.get("stats"):
+            scol1, scol2, scol3, scol4 = st.columns(4)
+            scol1.metric("区间收益率", cross_data["stats"].get("区间收益率", "—"))
+            scol2.metric("年化波动率", cross_data["stats"].get("年化波动率", "—"))
+            scol3.metric("最大回撤", cross_data["stats"].get("最大回撤", "—"))
+            scol4.metric("夏普比率(简化)", cross_data["stats"].get("夏普比率(简化)", "—"))
+        if cross_data.get("technical_summary"):
+            st.markdown(f"**技术面信号**：{cross_data['technical_summary']}")
+        if cross_data.get("daily_hist") is not None:
+            st.plotly_chart(build_return_histogram(cross_data["daily_hist"]), use_container_width=True)
+        st.caption("AI 解读")
+        st.markdown(cross_data["ai_text"])
 
 
 @st.dialog("确认删除")

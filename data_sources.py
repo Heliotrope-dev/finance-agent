@@ -1191,9 +1191,10 @@ def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
         result = pd.concat([matched, filler]).sort_values("日期", ascending=False, na_position="last")
 
     result = result.head(limit).copy()
-    result["新闻标题"] = result["summary"].str.slice(0, 24) + "…"
-    result = result.rename(columns={"summary": "新闻内容", "tag": "分类"})
-    return result[["日期", "新闻标题", "新闻内容", "分类"]]
+    # 这个数据源只有一段摘要文字，没有"标题"和"正文"的区分，不再截断硬造一个假标题——
+    # 摘要全文当标题用，想看完整原文就点 url 跳转到财新原站，不是编内容充数。
+    result = result.rename(columns={"summary": "新闻标题", "tag": "分类"})
+    return result[["日期", "新闻标题", "分类", "url"]]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
