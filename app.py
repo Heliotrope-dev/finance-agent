@@ -661,24 +661,12 @@ def _render_index_price_header(name: str, market: str):
     st.caption("每 15 秒自动刷新")
 
 
-def _render_index_top_movers(market: str):
-    """指数详情页的"成分股"板块——不是严格的官方成分股清单，是这个市场里
-    涨幅最大的一批股票（get_index_top_movers 的说明里有详细原因：A股几百上千
-    只成分股没法全拉一遍实时行情，港股/美股也没找到带股票代码的免费成分股源）。
-    默认显示前10，点"展开"再显示到前30，卡片样式跟自选股/指数列表一样，
-    点击直接跳去那只股票的详情页。
+def _inject_wl_card_css():
+    """wl-card-link 这个class的样式——多个板块（自选股/成分股/涨跌停池/核心股
+    榜）共用同一个class做卡片点击跳转，样式只需要注入一次，但每个板块渲染时
+    不一定确定其它板块的注入代码有没有跑过，重复调用这个函数是幂等的，
+    不会有副作用。
     """
-    try:
-        movers = get_index_top_movers(market, limit=30)
-    except Exception:
-        movers = None
-    if movers is None or movers.empty:
-        st.caption("暂时获取不到数据。")
-        return
-
-    # wl-card-link 这个class的样式定义在_render_watchlist_rows里——如果用户
-    # 这次会话还没打开过自选股分区，样式压根没注入过。这里重复注入一遍
-    # （同一个class名，同样的规则，重复注入是幂等的，不会有副作用）。
     st.markdown(
         "<style>"
         "a.wl-card-link, a.wl-card-link:link, a.wl-card-link:visited {"
@@ -690,17 +678,15 @@ def _render_index_top_movers(market: str):
         unsafe_allow_html=True,
     )
 
-    if market == "A":
-        st.caption("按当前A股全市场涨跌幅排序，不是这个指数的官方成分股名单。")
-    elif market == "HK":
-        st.caption("按港股热门个股的涨跌幅排序，不是这个指数的官方成分股名单。")
-    else:
-        st.caption("覆盖美股主要板块龙头股，按涨跌幅排序，不是这个指数的官方成分股名单。")
 
-    expand_key = f"_movers_expand_{market}"
-    show_n = 30 if st.session_state.get(expand_key) else 10
-
-    for _, row in movers.head(show_n).iterrows():
+def _render_stock_movers_cards(df, market: str):
+    """把一份"代码/名称/最新价/涨跌幅"的行情表渲成一叠可点击卡片（红涨绿跌，
+    点击跳去那只股票详情页）——涨跌停池、港股/美股核心股榜、指数成分股都是
+    这个形态，抽成公共函数不用每处各写一遍。df为空时调用方自己处理提示语，
+    这里不管。
+    """
+    _inject_wl_card_css()
+    for _, row in df.iterrows():
         mv_symbol = str(row["代码"])
         mv_color = "#e02020" if row["涨跌幅"] >= 0 else "#22a06b"
         href = (
@@ -720,6 +706,32 @@ def _render_index_top_movers(market: str):
                 f"</div></a>",
                 unsafe_allow_html=True,
             )
+
+
+def _render_index_top_movers(market: str):
+    """指数详情页的"成分股"板块——不是严格的官方成分股清单，是这个市场里
+    涨幅最大的一批股票（get_index_top_movers 的说明里有详细原因：A股几百上千
+    只成分股没法全拉一遍实时行情，港股/美股也没找到带股票代码的免费成分股源）。
+    默认显示前10，点"展开"再显示到前30，卡片点击直接跳去那只股票的详情页。
+    """
+    try:
+        movers = get_index_top_movers(market, limit=30)
+    except Exception:
+        movers = None
+    if movers is None or movers.empty:
+        st.caption("暂时获取不到数据。")
+        return
+
+    if market == "A":
+        st.caption("按当前A股全市场涨跌幅排序，不是这个指数的官方成分股名单。")
+    elif market == "HK":
+        st.caption("按港股热门个股的涨跌幅排序，不是这个指数的官方成分股名单。")
+    else:
+        st.caption("覆盖美股主要板块龙头股，按涨跌幅排序，不是这个指数的官方成分股名单。")
+
+    expand_key = f"_movers_expand_{market}"
+    show_n = 30 if st.session_state.get(expand_key) else 10
+    _render_stock_movers_cards(movers.head(show_n), market)
 
     if len(movers) > 10:
         if not st.session_state.get(expand_key):
@@ -1040,6 +1052,15 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         + "  display: block; cursor: pointer;"
         + "}"
         + "a.wl-card-link:hover { opacity: 0.85; }"
+        # 删除键用type="tertiary"去掉了方框，但图标本身默认偏小，用户反馈要
+        # 大一点；还要求跟卡片内容垂直居中对齐（之前贴着顶部，看着跟下面的
+        # 名称/价格没对上）。用 key 生成的 st-key-* class精确定位，不影响
+        # 页面上其它按钮。
+        + "[class*='st-key-wl_del_'] button {"
+        + "  display: flex; align-items: center; justify-content: center;"
+        + "  height: 100%; min-height: 44px;"
+        + "}"
+        + "[class*='st-key-wl_del_'] button p { font-size: 1.4rem !important; font-weight: 700; }"
         + "</style>",
         unsafe_allow_html=True,
     )
@@ -1102,7 +1123,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
             badge_html = ""
 
         with st.container(border=True):
-            link_col, del_col = st.columns([9, 1])
+            link_col, del_col = st.columns([9, 1], vertical_alignment="center")
             href = (
                 f"?open_symbol={urllib.parse.quote(symbol)}"
                 f"&open_market={urllib.parse.quote(item_market)}"
@@ -1310,32 +1331,6 @@ else:
             "分区", ["行情", "自选股"], key="_active_section", horizontal=True, label_visibility="collapsed",
         )
 
-        def _style_movers_table(df):
-            """涨跌幅/涨跌额红涨绿跌上色，数字统一两位小数，涨跌幅带%号——表格别一片黑。"""
-            if df is None or df.empty:
-                return df
-
-            def _color(v):
-                try:
-                    v = float(v)
-                except Exception:
-                    return ""
-                return f"color: {'#e02020' if v >= 0 else '#22a06b'}"
-
-            fmt = {}
-            if "最新价" in df.columns:
-                fmt["最新价"] = "{:.2f}"
-            if "涨跌额" in df.columns:
-                fmt["涨跌额"] = "{:+.2f}"
-            if "涨跌幅" in df.columns:
-                fmt["涨跌幅"] = "{:+.2f}%"
-            if "换手率" in df.columns:
-                fmt["换手率"] = "{:.2f}%"
-
-            color_cols = [c for c in ("涨跌额", "涨跌幅") if c in df.columns]
-            return df.style.format(fmt).map(_color, subset=color_cols)
-
-
         if active_section == "行情":
             mkt_pick = st.radio("市场", ["A股", "港股", "美股"], horizontal=True, key="_market_overview_pick")
             mkt_code = {"A股": "A", "港股": "HK", "美股": "US"}[mkt_pick]
@@ -1407,14 +1402,20 @@ else:
                     st.markdown("**涨停股池**")
                     try:
                         up_pool = get_limit_pool("up", show_n)
-                        st.dataframe(_style_movers_table(up_pool), use_container_width=True, hide_index=True)
+                        if up_pool is not None and not up_pool.empty:
+                            _render_stock_movers_cards(up_pool, "A")
+                        else:
+                            st.caption("暂时没有数据。")
                     except Exception as e:
                         st.caption(f"获取失败：{e}")
                 with down_col:
                     st.markdown("**跌停股池**")
                     try:
                         down_pool = get_limit_pool("down", show_n)
-                        st.dataframe(_style_movers_table(down_pool), use_container_width=True, hide_index=True)
+                        if down_pool is not None and not down_pool.empty:
+                            _render_stock_movers_cards(down_pool, "A")
+                        else:
+                            st.caption("暂时没有数据。")
                     except Exception as e:
                         st.caption(f"获取失败：{e}")
                 if not st.session_state.get("_show_more_limit_pool"):
@@ -1439,7 +1440,10 @@ else:
                 try:
                     with st.spinner("加载中（第一次会慢一些）..."):
                         hk_movers = get_hk_famous_movers(15)
-                    st.dataframe(_style_movers_table(hk_movers), use_container_width=True, hide_index=True)
+                    if hk_movers is not None and not hk_movers.empty:
+                        _render_stock_movers_cards(hk_movers, "HK")
+                    else:
+                        st.caption("暂时获取不到数据。")
                 except Exception as e:
                     st.caption(f"获取失败：{e}")
 
@@ -1447,7 +1451,10 @@ else:
                 st.markdown("**美股核心股**")
                 try:
                     us_movers = get_us_famous_movers(15)
-                    st.dataframe(_style_movers_table(us_movers), use_container_width=True, hide_index=True)
+                    if us_movers is not None and not us_movers.empty:
+                        _render_stock_movers_cards(us_movers, "US")
+                    else:
+                        st.caption("暂时获取不到数据。")
                 except Exception as e:
                     st.caption(f"获取失败：{e}")
 
@@ -1455,7 +1462,19 @@ else:
             _email = st.session_state["user_email"]
             watched = get_watchlist(_email)
 
-            title_col, search_col = st.columns([11, 1])
+            st.markdown(
+                "<style>"
+                "[class*='st-key-wl_search_icon'] button {"
+                "  display: flex; align-items: center; justify-content: center;"
+                "  height: 100%; min-height: 44px;"
+                "}"
+                "[class*='st-key-wl_search_icon'] span[data-testid='stIconMaterial'] {"
+                "  font-size: 1.6rem !important;"
+                "}"
+                "</style>",
+                unsafe_allow_html=True,
+            )
+            title_col, search_col = st.columns([11, 1], vertical_alignment="center")
             if search_col.button("", icon=":material/search:", key="wl_search_icon", type="tertiary"):
                 _show_add_watchlist_dialog(_email)
 
