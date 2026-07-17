@@ -1198,6 +1198,33 @@ def get_market_news() -> pd.DataFrame:
     return _with_retry(ak.stock_news_main_cx)
 
 
+def get_index_news(name: str, limit: int = 10) -> pd.DataFrame:
+    """指数版的资讯——跟个股不一样，指数没有"公司名"这种精确关键词可以匹配。
+    财新这个源偏宏观/全球财经，报道大盘走势时常用"沪指""大盘""A股"这类简称，
+    很少直接出现"上证指数"这种官方全称字面——如果照搬个股那套"关键词包含"过滤，
+    大概率过滤成空，但这份大盘资讯本身对一个指数来说天然就是相关的（指数本来就是
+    整个大盘的映射，不需要精确点名）。所以这里先试关键词匹配，匹配不到就不再较真
+    过滤，直接给最新的大盘资讯原文，调用方负责标注清楚这是"大盘概况"而不是精确
+    点名这个指数的报道。
+    """
+    df = get_market_news()
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df["日期"] = df["url"].str.extract(r"/(\d{4}-\d{2}-\d{2})/")
+    df = df.sort_values("日期", ascending=False, na_position="last")
+
+    matched = df[df["summary"].str.contains(name, na=False)]
+    if matched.empty:
+        matched = df
+    result = matched.head(limit).copy()
+    if result.empty:
+        return pd.DataFrame()
+    result = result.rename(columns={"summary": "新闻标题", "tag": "分类"})
+    return result[["日期", "新闻标题", "分类", "url"]]
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def get_stock_notices(symbol: str) -> pd.DataFrame:
     """A股官方公告——监管强制披露，来自东财公告中心，永远免费，不存在付费墙这回事，

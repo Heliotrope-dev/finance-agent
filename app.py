@@ -22,6 +22,8 @@ from data_sources import (
     get_stock_notices,
     get_benchmark_history,
     get_stock_name,
+    get_index_news,
+    search_stock_by_name,
     get_multi_index_snapshot,
     get_market_breadth,
     get_limit_pool,
@@ -157,13 +159,41 @@ if not st.session_state.get("logged_in"):
 _BENCHMARK_NAMES = {"A": "沪深300", "HK": "恒生指数", "US": "标普500"}
 
 
-def _render_news_section(keyword: str, symbol: str | None = None, market: str = "A"):
+def _render_news_section(keyword: str, symbol: str | None = None, market: str = "A", is_index: bool = False):
     """一手资讯单独成块，标题不截断——是AI解读的依据来源，放在AI解读前面让用户
     自己先看一手材料。A股优先用官方公告（监管强制披露，永远免费，比新闻评论
     更"一手"，点进去就是东财公告中心原文，不存在付费墙）；港股/美股没有对应的
     免费公告聚合源，退回财新新闻摘要（有付费墙，已经标注清楚）。
+
+    指数（is_index=True）没有公司名可以精确匹配，用 get_index_news 单独处理——
+    匹配不到指数名字面也不当成"没有资讯"，退回大盘概况原文（详见 get_index_news
+    的说明）。
     """
     st.subheader("最新资讯")
+
+    if is_index:
+        try:
+            news = get_index_news(keyword, limit=8)
+        except Exception as e:
+            st.caption(f"获取失败：{e}")
+            return
+        if news is None or news.empty:
+            st.caption("暂时没有查到相关的大盘资讯，可能只是这个免费源没收录。")
+            return
+        st.caption(
+            "摘要来自财新的大盘资讯，不一定逐条点名这个指数——指数本身就是大盘的映射，"
+            "这里给的是最新大盘概况原文。原文链接需要财新会员订阅才能打开全文，这里只展示摘要。"
+        )
+        for _, r in news.iterrows():
+            st.markdown(
+                f"<div style='margin:6px 0;font-size:0.9rem'>"
+                f"<span style='color:#888;font-size:0.78rem'>{r.get('日期', '') or ''}</span>　"
+                f"<span style='color:#0f172a'>{r['新闻标题']}</span>　"
+                f"<span style='color:#888;font-size:0.75rem'>{r.get('分类', '')}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        return
 
     if market == "A" and symbol:
         try:
@@ -564,7 +594,7 @@ def _render_index_detail(name: str, code: str, market: str):
             st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
 
     st.divider()
-    _render_news_section(name)
+    _render_news_section(name, is_index=True)
 
     st.divider()
     st.subheader("AI 深度分析")
@@ -797,12 +827,23 @@ else:
             else:
                 # 名称匹配优先——不然"Tesla"这种纯字母输入会被代码格式的正则先一步误判成
                 # "看着像美股代码"，根本轮不到名称匹配生效。
-                name_hit = resolve_symbol_by_name(q, "HK") or resolve_symbol_by_name(q, "US")
-                if name_hit:
-                    sym, detected = name_hit, ("HK" if name_hit.isdigit() else "US")
+                # A股名称匹配放在最前面——像宁德时代这种A+H两地上市的公司，用中文名搜
+                # 大概率是想找A股这一支（更常被交易/讨论），不能让港股那边的模糊搜索
+                # 抢先命中，把人带去一个新闻源覆盖不到、也不是本意的市场。
+                a_matches = []
+                try:
+                    a_matches = search_stock_by_name(q)
+                except Exception:
+                    pass
+                if a_matches:
+                    sym, detected = a_matches[0]["code"], "A"
                 else:
-                    detected = _auto_detect_market(q)
-                    sym = (q.zfill(5) if detected == "HK" else (q.upper() if detected == "US" else q)) if detected else None
+                    name_hit = resolve_symbol_by_name(q, "HK") or resolve_symbol_by_name(q, "US")
+                    if name_hit:
+                        sym, detected = name_hit, ("HK" if name_hit.isdigit() else "US")
+                    else:
+                        detected = _auto_detect_market(q)
+                        sym = (q.zfill(5) if detected == "HK" else (q.upper() if detected == "US" else q)) if detected else None
                 if detected is None:
                     st.warning("没识别出来——支持直接输代码、指数名称，或者知名公司的中英文名称（覆盖范围有限，查不到不代表没上市）。")
                 else:
