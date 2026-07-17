@@ -750,20 +750,29 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     _render_news_section(_stock_name_for_news, symbol=symbol, market=market)
 
     st.divider()
-    st.subheader("AI 深度分析")
+    _head_col, _refresh_col = st.columns([5, 1])
+    _head_col.subheader("AI 深度分析")
     st.caption(
         "打开详情页自动生成，多个独立 AI 调用分别交叉验证新闻、财务、大盘对比、"
         "技术面与消息面是否一致——只呈现数据和依据，不给买卖建议，请自行判断。"
+        "价格是每 15 秒跳动的实时数据，但AI文字分析生成一次就缓存住，不会跟着"
+        "价格自动重新生成（每次都调用AI要花钱），盘中变化大的话可以点右上角"
+        "「重新分析」手动刷新。"
     )
     module_defs = (
         ("news", "资讯解读"), ("financial", "财务摘要"), ("benchmark", "对比大盘"), ("cross", "综合数据分析（交叉验证）"),
     )
+    summary_key = f"_detail_summary_{symbol}_{market}"
+    if _refresh_col.button("重新分析", key=f"_reanalyze_{symbol}_{market}", use_container_width=True):
+        for mod_key, _ in module_defs:
+            st.session_state.pop(f"_detail_mod_{symbol}_{market}_{mod_key}", None)
+        st.session_state.pop(summary_key, None)
+        st.rerun()
+
     for mod_key, mod_label in module_defs:
         with st.container(border=True):
             st.markdown(f"**{mod_label}**")
             _render_module(mod_key, symbol, market, hist, spot)
-
-    summary_key = f"_detail_summary_{symbol}_{market}"
     with st.container(border=True):
         st.markdown("**总结性分析**")
         if summary_key not in st.session_state:
@@ -837,10 +846,18 @@ def _render_index_detail(name: str, code: str, market: str):
     _render_news_section(name, is_index=True)
 
     st.divider()
-    st.subheader("AI 深度分析")
-    st.caption("打开详情页自动生成，结合技术面信号和相关资讯做交叉验证——只呈现依据，不给操作建议。")
+    _idx_head_col, _idx_refresh_col = st.columns([5, 1])
+    _idx_head_col.subheader("AI 深度分析")
+    st.caption(
+        "打开详情页自动生成，结合技术面信号和相关资讯做交叉验证——只呈现依据，不给操作建议。"
+        "价格是实时跳动的，AI文字分析生成一次就缓存住，需要的话点右上角「重新分析」手动刷新。"
+    )
 
     idx_ai_key = f"_idx_analysis_{code}_{market}"
+    if _idx_refresh_col.button("重新分析", key=f"_idx_reanalyze_{code}_{market}", use_container_width=True):
+        for _suffix in ("_news", "_cross", "_summary"):
+            st.session_state.pop(f"{idx_ai_key}{_suffix}", None)
+        st.rerun()
     with st.container(border=True):
         st.markdown("**资讯解读**")
         if f"{idx_ai_key}_news" not in st.session_state:
