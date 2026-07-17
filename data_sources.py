@@ -1161,13 +1161,14 @@ def get_financial_abstract(symbol: str, market: str = "A") -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
-    """个股相关新闻。
+    """个股相关新闻——只返回真正提到这家公司的条目，不拿不相关的大盘资讯充数。
 
     原本调东财的关键词搜索接口，实测发现它已经被反爬拦截了——不管传什么关键词，
     返回的都是同一份缓存假数据（连 JSONP 回调标识都一模一样）。这类接口层面的
     伪装拦截没法靠改参数绕过，所以换成财新的大盘资讯源（get_market_news），
-    本地按公司名关键词过滤出相关条目；如果一条都没提到这家公司，就退化成
-    展示最新的大盘资讯，好过什么都不显示。
+    本地按公司名关键词过滤出相关条目。以前这里查不到就退化展示大盘资讯凑数，
+    容易让用户误以为是这只股票的新闻——现在改成查不到就如实说没有，大盘资讯
+    单独用 get_market_news() 给以后的首页板块用，不在个股页面里混着展示。
 
     这个源本身不带发布时间字段，但 url 里嵌着日期（.../database.caixin.com/
     2026-07-17/...），从这提取出日期用来排序——不然拿到的条目顺序不保证新旧，
@@ -1182,17 +1183,11 @@ def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
     df = df.sort_values("日期", ascending=False, na_position="last")
 
     matched = df[df["summary"].str.contains(keyword, na=False)]
-    if len(matched) >= limit:
-        result = matched
-    else:
-        # 关键词匹配到的不够多（甚至可能是好几天前的旧闻），拿最新大盘资讯补齐，
-        # 保证展示的内容里新鲜的占大头，不会被一条孤零零的旧闻占了最前面的位置。
-        filler = df[~df.index.isin(matched.index)]
-        result = pd.concat([matched, filler]).sort_values("日期", ascending=False, na_position="last")
-
-    result = result.head(limit).copy()
+    result = matched.head(limit).copy()
+    if result.empty:
+        return pd.DataFrame()
     # 这个数据源只有一段摘要文字，没有"标题"和"正文"的区分，不再截断硬造一个假标题——
-    # 摘要全文当标题用，想看完整原文就点 url 跳转到财新原站，不是编内容充数。
+    # 摘要全文当标题用。
     result = result.rename(columns={"summary": "新闻标题", "tag": "分类"})
     return result[["日期", "新闻标题", "分类", "url"]]
 

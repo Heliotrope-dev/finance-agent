@@ -164,24 +164,21 @@ def _render_news_section(keyword: str):
         st.caption(f"获取失败：{e}")
         return
     if news is None or news.empty:
-        st.caption("没有查到相关新闻。")
+        st.caption("这只股票近期没有查到直接相关的新闻，不代表没有热度，可能只是这个免费源没收录。")
         return
+    st.caption("摘要来自财新，原文链接需要财新会员订阅才能打开全文，这里只展示摘要本身。")
     for _, r in news.iterrows():
         date = r.get("日期") or ""
         title = r["新闻标题"]
-        url = r.get("url", "")
         tag = r.get("分类", "")
-        if url:
-            st.markdown(
-                f"<div style='margin:6px 0;font-size:0.9rem'>"
-                f"<span style='color:#888;font-size:0.78rem'>{date}</span>　"
-                f"<a href='{url}' target='_blank' style='color:#0f172a;text-decoration:none'>{title}</a>　"
-                f"<span style='color:#888;font-size:0.75rem'>{tag}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(f"<div style='margin:6px 0;font-size:0.9rem'>{date}　{title}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='margin:6px 0;font-size:0.9rem'>"
+            f"<span style='color:#888;font-size:0.78rem'>{date}</span>　"
+            f"{title}　"
+            f"<span style='color:#888;font-size:0.75rem'>{tag}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
 
 def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
