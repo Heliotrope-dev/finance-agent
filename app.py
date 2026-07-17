@@ -1115,58 +1115,62 @@ else:
             return None
 
 
-        qcol, bcol = st.columns([5, 1])
-        quick_query = qcol.text_input(
-            "快速搜索代码、指数名称或知名公司名称，直接进详情页",
-            value="", key="_quick_search", placeholder="600519 / 00700 / AAPL / 腾讯 / 特斯拉 / 恒生指数",
-        )
-        if bcol.button("搜索", key="_quick_search_btn", use_container_width=True) and quick_query:
-            q = quick_query.strip()
-            idx_hit = None
-            for _mkt, _idx_list in _MULTI_INDICES.items():
-                for _name, _code in _idx_list:
-                    if q == _name or q.lower() == _name.lower():
-                        idx_hit = (_name, _code, _mkt)
-                        break
-                if idx_hit:
-                    break
-            if idx_hit:
-                idx_name, idx_code, idx_mkt = idx_hit
-                st.session_state["_index_detail_code"] = idx_code
-                st.session_state["_index_detail_market"] = idx_mkt
-                st.session_state["_index_detail_name"] = idx_name
-                st.rerun()
-            else:
-                # 名称匹配优先——不然"Tesla"这种纯字母输入会被代码格式的正则先一步误判成
-                # "看着像美股代码"，根本轮不到名称匹配生效。
-                # A股名称匹配放在最前面——像宁德时代这种A+H两地上市的公司，用中文名搜
-                # 大概率是想找A股这一支（更常被交易/讨论），不能让港股那边的模糊搜索
-                # 抢先命中，把人带去一个新闻源覆盖不到、也不是本意的市场。
-                a_matches = []
-                try:
-                    a_matches = search_stock_by_name(q)
-                except Exception:
-                    pass
-                if a_matches:
-                    sym, detected = a_matches[0]["code"], "A"
-                else:
-                    name_hit = resolve_symbol_by_name(q, "HK") or resolve_symbol_by_name(q, "US")
-                    if name_hit:
-                        sym, detected = name_hit, ("HK" if name_hit.isdigit() else "US")
-                    else:
-                        detected = _auto_detect_market(q)
-                        sym = (q.zfill(5) if detected == "HK" else (q.upper() if detected == "US" else q)) if detected else None
-                if detected is None:
-                    st.warning("没识别出来——支持直接输代码、指数名称，或者知名公司的中英文名称（覆盖范围有限，查不到不代表没上市）。")
-                else:
-                    st.session_state["_detail_symbol"] = sym
-                    st.session_state["_detail_market"] = detected
-                    st.session_state["_detail_name"] = sym
-                    st.rerun()
-
         # 用 radio 手动实现 tab 切换，不用 st.tabs()——st.tabs() 选中哪个是纯前端状态，
         # 代码控制不了；从自选股点进详情页再返回时，需要能把选中项强制拨回"自选股"。
         st.session_state.setdefault("_active_section", "行情")
+
+        if st.session_state["_active_section"] == "行情":
+            # 快速搜索只在"行情"分区显示——"自选股"分区已经有自己的"新增自选股"
+            # 搜索框了，两个搜索框同时出现是重复的，用户明确反馈要去掉。
+            qcol, bcol = st.columns([5, 1])
+            quick_query = qcol.text_input(
+                "快速搜索代码、指数名称或知名公司名称，直接进详情页",
+                value="", key="_quick_search", placeholder="600519 / 00700 / AAPL / 腾讯 / 特斯拉 / 恒生指数",
+            )
+            if bcol.button("搜索", key="_quick_search_btn", use_container_width=True) and quick_query:
+                q = quick_query.strip()
+                idx_hit = None
+                for _mkt, _idx_list in _MULTI_INDICES.items():
+                    for _name, _code in _idx_list:
+                        if q == _name or q.lower() == _name.lower():
+                            idx_hit = (_name, _code, _mkt)
+                            break
+                    if idx_hit:
+                        break
+                if idx_hit:
+                    idx_name, idx_code, idx_mkt = idx_hit
+                    st.session_state["_index_detail_code"] = idx_code
+                    st.session_state["_index_detail_market"] = idx_mkt
+                    st.session_state["_index_detail_name"] = idx_name
+                    st.rerun()
+                else:
+                    # 名称匹配优先——不然"Tesla"这种纯字母输入会被代码格式的正则先一步误判成
+                    # "看着像美股代码"，根本轮不到名称匹配生效。
+                    # A股名称匹配放在最前面——像宁德时代这种A+H两地上市的公司，用中文名搜
+                    # 大概率是想找A股这一支（更常被交易/讨论），不能让港股那边的模糊搜索
+                    # 抢先命中，把人带去一个新闻源覆盖不到、也不是本意的市场。
+                    a_matches = []
+                    try:
+                        a_matches = search_stock_by_name(q)
+                    except Exception:
+                        pass
+                    if a_matches:
+                        sym, detected = a_matches[0]["code"], "A"
+                    else:
+                        name_hit = resolve_symbol_by_name(q, "HK") or resolve_symbol_by_name(q, "US")
+                        if name_hit:
+                            sym, detected = name_hit, ("HK" if name_hit.isdigit() else "US")
+                        else:
+                            detected = _auto_detect_market(q)
+                            sym = (q.zfill(5) if detected == "HK" else (q.upper() if detected == "US" else q)) if detected else None
+                    if detected is None:
+                        st.warning("没识别出来——支持直接输代码、指数名称，或者知名公司的中英文名称（覆盖范围有限，查不到不代表没上市）。")
+                    else:
+                        st.session_state["_detail_symbol"] = sym
+                        st.session_state["_detail_market"] = detected
+                        st.session_state["_detail_name"] = sym
+                        st.rerun()
+
         active_section = st.radio(
             "分区", ["行情", "自选股"], key="_active_section", horizontal=True, label_visibility="collapsed",
         )
