@@ -924,16 +924,29 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
     st.markdown(
         _PRICE_FLASH_CSS
         + "<style>"
-        + ".wl-card-link { text-decoration: none; color: inherit; display: block; cursor: pointer; }"
-        + ".wl-card-link:hover { opacity: 0.85; }"
-        + "</style>"
-        + "<div style='display:flex;align-items:center;padding:4px 8px 4px 20px;font-size:0.75rem;color:#888'>"
-        + "<div style='flex:2.1'>名称/代码</div>"
-        + "<div style='flex:1.1;text-align:center'>走势</div>"
-        + "<div style='flex:1.3;text-align:right'>最新/成交额</div>"
-        + "<div style='flex:1;text-align:right'>涨跌幅</div>"
-        + "<div style='width:36px'></div>"
-        + "</div>",
+        # 浏览器默认的 a:link/a:visited 样式（蓝色+下划线）选择器带伪类，
+        # 优先级比单纯的class选择器高，必须用!important才能真正覆盖掉。
+        + "a.wl-card-link, a.wl-card-link:link, a.wl-card-link:visited {"
+        + "  text-decoration: none !important; color: inherit !important;"
+        + "  display: block; cursor: pointer;"
+        + "}"
+        + "a.wl-card-link:hover { opacity: 0.85; }"
+        + "</style>",
+        unsafe_allow_html=True,
+    )
+
+    # 表头跟下面每行的列宽必须是同一套 st.columns 比例分出来的，不能自己
+    # 另外拿flex div模仿列宽——之前拿固定36px去凑删除键那一列的宽度，
+    # 在不同屏幕宽度下跟实际的 st.columns([9,1]) 比例对不上，表头和数据
+    # 看着就没对齐。
+    _head_content_col, _head_del_col = st.columns([9, 1])
+    _head_content_col.markdown(
+        "<div style='display:flex;align-items:center;padding:4px 8px;font-size:0.75rem;color:#888'>"
+        "<div style='flex:2.1'>名称/代码</div>"
+        "<div style='flex:1.1;text-align:center'>走势</div>"
+        "<div style='flex:1.3;text-align:right'>最新/成交额</div>"
+        "<div style='flex:1;text-align:right'>涨跌幅</div>"
+        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -1193,8 +1206,13 @@ else:
 
             if idx_list:
                 st.markdown(
-                    "<style>.idx-card-link { text-decoration: none; color: inherit; display: block; cursor: pointer; }"
-                    ".idx-card-link:hover { opacity: 0.85; }</style>"
+                    "<style>"
+                    "a.idx-card-link, a.idx-card-link:link, a.idx-card-link:visited {"
+                    "  text-decoration: none !important; color: inherit !important;"
+                    "  display: block; cursor: pointer;"
+                    "}"
+                    "a.idx-card-link:hover { opacity: 0.85; }"
+                    "</style>"
                     "<div style='display:flex;padding:4px 8px;font-size:0.78rem;color:#888'>"
                     "<div style='flex:2.4'>指数</div>"
                     "<div style='flex:1;text-align:right'>最新</div>"
@@ -1273,7 +1291,7 @@ else:
                         f"{south['净买额']:+.2f}亿</span></div>",
                         unsafe_allow_html=True,
                     )
-                st.caption("港股没有涨跌停限制制度，这里改成知名股涨跌幅榜。")
+                st.markdown("**港股核心股（按热度排）**")
                 try:
                     with st.spinner("加载中（第一次会慢一些）..."):
                         hk_movers = get_hk_famous_movers(15)
@@ -1282,7 +1300,7 @@ else:
                     st.caption(f"获取失败：{e}")
 
             else:
-                st.caption("美股同样没有涨跌停制度，这里也是知名股涨跌幅榜。")
+                st.markdown("**美股核心股**")
                 try:
                     us_movers = get_us_famous_movers(15)
                     st.dataframe(_style_movers_table(us_movers), use_container_width=True, hide_index=True)

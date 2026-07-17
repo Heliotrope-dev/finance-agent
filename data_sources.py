@@ -437,19 +437,19 @@ _HK_NAME_MAP = {
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
-    """港股没有涨跌停制度，退化成"知名股涨跌幅榜"。
+    """港股核心股列表——按热度排（东财个股人气榜），不是按涨跌幅排。
 
-    stock_hk_famous_spot_em（东财）实测连不上，跟东财一贯的不稳定是一回事。
-    改用已经验证稳定的 stock_hk_spot()（新浪全市场快照，25-30秒）拉回来后，
-    本地筛出一份手动维护的知名港股清单，不依赖那个不稳定的东财接口。
+    之前是按涨跌幅排的"知名股涨跌幅榜"，但港股/美股本来就没有涨跌停制度，
+    按涨跌幅排没有A股那种"今天谁封板了"的信息量，改成按真实热度排更有意义。
+    stock_hk_hot_rank_em 是东财个股人气榜-港股市场，直接给排名+代码，不用
+    再自己维护名单去猜"知名股"是谁，人气本身就是市场自己投票出来的。
     """
-    df = _with_retry(ak.stock_hk_spot, retries=0)
-    if df is None or df.empty or "涨跌幅" not in df.columns:
+    df = _with_retry(ak.stock_hk_hot_rank_em, retries=2, backoff=3)
+    if df is None or df.empty:
         return pd.DataFrame()
-    df = df[df["代码"].isin(_HK_FAMOUS_CODES)]
-    df = df.sort_values("涨跌幅", ascending=False).head(limit)
-    keep = [c for c in ("代码", "中文名称", "最新价", "涨跌幅", "涨跌额") if c in df.columns]
-    return df[keep].rename(columns={"中文名称": "名称"}).reset_index(drop=True)
+    df = df.head(limit).rename(columns={"股票名称": "名称"})
+    keep = [c for c in ("当前排名", "代码", "名称", "最新价", "涨跌幅") if c in df.columns]
+    return df[keep].reset_index(drop=True)
 
 
 _US_FAMOUS_CODES = [
@@ -524,7 +524,13 @@ def resolve_symbol_by_name(query: str, market: str) -> str | None:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_us_famous_movers(limit: int = 15) -> pd.DataFrame:
-    """美股知名股涨跌幅榜。
+    """美股核心股列表，按固定的核心股顺序展示，不按涨跌幅排。
+
+    找过港股那样的真实热度榜（东财人气榜、百度热搜股票）——百度热搜
+    stock_hot_search_baidu(symbol="美股") 确实有热度数据（"综合热度"字段），
+    但它给的是公司中文名不是股票代码，很多名字（比如"Sandisk Corporation"
+    这种英文法人名）没法可靠地映射回代码，硬猜容易猜错，不如老实展示固定
+    核心股名单，不排序也不装作是热度榜。
 
     stock_us_famous_spot_em（东财）今晚忽好忽坏，重试也救不回来。改用新浪，
     而且新浪这个接口支持一次请求批量查多只股票（逗号分隔），不用像单股实时
@@ -554,8 +560,7 @@ def get_us_famous_movers(limit: int = 15) -> pd.DataFrame:
         })
     if not rows:
         return pd.DataFrame()
-    df = pd.DataFrame(rows).sort_values("涨跌幅", ascending=False).head(limit)
-    return df.reset_index(drop=True)
+    return pd.DataFrame(rows).head(limit).reset_index(drop=True)
 
 
 def _fetch_history_hk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
