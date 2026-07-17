@@ -66,6 +66,18 @@ def init_db():
         wcols = [r[1] for r in c.execute("PRAGMA table_info(watchlist)").fetchall()]
         if "market" not in wcols:
             c.execute("ALTER TABLE watchlist ADD COLUMN market TEXT NOT NULL DEFAULT 'A'")
+
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS search_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                query TEXT NOT NULL,
+                market TEXT NOT NULL DEFAULT 'A',
+                searched_at TEXT NOT NULL
+            )
+            """
+        )
         c.commit()
 
 
@@ -184,3 +196,38 @@ def get_accuracy_stats(email: str) -> dict:
         if (r["verdict"] == "偏多" and went_up) or (r["verdict"] == "偏空" and not went_up):
             match += 1
     return {"总数": len(rows), "一致数": match, "一致率": match / len(rows) * 100}
+
+
+def add_search_history(email: str, query: str, market: str = "A"):
+    """记一笔"添加自选股"时搜过的关键词——给搜索弹窗里的历史记录用，方便
+    常用的名字不用每次重新打字。同一个词短时间内重复搜不重复记（去重靠
+    先删旧的再插入），每个用户只保留最近20条，太老的自动清掉。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.execute("DELETE FROM search_history WHERE email = ? AND query = ?", (email, query))
+        c.execute(
+            "INSERT INTO search_history (email, query, market, searched_at) VALUES (?, ?, ?, ?)",
+            (email, query, market, datetime.now(timezone.utc).isoformat()),
+        )
+        c.execute(
+            """
+            DELETE FROM search_history WHERE id IN (
+                SELECT id FROM search_history WHERE email = ?
+                ORDER BY searched_at DESC LIMIT -1 OFFSET 20
+            )
+            """,
+            (email,),
+        )
+        c.commit()
+
+
+def get_search_history(email: str, limit: int = 10) -> list[dict]:
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM search_history WHERE email = ? ORDER BY searched_at DESC LIMIT ?",
+            (email, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]

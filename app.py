@@ -2,6 +2,7 @@
 
 import os
 import re
+import urllib.parse
 import streamlit as st
 import streamlit.components.v1 as _cv1
 from datetime import datetime, timedelta
@@ -39,6 +40,7 @@ from analysis import (
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
     add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
+    add_search_history, get_search_history,
 )
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
@@ -155,6 +157,25 @@ if not st.session_state.get("logged_in"):
     _show_login_page()
     st.stop()
 
+# 自选股列表整卡片可点——之前试过CSS覆盖层、JS找DOM绑事件两种方案，
+# 在真实浏览器里都点不动（大概率是这两种方案都依赖对Streamlit内部渲染结构
+# 的猜测，版本一变或者猜错了就失效）。改成最朴素可靠的办法：卡片内容整个
+# 包在一个真正的<a href="?...">链接里，点击就是标准的浏览器导航行为，
+# 不依赖任何JS/CSS去猜内部结构。这里在页面渲染最开始就检查URL参数，
+# 有就直接跳转详情页并清掉参数。
+if st.query_params.get("open_symbol"):
+    st.session_state["_detail_symbol"] = st.query_params["open_symbol"]
+    st.session_state["_detail_market"] = st.query_params.get("open_market", "A")
+    st.session_state["_detail_name"] = st.query_params.get("open_name", st.query_params["open_symbol"])
+    st.query_params.clear()
+    st.rerun()
+if st.query_params.get("open_index_code"):
+    st.session_state["_index_detail_code"] = st.query_params["open_index_code"]
+    st.session_state["_index_detail_market"] = st.query_params.get("open_index_market", "A")
+    st.session_state["_index_detail_name"] = st.query_params.get("open_index_name", "")
+    st.query_params.clear()
+    st.rerun()
+
 
 _BENCHMARK_NAMES = {"A": "沪深300", "HK": "恒生指数", "US": "标普500"}
 
@@ -236,6 +257,27 @@ def _fmt_turnover(v) -> str:
     if v >= 1e4:
         return f"{v / 1e4:.1f}万"
     return f"{v:.0f}"
+
+
+def _resolve_add_symbol(q: str, market_code: str) -> str | None:
+    """"新增自选股"用的名称→代码解析，A股之前一直漏了——resolve_symbol_by_name
+    只支持HK/US（内部的知名股名单和Futu模糊搜索都没有A股这块），A股market
+    传进去必然返回None，退化成直接把"茅台"这种中文名当代码用，当然查不到。
+    这里A股单独先走search_stock_by_name（BaoStock按名称模糊匹配，真支持A股）。
+    """
+    q = q.strip()
+    if market_code == "A":
+        try:
+            matches = search_stock_by_name(q)
+        except Exception:
+            matches = []
+        if matches:
+            return matches[0]["code"]
+        return q if re.match(r"^\d{6}$", q) else None
+    by_name = resolve_symbol_by_name(q, market_code)
+    if by_name:
+        return by_name
+    return q.zfill(5) if market_code == "HK" else q.upper()
 
 
 def _news_to_summary(news) -> str:
@@ -866,9 +908,14 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
     """自选股列表本体单独做成 fragment，价格/涨跌幅每8秒自己刷新，效仿长桥的
     紧凑列表样式：名称代码 + 迷你走势图 + 现价/成交额 + 涨跌幅色块 + 删除键。
     数字真变了背景闪一下（复用详情页那套red/green flash动画）。每行用
-    st.container(border=True)包起来，整行都是一个卡片（不再是只有名字那一小块
-    有框），删除从长按手势改成右侧一个小删除键直接点击——去掉了之前那套用JS
-    模拟长按手势的hack，交互更直接，代码也简单很多。
+    st.container(border=True)包起来，整行都是一个卡片。
+
+    卡片点击跳转：试过两版JS/CSS方案（覆盖层、DOM遍历绑事件）在真实浏览器里
+    都点不动，大概率是猜的Streamlit内部结构不对。这版换成最朴素可靠的办法——
+    整块卡片内容包在一个真正的<a href="?open_symbol=...">链接里，点击就是
+    标准浏览器导航，不依赖任何猜测。URL参数在脚本最开头统一处理（见文件靠前
+    的 st.query_params 检查）。删除键单独放在旁边一个真正的 st.button，
+    跟这个<a>标签是两个独立的DOM元素，互不干扰。
     """
     if not watched_filtered:
         st.caption("这个分类下暂时没有自选股。")
@@ -876,6 +923,10 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
 
     st.markdown(
         _PRICE_FLASH_CSS
+        + "<style>"
+        + ".wl-card-link { text-decoration: none; color: inherit; display: block; cursor: pointer; }"
+        + ".wl-card-link:hover { opacity: 0.85; }"
+        + "</style>"
         + "<div style='display:flex;align-items:center;padding:4px 8px 4px 20px;font-size:0.75rem;color:#888'>"
         + "<div style='flex:2.1'>名称/代码</div>"
         + "<div style='flex:1.1;text-align:center'>走势</div>"
@@ -886,7 +937,6 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         unsafe_allow_html=True,
     )
 
-    wl_symbols = []
     for item in watched_filtered:
         item_market = item.get("market", "A")
         symbol = item["symbol"]
@@ -895,107 +945,59 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         except Exception:
             wspot = {}
 
+        closes = _fetch_sparkline_closes(symbol, item_market)
+        spark_color = "#999"
+        if wspot and wspot.get("最新价") and wspot.get("昨收"):
+            spark_color = "#e02020" if wspot["最新价"] >= wspot["昨收"] else "#22a06b"
+        spark_svg = _build_sparkline_svg(closes, spark_color)
+
+        if wspot and wspot.get("最新价"):
+            wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
+            wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
+            color = "#e02020" if wchange >= 0 else "#22a06b"
+
+            flash_key = f"_wl_last_price_{symbol}_{item_market}"
+            prev = st.session_state.get(flash_key)
+            st.session_state[flash_key] = wspot["最新价"]
+            flash_class = ""
+            if prev is not None and prev != wspot["最新价"]:
+                flash_class = "price-flash-up" if wspot["最新价"] > prev else "price-flash-down"
+
+            price_html = (
+                f"<div class='{flash_class}' style='text-align:right;border-radius:4px'>"
+                f"<div style='font-weight:600;color:{color}'>{wspot['最新价']:.2f}</div>"
+                f"<div style='font-size:0.72rem;color:#999'>{_fmt_turnover(wspot.get('成交额'))}</div>"
+                f"</div>"
+            )
+            badge_html = (
+                f"<div style='text-align:right'>"
+                f"<span style='background:{color};color:#fff;font-size:0.78rem;font-weight:600;"
+                f"padding:3px 7px;border-radius:5px;display:inline-block;min-width:58px;text-align:center'>"
+                f"{wchange_pct:+.2f}%</span></div>"
+            )
+        else:
+            price_html = "<div style='text-align:right;color:#999'>—</div>"
+            badge_html = ""
+
         with st.container(border=True):
-            name_col, spark_col, price_col, badge_col, del_col = st.columns([2.1, 1.1, 1.3, 1, 0.4])
-            name_col.markdown(
-                f"<div style='font-weight:600;padding-top:6px'>{item['name']}（{symbol}）</div>",
+            link_col, del_col = st.columns([9, 1])
+            href = (
+                f"?open_symbol={urllib.parse.quote(symbol)}"
+                f"&open_market={urllib.parse.quote(item_market)}"
+                f"&open_name={urllib.parse.quote(item['name'])}"
+            )
+            link_col.markdown(
+                f"<a class='wl-card-link' href='{href}' target='_self'>"
+                f"<div style='display:flex;align-items:center'>"
+                f"<div style='flex:2.1;font-weight:600'>{item['name']}（{symbol}）</div>"
+                f"<div style='flex:1.1;display:flex;justify-content:center'>{spark_svg}</div>"
+                f"<div style='flex:1.3'>{price_html}</div>"
+                f"<div style='flex:1'>{badge_html}</div>"
+                f"</div></a>",
                 unsafe_allow_html=True,
             )
-            # 这个按钮不直接展示——上次试过用CSS把它铺满整行做成透明覆盖层，
-            # 实测在真实浏览器里点不动（大概率是Streamlit的DOM结构跟猜测的
-            # 不一致）。改成跟"长按删除"那套一样、已经验证过可靠的JS方案：
-            # 按钮本身用文字精确匹配定位、隐藏掉，再往上找到卡片外层容器，
-            # 给整张卡片绑点击事件，点哪里（除了删除键）都触发这个按钮。
-            if name_col.button(f"跳转-{symbol}", key=f"wl_open_{symbol}"):
-                st.session_state["_detail_symbol"] = symbol
-                st.session_state["_detail_market"] = item_market
-                st.session_state["_detail_name"] = item["name"]
-                st.rerun()
-
-            closes = _fetch_sparkline_closes(symbol, item_market)
-            spark_color = "#999"
-            if wspot and wspot.get("最新价") and wspot.get("昨收"):
-                spark_color = "#e02020" if wspot["最新价"] >= wspot["昨收"] else "#22a06b"
-            spark_col.markdown(
-                f"<div style='display:flex;justify-content:center;padding-top:4px'>"
-                f"{_build_sparkline_svg(closes, spark_color)}</div>",
-                unsafe_allow_html=True,
-            )
-
-            if wspot and wspot.get("最新价"):
-                wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
-                wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
-                color = "#e02020" if wchange >= 0 else "#22a06b"
-
-                flash_key = f"_wl_last_price_{symbol}_{item_market}"
-                prev = st.session_state.get(flash_key)
-                st.session_state[flash_key] = wspot["最新价"]
-                flash_class = ""
-                if prev is not None and prev != wspot["最新价"]:
-                    flash_class = "price-flash-up" if wspot["最新价"] > prev else "price-flash-down"
-
-                price_col.markdown(
-                    f"<div class='{flash_class}' style='text-align:right;padding-top:2px;border-radius:4px'>"
-                    f"<div style='font-weight:600;color:{color}'>{wspot['最新价']:.2f}</div>"
-                    f"<div style='font-size:0.72rem;color:#999'>{_fmt_turnover(wspot.get('成交额'))}</div>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-                badge_col.markdown(
-                    f"<div style='text-align:right;padding-top:6px'>"
-                    f"<span style='background:{color};color:#fff;font-size:0.78rem;font-weight:600;"
-                    f"padding:3px 7px;border-radius:5px;display:inline-block;min-width:58px;text-align:center'>"
-                    f"{wchange_pct:+.2f}%</span></div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                price_col.markdown(
-                    "<div style='text-align:right;padding-top:4px;color:#999'>—</div>", unsafe_allow_html=True
-                )
-                badge_col.markdown("")
-
             if del_col.button("×", key=f"wl_del_{symbol}", help="删除自选"):
                 _confirm_delete_dialog(_email, symbol, item["name"])
-
-        wl_symbols.append(symbol)
-
-    if wl_symbols:
-        _cv1.html(
-            f"""
-            <script>
-            (function() {{
-                const symbols = {wl_symbols!r};
-                function bind(attemptsLeft) {{
-                    const doc = window.parent.document;
-                    const buttons = Array.from(doc.querySelectorAll('button'));
-                    let allBound = true;
-                    symbols.forEach(function(sym) {{
-                        const marker = "跳转-" + sym;
-                        const hiddenBtn = buttons.find(function(b) {{ return b.innerText.trim() === marker; }});
-                        if (!hiddenBtn) {{ allBound = false; return; }}
-                        const wrap = hiddenBtn.closest('[data-testid="stButton"]');
-                        if (wrap) wrap.style.display = 'none';
-                        const card = hiddenBtn.closest('[data-testid="stVerticalBlockBorderWrapper"]');
-                        if (!card) {{ allBound = false; return; }}
-                        if (!card.dataset.rowBound) {{
-                            card.dataset.rowBound = "1";
-                            card.style.cursor = 'pointer';
-                            card.addEventListener('click', function(e) {{
-                                if (e.target.closest('[data-testid="stButton"]')) return;
-                                hiddenBtn.click();
-                            }});
-                        }}
-                    }});
-                    if (!allBound && attemptsLeft > 0) {{
-                        setTimeout(function() {{ bind(attemptsLeft - 1); }}, 200);
-                    }}
-                }}
-                bind(15);
-            }})();
-            </script>
-            """,
-            height=0,
-        )
 
 
 @st.dialog("确认删除")
@@ -1007,6 +1009,51 @@ def _confirm_delete_dialog(email: str, symbol: str, name: str):
         st.rerun()
     if dc2.button("取消", use_container_width=True):
         st.rerun()
+
+
+def _do_add_watchlist(email: str, q: str, market_code: str) -> bool:
+    """真正执行添加的公共逻辑，搜索弹窗里"添加"按钮和历史记录"再加"按钮共用。
+    成功才记一笔搜索历史（失败的搜索没必要占历史记录的位置）。
+    """
+    q = q.strip()
+    if not q:
+        return False
+    add_symbol = _resolve_add_symbol(q, market_code)
+    if not add_symbol:
+        st.error(f"没查到「{q}」的行情——检查一下代码对不对，或者这家公司没上市（比如私营公司本来就没有股票代码）。")
+        return False
+    try:
+        add_spot = get_stock_realtime(add_symbol, market=market_code)
+    except Exception:
+        add_spot = {}
+    if not add_spot or not add_spot.get("最新价"):
+        st.error(f"没查到「{q}」的行情——检查一下代码对不对，或者这家公司没上市（比如私营公司本来就没有股票代码）。")
+        return False
+    add_to_watchlist(email, add_symbol, add_spot.get("名称", add_symbol), market=market_code)
+    add_search_history(email, q, market_code)
+    return True
+
+
+@st.dialog("添加自选股")
+def _show_add_watchlist_dialog(email: str):
+    add_query = st.text_input("代码或名称（如 600519 / 腾讯 / 特斯拉）", key="_wl_add_query_dialog")
+    add_market_label = st.selectbox("市场", ["A股", "港股", "美股"], key="_wl_add_market_dialog")
+    if st.button("添加", type="primary", use_container_width=True, key="_wl_add_btn_dialog") and add_query:
+        add_market_code = {"A股": "A", "港股": "HK", "美股": "US"}[add_market_label]
+        if _do_add_watchlist(email, add_query, add_market_code):
+            st.rerun()
+
+    history = get_search_history(email, limit=10)
+    if history:
+        st.divider()
+        st.caption("最近搜索")
+        _hist_market_label = {"A": "A股", "HK": "港股", "US": "美股"}
+        for h in history:
+            hcol1, hcol2 = st.columns([4, 1])
+            hcol1.write(f"{h['query']}（{_hist_market_label.get(h['market'], h['market'])}）")
+            if hcol2.button("再加", key=f"_wl_hist_add_{h['id']}"):
+                if _do_add_watchlist(email, h["query"], h["market"]):
+                    st.rerun()
 
 
 _page_slot = st.empty()
@@ -1095,71 +1142,13 @@ else:
         )
 
 
-        def _auto_detect_market(q: str) -> str | None:
-            if re.match(r"^\d{6}$", q):
-                return "A"
-            if re.match(r"^\d{4,5}$", q):
-                return "HK"
-            if re.match(r"^[A-Za-z.]{1,6}$", q):
-                return "US"
-            return None
-
+        # "行情"分区的快速搜索框去掉了——用户反馈是累赘（"自选股"分区里
+        # "新增自选股"自己就有搜索框，两边都放显得重复）。指数/个股的浏览
+        # 入口保留在下面的指数卡片列表和涨跌幅排行榜里。
 
         # 用 radio 手动实现 tab 切换，不用 st.tabs()——st.tabs() 选中哪个是纯前端状态，
         # 代码控制不了；从自选股点进详情页再返回时，需要能把选中项强制拨回"自选股"。
         st.session_state.setdefault("_active_section", "行情")
-
-        if st.session_state["_active_section"] == "行情":
-            # 快速搜索只在"行情"分区显示——"自选股"分区已经有自己的"新增自选股"
-            # 搜索框了，两个搜索框同时出现是重复的，用户明确反馈要去掉。
-            qcol, bcol = st.columns([5, 1])
-            quick_query = qcol.text_input(
-                "快速搜索代码、指数名称或知名公司名称，直接进详情页",
-                value="", key="_quick_search", placeholder="600519 / 00700 / AAPL / 腾讯 / 特斯拉 / 恒生指数",
-            )
-            if bcol.button("搜索", key="_quick_search_btn", use_container_width=True) and quick_query:
-                q = quick_query.strip()
-                idx_hit = None
-                for _mkt, _idx_list in _MULTI_INDICES.items():
-                    for _name, _code in _idx_list:
-                        if q == _name or q.lower() == _name.lower():
-                            idx_hit = (_name, _code, _mkt)
-                            break
-                    if idx_hit:
-                        break
-                if idx_hit:
-                    idx_name, idx_code, idx_mkt = idx_hit
-                    st.session_state["_index_detail_code"] = idx_code
-                    st.session_state["_index_detail_market"] = idx_mkt
-                    st.session_state["_index_detail_name"] = idx_name
-                    st.rerun()
-                else:
-                    # 名称匹配优先——不然"Tesla"这种纯字母输入会被代码格式的正则先一步误判成
-                    # "看着像美股代码"，根本轮不到名称匹配生效。
-                    # A股名称匹配放在最前面——像宁德时代这种A+H两地上市的公司，用中文名搜
-                    # 大概率是想找A股这一支（更常被交易/讨论），不能让港股那边的模糊搜索
-                    # 抢先命中，把人带去一个新闻源覆盖不到、也不是本意的市场。
-                    a_matches = []
-                    try:
-                        a_matches = search_stock_by_name(q)
-                    except Exception:
-                        pass
-                    if a_matches:
-                        sym, detected = a_matches[0]["code"], "A"
-                    else:
-                        name_hit = resolve_symbol_by_name(q, "HK") or resolve_symbol_by_name(q, "US")
-                        if name_hit:
-                            sym, detected = name_hit, ("HK" if name_hit.isdigit() else "US")
-                        else:
-                            detected = _auto_detect_market(q)
-                            sym = (q.zfill(5) if detected == "HK" else (q.upper() if detected == "US" else q)) if detected else None
-                    if detected is None:
-                        st.warning("没识别出来——支持直接输代码、指数名称，或者知名公司的中英文名称（覆盖范围有限，查不到不代表没上市）。")
-                    else:
-                        st.session_state["_detail_symbol"] = sym
-                        st.session_state["_detail_market"] = detected
-                        st.session_state["_detail_name"] = sym
-                        st.rerun()
 
         active_section = st.radio(
             "分区", ["行情", "自选股"], key="_active_section", horizontal=True, label_visibility="collapsed",
@@ -1204,7 +1193,9 @@ else:
 
             if idx_list:
                 st.markdown(
-                    "<div style='display:flex;padding:4px 8px;font-size:0.78rem;color:#888;border-bottom:1px solid #eee'>"
+                    "<style>.idx-card-link { text-decoration: none; color: inherit; display: block; cursor: pointer; }"
+                    ".idx-card-link:hover { opacity: 0.85; }</style>"
+                    "<div style='display:flex;padding:4px 8px;font-size:0.78rem;color:#888'>"
                     "<div style='flex:2.4'>指数</div>"
                     "<div style='flex:1;text-align:right'>最新</div>"
                     "<div style='flex:1;text-align:right'>涨幅</div>"
@@ -1213,21 +1204,24 @@ else:
                     unsafe_allow_html=True,
                 )
                 for idx in idx_list:
-                    name_col, num_col = st.columns([2.4, 3])
-                    if name_col.button(idx["名称"], key=f"idx_open_{mkt_code}_{idx['名称']}", use_container_width=True):
-                        st.session_state["_index_detail_code"] = _idx_code_by_name.get(idx["名称"], "")
-                        st.session_state["_index_detail_market"] = mkt_code
-                        st.session_state["_index_detail_name"] = idx["名称"]
-                        st.rerun()
                     color = "#e02020" if idx["涨跌"] >= 0 else "#22a06b"
-                    num_col.markdown(
-                        f"<div style='display:flex;padding-top:8px'>"
-                        f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{idx['最新']:,.2f}</div>"
-                        f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
-                        f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌']:+.2f}</div>"
-                        f"</div>",
-                        unsafe_allow_html=True,
+                    idx_code = _idx_code_by_name.get(idx["名称"], "")
+                    href = (
+                        f"?open_index_code={urllib.parse.quote(idx_code)}"
+                        f"&open_index_market={urllib.parse.quote(mkt_code)}"
+                        f"&open_index_name={urllib.parse.quote(idx['名称'])}"
                     )
+                    with st.container(border=True):
+                        st.markdown(
+                            f"<a class='idx-card-link' href='{href}' target='_self'>"
+                            f"<div style='display:flex;align-items:center'>"
+                            f"<div style='flex:2.4;font-weight:600'>{idx['名称']}</div>"
+                            f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{idx['最新']:,.2f}</div>"
+                            f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
+                            f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌']:+.2f}</div>"
+                            f"</div></a>",
+                            unsafe_allow_html=True,
+                        )
             else:
                 st.caption("指数数据暂时获取不到。")
 
@@ -1299,6 +1293,11 @@ else:
             _email = st.session_state["user_email"]
             watched = get_watchlist(_email)
 
+            title_col, search_col = st.columns([6, 1])
+            title_col.write("")
+            if search_col.button("", icon=":material/search:", key="wl_search_icon", use_container_width=True):
+                _show_add_watchlist_dialog(_email)
+
             if not watched:
                 st.write("")
                 _, mid_empty, _ = st.columns([1, 2, 1])
@@ -1307,48 +1306,19 @@ else:
                         "<div style='text-align:center;color:#888;padding:20px 0 10px'>还没有关注任何股票</div>",
                         unsafe_allow_html=True,
                     )
-                    if st.button("新增自选股", type="primary", use_container_width=True, key="wl_empty_add"):
-                        st.session_state["_show_wl_add"] = True
-
-            if watched or st.session_state.get("_show_wl_add"):
-                with st.expander("新增自选股", expanded=not watched and st.session_state.get("_show_wl_add", False)):
-                    addcol1, addcol2, addcol3 = st.columns([2, 1, 1])
-                    add_query = addcol1.text_input("代码或名称（如 600519 / 腾讯 / 特斯拉）", key="_wl_add_query")
-                    add_market_label = addcol2.selectbox("市场", ["A股", "港股", "美股"], key="_wl_add_market")
-                    if addcol3.button("添加", key="_wl_add_btn", use_container_width=True) and add_query:
-                        add_market_code = {"A股": "A", "港股": "HK", "美股": "US"}[add_market_label]
-                        q = add_query.strip()
-                        by_name = resolve_symbol_by_name(q, add_market_code)
-                        if by_name:
-                            add_symbol = by_name
-                        else:
-                            add_symbol = q.zfill(5) if add_market_code == "HK" else (q.upper() if add_market_code == "US" else q)
-                        try:
-                            add_spot = get_stock_realtime(add_symbol, market=add_market_code)
-                        except Exception:
-                            add_spot = {}
-                        if not add_spot or not add_spot.get("最新价"):
-                            st.error(f"没查到「{q}」的行情——检查一下代码对不对，或者这家公司没上市（比如私营公司本来就没有股票代码）。")
-                        else:
-                            add_to_watchlist(_email, add_symbol, add_spot.get("名称", add_symbol), market=add_market_code)
-                            st.session_state["_show_wl_add"] = False
-                            st.rerun()
 
             if watched:
-                _wl_markets_present = sorted({item.get("market", "A") for item in watched})
-                _wl_tab_labels = ["全部"] + [{"A": "A股", "HK": "港股", "US": "美股"}[m] for m in _wl_markets_present]
-                if len(_wl_tab_labels) > 2:
-                    wl_market_tab = st.radio(
-                        "市场筛选", _wl_tab_labels, key="_wl_market_tab", horizontal=True, label_visibility="collapsed",
-                    )
-                else:
-                    wl_market_tab = "全部"
+                # 市场筛选固定显示"全部/A股/港股/美股"四个选项——不管当前自选股
+                # 里有没有对应市场的股票，选项本身应该是稳定的，不随内容忽隐忽现。
+                wl_market_tab = st.radio(
+                    "市场筛选", ["全部", "A股", "港股", "美股"],
+                    key="_wl_market_tab", horizontal=True, label_visibility="collapsed",
+                )
                 _wl_code_to_label = {"A": "A股", "HK": "港股", "US": "美股"}
                 watched_filtered = (
                     watched if wl_market_tab == "全部"
                     else [i for i in watched if _wl_code_to_label.get(i.get("market", "A")) == wl_market_tab]
                 )
-                st.caption("长按股票 3 秒可删除自选 · 每 8 秒自动刷新")
                 _render_watchlist_rows(watched_filtered, _email)
 
 
