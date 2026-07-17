@@ -767,14 +767,25 @@ def get_futu_news(keyword: str, max_count: int = 8) -> pd.DataFrame:
     news.futunn.com（富途自己的资讯站，公开可读，不需要富途账号订阅）。
     只有本机/服务器跑了 OpenD 才能用，连不上就静默返回空，上层自然会退回
     财新兜底。用 NewsSubType.NEWS 过滤掉窝轮牛熊证估值公告这类噪音。
+
+    实测这个接口跟 request_history_kline 一样偶尔会异常久不返回（大概率是
+    富途那边资讯搜索本身要现查，不是本地缓存的行情快照那种毫秒级接口）——
+    跟 get_market_snapshot 不是同一类，不能裸调用，套 _run_with_timeout。
     """
     ctx = _get_futu_ctx()
     if ctx is None:
         return pd.DataFrame()
+
+    def _search():
+        return ctx.get_search_news(keyword, max_count=max_count, news_sub_type=ft.NewsSubType.NEWS)
+
     try:
-        ret, data = ctx.get_search_news(keyword, max_count=max_count, news_sub_type=ft.NewsSubType.NEWS)
+        result = _run_with_timeout(_search, timeout=8, default=None)
     except Exception:
+        result = None
+    if result is None:
         return pd.DataFrame()
+    ret, data = result
     if ret != ft.RET_OK or data is None or data.empty:
         return pd.DataFrame()
 
