@@ -286,7 +286,7 @@ def _one_index_snapshot(market: str, name: str, code: str) -> dict | None:
         return None
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=25, show_spinner=False)
 def get_multi_index_snapshot(market: str) -> list[dict]:
     """给行情页顶部的指数卡片用：每个市场固定几个核心指数，各自最新值+涨跌。
 
@@ -1141,7 +1141,7 @@ def _us_index_snapshot_futu(name: str, index_prev_close: float) -> dict | None:
     return {"最新": last, "涨跌": last - index_prev_close, "涨跌幅": pct}
 
 
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=13, show_spinner=False)
 def get_stock_realtime(symbol: str, market: str = "A") -> dict:
     """真正的实时行情，港股/美股优先走本地 Futu OpenD 网关，没有就退回新浪。
 

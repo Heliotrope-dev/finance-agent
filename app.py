@@ -167,6 +167,11 @@ if st.query_params.get("open_symbol"):
     st.session_state["_detail_symbol"] = st.query_params["open_symbol"]
     st.session_state["_detail_market"] = st.query_params.get("open_market", "A")
     st.session_state["_detail_name"] = st.query_params.get("open_name", st.query_params["open_symbol"])
+    # 从自选股卡片点进来的，"返回"要能回到自选股分区，不是每次都弹回默认的
+    # "行情"分区——整页导航会把session_state清空，"_active_section"记不住
+    # 是从哪个分区点进来的，得靠这个参数显式带过来。
+    if st.query_params.get("open_from") == "wl":
+        st.session_state["_active_section"] = "自选股"
     st.query_params.clear()
     st.rerun()
 if st.query_params.get("open_index_code"):
@@ -257,6 +262,17 @@ def _fmt_turnover(v) -> str:
     if v >= 1e4:
         return f"{v / 1e4:.1f}万"
     return f"{v:.0f}"
+
+
+def _auth_qs() -> str:
+    """卡片链接的<a href="?...">会触发真正的整页导航（不是Streamlit的软rerun），
+    URL的query string会被整个替换掉——如果不把登录用的_auth token也带上，
+    跳转后session_state被清空，会先闪一下登录页，等localStorage自动登录的
+    JS再刷新一次才恢复，两次整页刷新叠加体验很差。这里统一把当前token拼进
+    每个卡片链接，跳转就是一步到位，不会闪登录页。
+    """
+    token = st.session_state.get("_token", "")
+    return f"&_auth={urllib.parse.quote(token)}" if token else ""
 
 
 def _resolve_add_symbol(q: str, market_code: str) -> str | None:
@@ -562,9 +578,9 @@ _PRICE_FLASH_CSS = (
 )
 
 
-@st.fragment(run_every=8)
+@st.fragment(run_every=15)
 def _render_price_header(symbol: str, market: str):
-    """价格区块单独做成 fragment，每8秒自己刷新，不带动AI模块、新闻这些重的部分
+    """价格区块单独做成 fragment，每15秒自己刷新，不带动AI模块、新闻这些重的部分
     一起重跑——之前全页面每30秒整体rerun一次，观感上像"每隔一阵闪一下"，跟
     同花顺那种数字持续跳动的实时感完全不一样。数字真变了就闪一下背景色，
     让"活着"这件事肉眼可见，不是纯靠脑补更新时间戳。
@@ -597,7 +613,7 @@ def _render_price_header(symbol: str, market: str):
         unsafe_allow_html=True,
     )
     _src = "Futu 实时" if spot.get("数据源") == "Futu实时" else "延迟行情"
-    st.caption(f"{_src} · {spot.get('更新时间', '-')} · 每 8 秒自动刷新")
+    st.caption(f"{_src} · {spot.get('更新时间', '-')} · 每 15 秒自动刷新")
     hcol1, hcol2, hcol3 = st.columns(3)
     hcol1.metric("最高", f"{spot.get('最高', 0):.2f}")
     hcol2.metric("最低", f"{spot.get('最低', 0):.2f}")
@@ -614,7 +630,7 @@ def _render_price_header(symbol: str, market: str):
             st.rerun()
 
 
-@st.fragment(run_every=8)
+@st.fragment(run_every=15)
 def _render_index_price_header(name: str, market: str):
     """指数版的实时价格区块，逻辑跟_render_price_header一样，独立的 fragment。"""
     try:
@@ -641,7 +657,7 @@ def _render_index_price_header(name: str, market: str):
         + "</div>",
         unsafe_allow_html=True,
     )
-    st.caption("每 8 秒自动刷新")
+    st.caption("每 15 秒自动刷新")
 
 
 def _render_stock_detail(symbol: str, market: str, name: str):
@@ -903,9 +919,9 @@ def _render_index_detail(name: str, code: str, market: str):
         _render_overall_summary(st.session_state[idx_summary_key])
 
 
-@st.fragment(run_every=8)
+@st.fragment(run_every=15)
 def _render_watchlist_rows(watched_filtered: list, _email: str):
-    """自选股列表本体单独做成 fragment，价格/涨跌幅每8秒自己刷新，效仿长桥的
+    """自选股列表本体单独做成 fragment，价格/涨跌幅每15秒自己刷新，效仿长桥的
     紧凑列表样式：名称代码 + 迷你走势图 + 现价/成交额 + 涨跌幅色块 + 删除键。
     数字真变了背景闪一下（复用详情页那套red/green flash动画）。每行用
     st.container(border=True)包起来，整行都是一个卡片。
@@ -998,18 +1014,24 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
                 f"?open_symbol={urllib.parse.quote(symbol)}"
                 f"&open_market={urllib.parse.quote(item_market)}"
                 f"&open_name={urllib.parse.quote(item['name'])}"
+                f"&open_from=wl"
+                f"{_auth_qs()}"
             )
             link_col.markdown(
                 f"<a class='wl-card-link' href='{href}' target='_self'>"
                 f"<div style='display:flex;align-items:center'>"
-                f"<div style='flex:2.1;font-weight:600'>{item['name']}（{symbol}）</div>"
+                # 颜色直接写在这个div自己身上，不靠继承父级<a>的color——之前靠
+                # a.wl-card-link{{color:inherit!important}}死活压不过浏览器
+                # 默认的a:link蓝色，元素自己的inline style优先级天然最高，不用
+                # 再跟CSS特异性较劲。
+                f"<div style='flex:2.1;font-weight:600;color:#0f172a;text-decoration:none'>{item['name']}（{symbol}）</div>"
                 f"<div style='flex:1.1;display:flex;justify-content:center'>{spark_svg}</div>"
                 f"<div style='flex:1.3'>{price_html}</div>"
                 f"<div style='flex:1'>{badge_html}</div>"
                 f"</div></a>",
                 unsafe_allow_html=True,
             )
-            if del_col.button("×", key=f"wl_del_{symbol}", help="删除自选"):
+            if del_col.button("×", key=f"wl_del_{symbol}", help="删除自选", type="tertiary"):
                 _confirm_delete_dialog(_email, symbol, item["name"])
 
 
@@ -1143,6 +1165,34 @@ else:
                         unsafe_allow_html=True,
                     )
 
+            with st.expander("应用指南"):
+                st.markdown(
+                    "**定位**\n\n"
+                    "Invest Agent 是一个多市场（A股/港股/美股）行情查询和数据交叉验证工具，"
+                    "把行情、财务、新闻这几类原始数据放在一起给你看，AI 只做交叉核对和总结，"
+                    "不做黑箱荐股，不直接给买卖判断。\n\n"
+                    "**行情**\n\n"
+                    "首页按市场切换查看核心指数（A股按涨跌幅列示，港股按东财人气榜排热度，"
+                    "美股展示固定核心股名单），A股另有涨停/跌停池和南向资金；"
+                    "价格每 15 秒自动刷新一次。\n\n"
+                    "**个股/指数详情页**\n\n"
+                    "点开任意标的先看K线或分时图，再看一手资讯（A股优先展示官方公告，"
+                    "港股/美股优先富途资讯，都查不到才退回财新摘要），最后是 AI 深度分析——"
+                    "包含资讯解读、财务摘要、对比大盘、技术面与消息面交叉验证，"
+                    "以及一段综合评分（0-100，越高越偏多头证据、越低越偏空头证据，"
+                    "评分依据是各条独立证据链是否互相印证，不是 AI 自己主观看好程度）。\n\n"
+                    "**自选股**\n\n"
+                    "右上角放大镜可以按代码或名称搜索添加，支持按市场筛选，"
+                    "卡片显示迷你走势图和实时涨跌，点卡片进详情页，点 × 删除。\n\n"
+                    "**历史回看**\n\n"
+                    "每次生成「综合数据分析」时会记录当时价格和 AI 判断的方向倾向，"
+                    "满 7 天后自动补录当时的价格做对照，统计一个方向一致率——"
+                    "这是历史记录的客观统计，不代表未来表现，不是胜率承诺。\n\n"
+                    "**重要说明**\n\n"
+                    "本应用所有分析、评分、资讯摘要仅基于公开数据的整理和交叉核对，"
+                    "不构成任何投资建议，不保证数据的完整性和及时性，据此操作的风险自负。"
+                )
+
         st.markdown(
             """
             <div style='background:#e02020;margin:-1rem -1rem 0 -1rem;padding:14px 24px;
@@ -1228,12 +1278,13 @@ else:
                         f"?open_index_code={urllib.parse.quote(idx_code)}"
                         f"&open_index_market={urllib.parse.quote(mkt_code)}"
                         f"&open_index_name={urllib.parse.quote(idx['名称'])}"
+                        f"{_auth_qs()}"
                     )
                     with st.container(border=True):
                         st.markdown(
                             f"<a class='idx-card-link' href='{href}' target='_self'>"
                             f"<div style='display:flex;align-items:center'>"
-                            f"<div style='flex:2.4;font-weight:600'>{idx['名称']}</div>"
+                            f"<div style='flex:2.4;font-weight:600;color:#0f172a;text-decoration:none'>{idx['名称']}</div>"
                             f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{idx['最新']:,.2f}</div>"
                             f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
                             f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌']:+.2f}</div>"
@@ -1311,9 +1362,8 @@ else:
             _email = st.session_state["user_email"]
             watched = get_watchlist(_email)
 
-            title_col, search_col = st.columns([6, 1])
-            title_col.write("")
-            if search_col.button("", icon=":material/search:", key="wl_search_icon", use_container_width=True):
+            title_col, search_col = st.columns([11, 1])
+            if search_col.button("", icon=":material/search:", key="wl_search_icon", type="tertiary"):
                 _show_add_watchlist_dialog(_email)
 
             if not watched:
