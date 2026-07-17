@@ -168,3 +168,28 @@ def analyze_index(name: str, technical_summary: str, news_summary: str) -> str:
         temperature=0.3,
     )
     return resp.choices[0].message.content
+
+
+_OVERALL_SUMMARY_PROMPT = """你是财经数据分析助手。下面是同一只标的的几段独立分析结果
+（资讯解读、财务摘要、大盘对比、技术面与消息面交叉验证——不是同一个视角，是几个
+分开跑的独立判断），请写一段总结性分析（150字以内），把这几条线综合起来给一个
+理性、克制的整体判断：几条线的结论是互相印证还是有冲突，整体偏向是什么，最大的
+不确定性在哪。不要重复罗列前面每一段说过的内容，要真正综合、提炼出更高层的判断。
+不要给"买入/卖出/持有"这类操作指令。语气像分析师给同事的一句话总结，不要"综合以上
+分析可以看出"这类套话开场，直接说结论。最后必须单独一行加上：本分析仅供参考，不构成投资建议。"""
+
+
+def summarize_overall(symbol: str, section_texts: dict) -> str:
+    """总结性分析——把前面几个独立模块已经产出的AI文本再综合一次，不重新拉数据，
+    只是站在更高层面把几条独立证据链拧成一个判断，给用户一个"看这一段就够"的收尾。
+    """
+    sections = "\n\n".join(f"【{k}】\n{v}" for k, v in section_texts.items() if v)
+    resp = _client().chat.completions.create(
+        model=_MODEL,
+        messages=[
+            {"role": "system", "content": _OVERALL_SUMMARY_PROMPT},
+            {"role": "user", "content": f"标的：{symbol}\n\n{sections}"},
+        ],
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content

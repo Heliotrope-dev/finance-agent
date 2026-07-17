@@ -19,6 +19,7 @@ from data_sources import (
     get_stock_realtime,
     get_financial_abstract,
     get_stock_news,
+    get_stock_notices,
     get_benchmark_history,
     get_stock_name,
     get_multi_index_snapshot,
@@ -29,7 +30,10 @@ from data_sources import (
     get_us_famous_movers,
     resolve_symbol_by_name,
 )
-from analysis import cross_validate, summarize_financials, summarize_news, summarize_benchmark, extract_verdict, analyze_index
+from analysis import (
+    cross_validate, summarize_financials, summarize_news, summarize_benchmark,
+    extract_verdict, analyze_index, summarize_overall,
+)
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
     add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
@@ -153,11 +157,32 @@ if not st.session_state.get("logged_in"):
 _BENCHMARK_NAMES = {"A": "沪深300", "HK": "恒生指数", "US": "标普500"}
 
 
-def _render_news_section(keyword: str):
-    """一手资讯单独成块，标题不截断，点标题直接跳原文——不是AI解读的附属品，
-    是AI解读的依据来源，放在AI解读前面让用户自己先看一手材料。
+def _render_news_section(keyword: str, symbol: str | None = None, market: str = "A"):
+    """一手资讯单独成块，标题不截断——是AI解读的依据来源，放在AI解读前面让用户
+    自己先看一手材料。A股优先用官方公告（监管强制披露，永远免费，比新闻评论
+    更"一手"，点进去就是东财公告中心原文，不存在付费墙）；港股/美股没有对应的
+    免费公告聚合源，退回财新新闻摘要（有付费墙，已经标注清楚）。
     """
     st.subheader("最新资讯")
+
+    if market == "A" and symbol:
+        try:
+            notices = get_stock_notices(symbol)
+        except Exception:
+            notices = None
+        if notices is not None and not notices.empty:
+            st.caption("来自东财公告中心的官方公告，监管强制披露，永远免费，点标题可跳转原文。")
+            for _, r in notices.iterrows():
+                st.markdown(
+                    f"<div style='margin:6px 0;font-size:0.9rem'>"
+                    f"<span style='color:#888;font-size:0.78rem'>{r.get('日期', '')}</span>　"
+                    f"<a href='{r.get('url', '')}' target='_blank' style='color:#0f172a;text-decoration:none'>{r['新闻标题']}</a>　"
+                    f"<span style='color:#888;font-size:0.75rem'>{r.get('分类', '')}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            return
+
     try:
         news = get_stock_news(keyword, limit=8)
     except Exception as e:
@@ -444,7 +469,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
 
     st.divider()
     _stock_name_for_news = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
-    _render_news_section(_stock_name_for_news)
+    _render_news_section(_stock_name_for_news, symbol=symbol, market=market)
 
     st.divider()
     st.subheader("AI 深度分析")
@@ -452,12 +477,28 @@ def _render_stock_detail(symbol: str, market: str, name: str):
         "打开详情页自动生成，多个独立 AI 调用分别交叉验证新闻、财务、大盘对比、"
         "技术面与消息面是否一致——只呈现数据和依据，不给买卖建议，请自行判断。"
     )
-    for mod_key, mod_label in (
+    module_defs = (
         ("news", "资讯解读"), ("financial", "财务摘要"), ("benchmark", "对比大盘"), ("cross", "综合数据分析（交叉验证）"),
-    ):
+    )
+    for mod_key, mod_label in module_defs:
         with st.container(border=True):
             st.markdown(f"**{mod_label}**")
             _render_module(mod_key, symbol, market, hist, spot)
+
+    summary_key = f"_detail_summary_{symbol}_{market}"
+    with st.container(border=True):
+        st.markdown("**总结性分析**")
+        if summary_key not in st.session_state:
+            with st.spinner("汇总中..."):
+                try:
+                    section_texts = {
+                        mod_label: st.session_state.get(f"_detail_mod_{symbol}_{market}_{mod_key}", {}).get("ai_text", "")
+                        for mod_key, mod_label in module_defs
+                    }
+                    st.session_state[summary_key] = summarize_overall(symbol, section_texts)
+                except Exception as e:
+                    st.session_state[summary_key] = f"汇总失败：{e}"
+        st.markdown(st.session_state[summary_key])
 
 
 def _render_index_detail(name: str, code: str, market: str):
@@ -576,6 +617,21 @@ def _render_index_detail(name: str, code: str, market: str):
             st.plotly_chart(build_return_histogram(cross_data["daily_hist"]), use_container_width=True)
         st.caption("AI 解读")
         st.markdown(cross_data["ai_text"])
+
+    idx_summary_key = f"{idx_ai_key}_summary"
+    with st.container(border=True):
+        st.markdown("**总结性分析**")
+        if idx_summary_key not in st.session_state:
+            with st.spinner("汇总中..."):
+                try:
+                    section_texts = {
+                        "资讯解读": st.session_state.get(f"{idx_ai_key}_news", {}).get("ai_text", ""),
+                        "综合数据分析": st.session_state.get(f"{idx_ai_key}_cross", {}).get("ai_text", ""),
+                    }
+                    st.session_state[idx_summary_key] = summarize_overall(name, section_texts)
+                except Exception as e:
+                    st.session_state[idx_summary_key] = f"汇总失败：{e}"
+        st.markdown(st.session_state[idx_summary_key])
 
 
 @st.dialog("确认删除")

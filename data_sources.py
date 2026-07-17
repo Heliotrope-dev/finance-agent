@@ -1196,3 +1196,17 @@ def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
 def get_market_news() -> pd.DataFrame:
     """大盘/宏观资讯，补充个股新闻覆盖不到的面。"""
     return _with_retry(ak.stock_news_main_cx)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_stock_notices(symbol: str) -> pd.DataFrame:
+    """A股官方公告——监管强制披露，来自东财公告中心，永远免费，不存在付费墙这回事，
+    比新闻评论类内容更"一手"（财报、分红、股东会决议这些直接是公司自己发的）。
+    只支持A股，港股/美股没有对应的免费公告聚合源，那两个市场还是走 get_stock_news。
+    """
+    df = _with_retry(lambda: ak.stock_individual_notice_report(security=symbol, symbol="全部"))
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.rename(columns={"公告标题": "新闻标题", "公告日期": "日期", "公告类型": "分类", "网址": "url"})
+    df = df.sort_values("日期", ascending=False)
+    return df[["日期", "新闻标题", "分类", "url"]].head(10)
