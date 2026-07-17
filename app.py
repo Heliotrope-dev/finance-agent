@@ -218,25 +218,20 @@ def _render_overall_summary(raw_text: str):
         else:
             color, zone = "#888", "中性"
         st.markdown(
-            f"""
-            <div style='margin-bottom:14px'>
-                <div style='display:flex;align-items:baseline;gap:8px;margin-bottom:6px'>
-                    <span style='font-size:1.6rem;font-weight:700;color:{color}'>{score}</span>
-                    <span style='font-size:0.85rem;color:#888'>/ 100
-                        <span style='color:{color};font-weight:600'>{zone}</span>
-                    </span>
-                </div>
-                <div style='position:relative;height:6px;border-radius:3px;
-                            background:linear-gradient(to right,#22a06b,#d8d8d8,#e02020)'>
-                    <div style='position:absolute;left:{score}%;top:-4px;width:14px;height:14px;
-                                border-radius:50%;background:#fff;border:3px solid {color};
-                                transform:translateX(-50%)'></div>
-                </div>
-                <div style='display:flex;justify-content:space-between;font-size:0.7rem;color:#aaa;margin-top:3px'>
-                    <span>偏空</span><span>中性</span><span>偏多</span>
-                </div>
-            </div>
-            """,
+            f"<div style='margin-bottom:14px'>"
+            + f"<div style='display:flex;align-items:baseline;gap:8px;margin-bottom:6px'>"
+            + f"<span style='font-size:1.6rem;font-weight:700;color:{color}'>{score}</span>"
+            + f"<span style='font-size:0.85rem;color:#888'>/ 100 "
+            + f"<span style='color:{color};font-weight:600'>{zone}</span></span>"
+            + "</div>"
+            + f"<div style='position:relative;height:6px;border-radius:3px;background:linear-gradient(to right,#22a06b,#d8d8d8,#e02020)'>"
+            + f"<div style='position:absolute;left:{score}%;top:-4px;width:14px;height:14px;"
+            + f"border-radius:50%;background:#fff;border:3px solid {color};transform:translateX(-50%)'></div>"
+            + "</div>"
+            + "<div style='display:flex;justify-content:space-between;font-size:0.7rem;color:#aaa;margin-top:3px'>"
+            + "<span>偏空</span><span>中性</span><span>偏多</span>"
+            + "</div>"
+            + "</div>",
             unsafe_allow_html=True,
         )
     st.markdown(display_text)
@@ -467,14 +462,14 @@ def _inject_auto_refresh(seconds: int, key: str):
     )
 
 
-_PRICE_FLASH_CSS = """
-<style>
-@keyframes priceFlashUp { 0% { background: rgba(224,32,32,0.28); } 100% { background: transparent; } }
-@keyframes priceFlashDown { 0% { background: rgba(34,160,107,0.28); } 100% { background: transparent; } }
-.price-flash-up { animation: priceFlashUp 1.4s ease-out; }
-.price-flash-down { animation: priceFlashDown 1.4s ease-out; }
-</style>
-"""
+_PRICE_FLASH_CSS = (
+    "<style>"
+    "@keyframes priceFlashUp { 0% { background: rgba(224,32,32,0.28); } 100% { background: transparent; } }"
+    "@keyframes priceFlashDown { 0% { background: rgba(34,160,107,0.28); } 100% { background: transparent; } }"
+    ".price-flash-up { animation: priceFlashUp 1.4s ease-out; }"
+    ".price-flash-down { animation: priceFlashDown 1.4s ease-out; }"
+    "</style>"
+)
 
 
 @st.fragment(run_every=8)
@@ -505,12 +500,10 @@ def _render_price_header(symbol: str, market: str):
 
     st.markdown(
         _PRICE_FLASH_CSS
-        + f"""
-        <div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:6px'>
-            <span style='font-size:2rem;font-weight:700;color:{color}'>{spot['最新价']:.2f}</span>&nbsp;&nbsp;
-            <span style='font-size:1.1rem;color:{color}'>{change:+.2f} ({change_pct:+.2f}%)</span>
-        </div>
-        """,
+        + f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:6px'>"
+        + f"<span style='font-size:2rem;font-weight:700;color:{color}'>{spot['最新价']:.2f}</span>&nbsp;&nbsp;"
+        + f"<span style='font-size:1.1rem;color:{color}'>{change:+.2f} ({change_pct:+.2f}%)</span>"
+        + "</div>",
         unsafe_allow_html=True,
     )
     _src = "Futu 实时" if spot.get("数据源") == "Futu实时" else "延迟行情"
@@ -552,12 +545,10 @@ def _render_index_price_header(name: str, market: str):
 
     st.markdown(
         _PRICE_FLASH_CSS
-        + f"""
-        <div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:6px'>
-            <span style='font-size:2rem;font-weight:700;color:{color}'>{idx_snap['最新']:,.2f}</span>&nbsp;&nbsp;
-            <span style='font-size:1.1rem;color:{color}'>{idx_snap['涨跌']:+.2f} ({idx_snap['涨跌幅']:+.2f}%)</span>
-        </div>
-        """,
+        + f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:6px'>"
+        + f"<span style='font-size:2rem;font-weight:700;color:{color}'>{idx_snap['最新']:,.2f}</span>&nbsp;&nbsp;"
+        + f"<span style='font-size:1.1rem;color:{color}'>{idx_snap['涨跌']:+.2f} ({idx_snap['涨跌幅']:+.2f}%)</span>"
+        + "</div>",
         unsafe_allow_html=True,
     )
     st.caption("每 8 秒自动刷新")
