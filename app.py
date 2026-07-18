@@ -808,9 +808,16 @@ def _render_index_top_movers(market: str):
 
 def _render_stock_detail(symbol: str, market: str, name: str):
     _inject_auto_refresh(30, f"stock_{symbol}_{market}")
-    if st.button("返回自选股"):
+    st.markdown(
+        "<style>"
+        "[class*='st-key-detail_back_'] button p { font-size: 1.5rem !important; font-weight: 700; }"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+    if st.button("×", key=f"detail_back_{symbol}_{market}", type="tertiary", help="返回自选股"):
         for k in ("_detail_symbol", "_detail_market", "_detail_name", "_detail_module"):
             st.session_state.pop(k, None)
+        st.session_state["_active_section"] = "自选股"
         st.rerun()
 
     st.markdown(
@@ -891,7 +898,22 @@ def _render_stock_detail(symbol: str, market: str, name: str):
         if chart_hist is not None and not chart_hist.empty:
             st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
 
+    # 手机上进详情页第一屏默认只有图表这一块——之前新闻/AI分析这些小组件
+    # 全部一起加载，手机上往下滑浏览的时候很容易手滑碰到中间那些按钮
+    # （K线周期切换、重新分析这些）造成误触。改成默认收起，只留一个
+    # "浏览更多"按钮，点了才展开新闻和AI分析部分，第一屏能滑动的可交互
+    # 元素少很多，不容易碰错。
+    expand_key = f"_detail_expand_{symbol}_{market}"
     st.divider()
+    if not st.session_state.get(expand_key):
+        if st.button("浏览更多（新闻 · AI 分析）", key=f"_detail_expand_btn_{symbol}_{market}", use_container_width=True):
+            st.session_state[expand_key] = True
+            st.rerun()
+        return
+    if st.button("收起", key=f"_detail_collapse_btn_{symbol}_{market}"):
+        st.session_state[expand_key] = False
+        st.rerun()
+
     _stock_name_for_news = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
     _render_news_section(_stock_name_for_news, symbol=symbol, market=market)
 
@@ -935,9 +957,16 @@ def _render_stock_detail(symbol: str, market: str, name: str):
 
 def _render_index_detail(name: str, code: str, market: str):
     _inject_auto_refresh(30, f"index_{code}_{market}")
-    if st.button("返回", key="idx_back"):
+    st.markdown(
+        "<style>"
+        "[class*='st-key-idx_back_'] button p { font-size: 1.5rem !important; font-weight: 700; }"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+    if st.button("×", key=f"idx_back_{code}_{market}", type="tertiary", help="返回行情"):
         for k in ("_index_detail_code", "_index_detail_market", "_index_detail_name"):
             st.session_state.pop(k, None)
+        st.session_state["_active_section"] = "行情"
         st.rerun()
 
     st.markdown(
@@ -987,7 +1016,17 @@ def _render_index_detail(name: str, code: str, market: str):
         if chart_hist is not None and not chart_hist.empty:
             st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
 
+    idx_expand_key = f"_idx_expand_{code}_{market}"
     st.divider()
+    if not st.session_state.get(idx_expand_key):
+        if st.button("浏览更多（成分股 · 资讯 · AI 分析）", key=f"_idx_expand_btn_{code}_{market}", use_container_width=True):
+            st.session_state[idx_expand_key] = True
+            st.rerun()
+        return
+    if st.button("收起", key=f"_idx_collapse_btn_{code}_{market}"):
+        st.session_state[idx_expand_key] = False
+        st.rerun()
+
     st.subheader("成分股")
     _render_index_top_movers(market)
 
