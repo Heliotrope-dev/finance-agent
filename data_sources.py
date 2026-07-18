@@ -3,6 +3,7 @@
 import contextlib
 import io
 import queue as _queue
+import re
 import threading
 import time
 from datetime import datetime, timedelta
@@ -441,6 +442,13 @@ _HK_NAME_MAP = {
     "百度": "09888", "百度集团": "09888", "baidu": "09888",
     "金山软件": "03888", "kingsoft": "03888",
     "比亚迪": "01211", "byd": "01211",
+    # 同时在美股上市的中概股，港股这边的代码——跟_US_NAME_MAP里对应条目
+    # 配对使用，缺了任何一边"多市场都查得到就问用户选哪个"的歧义检测就查不全。
+    "携程": "09961", "携程集团": "09961", "trip.com": "09961",
+    "哔哩哔哩": "09626", "b站": "09626", "bilibili": "09626",
+    "蔚来": "09866", "蔚来汽车": "09866", "nio": "09866",
+    "理想汽车": "02015", "理想": "02015", "li auto": "02015",
+    "小鹏汽车": "09868", "小鹏": "09868", "xpeng": "09868",
 }
 
 
@@ -515,6 +523,21 @@ _US_NAME_MAP = {
     "可口可乐": "KO", "coca cola": "KO", "coca-cola": "KO",
     "百事": "PEP", "百事可乐": "PEP", "pepsi": "PEP",
     "耐克": "NKE", "nike": "NKE",
+    # 下面这些是同时在港股+美股两地上市的中概股——跟_HK_NAME_MAP里用一样的
+    # 中文key，是给"添加自选股"那边做"多市场都查得到就问用户选哪个"的
+    # 判断用的，不能漏掉任何一边，不然那个歧义检测就形同虚设。
+    "阿里巴巴": "BABA", "阿里": "BABA", "alibaba": "BABA",
+    "京东": "JD", "京东集团": "JD",
+    "百度": "BIDU", "百度集团": "BIDU", "baidu": "BIDU",
+    "网易": "NTES", "netease": "NTES",
+    "携程": "TCOM", "携程集团": "TCOM", "trip.com": "TCOM",
+    "哔哩哔哩": "BILI", "b站": "BILI", "bilibili": "BILI",
+    "蔚来": "NIO", "蔚来汽车": "NIO", "nio": "NIO",
+    "理想汽车": "LI", "理想": "LI", "li auto": "LI",
+    "小鹏汽车": "XPEV", "小鹏": "XPEV", "xpeng": "XPEV",
+    "拼多多": "PDD", "pdd": "PDD",
+    "唯品会": "VIPS", "vipshop": "VIPS",
+    "腾讯音乐": "TME", "tencent music": "TME",
 }
 
 
@@ -556,6 +579,54 @@ def resolve_symbol_by_name(query: str, market: str) -> str | None:
         if r["market"] == market:
             return r["code"]
     return None
+
+
+def detect_symbol_candidates(query: str) -> list[dict]:
+    """"添加自选股"用——不用先问用户选哪个市场，自动判断这个名字在哪些市场
+    能查到。像"苹果"这种只有一个市场命中，直接返回一条结果，调用方可以
+    不问market直接添加；像"阿里巴巴"这种港股美股都有手动维护的别名条目，
+    会返回两条，调用方就得让用户选。
+
+    只走快速安全的路径（纯代码格式的正则判断 + A股名称库 + 港股/美股手动
+    维护的别名map），不碰Futu的全市场模糊搜索兜底——那条路径在没有本地
+    OpenD连接、或者跨线程调用时实测会直接卡死不返回（get_stock_realtime_futu
+    那边记录过这个坑），放在这种"先探测再决定"的轻量场景里风险太大。
+    覆盖不到的冷门名字，调用方自己再退回原来那套需要手动选市场的输入方式。
+    """
+    q = query.strip()
+    if not q:
+        return []
+
+    if re.match(r"^\d{6}$", q):
+        return [{"symbol": q, "market": "A", "market_label": "A股"}]
+    if re.match(r"^\d{4,5}$", q):
+        return [{"symbol": q.zfill(5), "market": "HK", "market_label": "港股"}]
+    if re.match(r"^[A-Za-z.]{1,6}$", q):
+        # 纯字母代码——但字母代码也可能刚好撞上下面手动维护的英文别名
+        # （比如"nio"既是代码又是别名），别名表命中优先，查不到才当纯代码用。
+        pass
+
+    results = []
+    q_lower = q.lower()
+    try:
+        a_matches = search_stock_by_name(q)
+    except Exception:
+        a_matches = []
+    if a_matches:
+        results.append({"symbol": a_matches[0]["code"], "market": "A", "market_label": "A股"})
+
+    hk_code = _HK_NAME_MAP.get(q_lower)
+    if hk_code:
+        results.append({"symbol": hk_code, "market": "HK", "market_label": "港股"})
+
+    us_code = _US_NAME_MAP.get(q_lower)
+    if us_code:
+        results.append({"symbol": us_code, "market": "US", "market_label": "美股"})
+
+    if not results and re.match(r"^[A-Za-z.]{1,6}$", q):
+        results.append({"symbol": q.upper(), "market": "US", "market_label": "美股"})
+
+    return results
 
 
 @st.cache_data(ttl=300, show_spinner=False)

@@ -33,6 +33,7 @@ from data_sources import (
     get_southbound_flow,
     get_us_famous_movers,
     resolve_symbol_by_name,
+    detect_symbol_candidates,
 )
 from analysis import (
     cross_validate, summarize_financials, summarize_news, summarize_index_news, summarize_benchmark,
@@ -1250,11 +1251,35 @@ def _do_add_watchlist(email: str, q: str, market_code: str) -> bool:
 @st.dialog("添加自选股")
 def _show_add_watchlist_dialog(email: str):
     add_query = st.text_input("代码或名称（如 600519 / 腾讯 / 特斯拉）", key="_wl_add_query_dialog")
-    add_market_label = st.selectbox("市场", ["A股", "港股", "美股"], key="_wl_add_market_dialog")
+
     if st.button("添加", type="primary", use_container_width=True, key="_wl_add_btn_dialog") and add_query:
-        add_market_code = {"A股": "A", "港股": "HK", "美股": "US"}[add_market_label]
-        if _do_add_watchlist(email, add_query, add_market_code):
-            st.rerun()
+        # 不再让用户先选市场——大多数公司名字只在一个市场上市，自动判断就够了
+        # （比如"苹果"只有美股）。只有像"阿里巴巴"这种港股美股都有的名字，
+        # 才需要用户自己选，见下面的候选按钮。
+        candidates = detect_symbol_candidates(add_query)
+        if not candidates:
+            st.error(f"没查到「{add_query}」——试试直接输代码，或者换个更常见的名称。")
+        elif len(candidates) == 1:
+            if _do_add_watchlist(email, add_query, candidates[0]["market"]):
+                st.rerun()
+        else:
+            st.session_state["_wl_add_candidates"] = candidates
+            st.session_state["_wl_add_candidates_query"] = add_query
+
+    if st.session_state.get("_wl_add_candidates"):
+        cands = st.session_state["_wl_add_candidates"]
+        cq = st.session_state.get("_wl_add_candidates_query", "")
+        st.info(f"「{cq}」在多个市场都有上市，选一个：")
+        cand_cols = st.columns(len(cands))
+        for ccol, c in zip(cand_cols, cands):
+            if ccol.button(
+                f"{c['market_label']}（{c['symbol']}）", key=f"_wl_cand_{c['market']}_{c['symbol']}",
+                use_container_width=True,
+            ):
+                if _do_add_watchlist(email, cq, c["market"]):
+                    st.session_state.pop("_wl_add_candidates", None)
+                    st.session_state.pop("_wl_add_candidates_query", None)
+                    st.rerun()
 
     history = get_search_history(email, limit=10)
     if history:
@@ -1262,11 +1287,18 @@ def _show_add_watchlist_dialog(email: str):
         st.caption("最近搜索")
         _hist_market_label = {"A": "A股", "HK": "港股", "US": "美股"}
         for h in history:
-            hcol1, hcol2 = st.columns([4, 1])
-            hcol1.write(f"{h['query']}（{_hist_market_label.get(h['market'], h['market'])}）")
-            if hcol2.button("再加", key=f"_wl_hist_add_{h['id']}"):
-                if _do_add_watchlist(email, h["query"], h["market"]):
+            row_label = f"{h['query']}（{_hist_market_label.get(h['market'], h['market'])}）"
+            # 点历史记录直接跳去那只股票的详情页，不是再加一遍自选——
+            # 用户反馈"再加"这个按钮没必要，点了就想直接看那只股票。
+            if st.button(row_label, key=f"_wl_hist_open_{h['id']}", use_container_width=True):
+                sym = _resolve_add_symbol(h["query"], h["market"])
+                if sym:
+                    st.session_state["_detail_symbol"] = sym
+                    st.session_state["_detail_market"] = h["market"]
+                    st.session_state["_detail_name"] = h["query"]
                     st.rerun()
+                else:
+                    st.error(f"没查到「{h['query']}」的行情。")
 
 
 _page_slot = st.empty()
