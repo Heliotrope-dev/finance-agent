@@ -481,6 +481,7 @@ def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
     return df[keep].rename(columns={"中文名称": "名称"}).reset_index(drop=True)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
     """港股核心股列表——直接走涨跌幅榜（新浪快照+知名股名单），不走东财人气榜。
     东财人气榜数据是更真实的"热度"，但接口本身不稳定，_with_retry重试+全局限流
@@ -488,6 +489,10 @@ def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
     反馈"加载好慢"——两边取舍下来，稳定快速更重要，人气榜这条路径不再用在这里
     （get_index_top_movers的港股成分股仍然用_get_hk_hot_rank_raw，那边场景不同，
     是点开指数详情页才触发，不是每次进港股行情都要等）。
+
+    这里必须加缓存——实测ak.stock_hk_spot()本身单次调用就要接近30秒（内部是
+    分页/逐条拉全市场快照），去掉热度榜那条路径之后它就是唯一数据源了，不缓存
+    的话每次进港股行情都要扛这近30秒，比之前更慢，跟这次改动的初衷完全相反。
     """
     return _get_hk_movers_by_change(limit)
 
