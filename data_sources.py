@@ -919,34 +919,51 @@ def _run_with_timeout(fn, timeout=8, default=None):
         return default
 
 
-def _get_futu_ctx():
-    """本地 Futu OpenD 网关（127.0.0.1:11111）的连接句柄，只在本机跑了 OpenD 时可用。
+_futu_ctx_last_attempt = 0.0
 
-    VPS 上没装 OpenD，这里连不上是预期情况，静默返回 None 走新浪兜底，
-    不能让部署环境因为缺这个本地网关而报错。
+
+def _get_futu_ctx():
+    """本地/服务器 Futu OpenD 网关（127.0.0.1:11111）的连接句柄。
+
+    实测踩过一个坑：进程刚起来那一下，OpenD 握手偶尔要一两分钟才完成（比这里
+    的超时长得多），而旧版逻辑是"查过一次就永久记住结果"——一旦第一次因为
+    超时判定成None，_futu_ctx_checked就再也不会重新尝试，哪怕OpenD其实几十秒后
+    就握手成功了，也要等下次重启进程才能恢复，整个进程生命周期里所有Futu功能
+    全部跟着躺尸。现在改成：超时返回None不是永久结论，只是"最近30秒内不用再等"，
+    过了冷却期允许重试；同时worker线程自己成功后直接把结果写回全局变量，就算
+    调用方已经等超时放弃了，那次连接握手本身如果稍后真的成功了，也不会白跑，
+    下一次调用能直接捡到用。
     """
-    global _futu_ctx, _futu_ctx_checked
+    global _futu_ctx, _futu_ctx_checked, _futu_ctx_last_attempt
     if _futu_ctx_checked:
         return _futu_ctx
-    _futu_ctx_checked = True
     if not _FUTU_SDK_AVAILABLE:
+        _futu_ctx_checked = True
         return None
 
-    # 连接本身绝大多数时候是毫秒级，但实测偶尔也会异常久不返回（跟 OpenD 那边的
-    # 状态有关，具体原因没能稳定复现），一样套超时兜底，不能让这一步成为唯一
-    # 没有保护、能把整条链路拖死的地方。
+    now = time.time()
+    if now - _futu_ctx_last_attempt < 30:
+        return None
+    _futu_ctx_last_attempt = now
+
     def _connect():
         ctx = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
         ret, _ = ctx.get_global_state()
         if ret != ft.RET_OK:
             ctx.close()
             return None
+        global _futu_ctx, _futu_ctx_checked
+        _futu_ctx = ctx
+        _futu_ctx_checked = True
         return ctx
 
     try:
-        _futu_ctx = _run_with_timeout(_connect, timeout=6, default=None)
+        result = _run_with_timeout(_connect, timeout=8, default=None)
     except Exception:
-        _futu_ctx = None
+        result = None
+    if result is not None:
+        _futu_ctx = result
+        _futu_ctx_checked = True
     return _futu_ctx
 
 
