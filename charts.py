@@ -85,9 +85,13 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
     else:
         fig = make_subplots(rows=1, cols=1)
 
+    # connectgaps=True——分时数据偶尔会有个别分钟丢tick（数据源那边的稀疏点，
+    # 不是真的停牌），之前connectgaps=False会让这种缺口在图上断开一截，
+    # 用户反馈"看着像断了"。改成True后线会自动跨过缺口连起来，今天还没走到
+    # 的未来时段本来就没有相邻数据点可连，不受影响，不会画出假的未来走势。
     fig.add_trace(
         go.Scatter(
-            x=merged["hm"], y=merged["价格"], mode="lines", connectgaps=False,
+            x=merged["hm"], y=merged["价格"], mode="lines", connectgaps=True,
             line=dict(width=1.5, color=line_color), name="价格",
             fill="tozeroy", fillcolor=fill_color,
         ),
@@ -95,7 +99,7 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
     )
     fig.add_trace(
         go.Scatter(
-            x=merged["hm"], y=merged["均价"], mode="lines", connectgaps=False,
+            x=merged["hm"], y=merged["均价"], mode="lines", connectgaps=True,
             line=dict(width=1, color="#f59e0b"), name="均价",
         ),
         row=1, col=1,

@@ -350,10 +350,43 @@ def _stream_overall_summary(gen) -> str:
     这是流式效果本身带来的、可以接受的小瑕疵），生成完之后清空占位区域，
     换成_render_overall_summary画的最终版本（评分标签从正文里摘出来，
     做成上面的可视化打分条，不再在正文里裸露出现）。
+
+    手动逐块迭代而不是直接把生成器丢给st.write_stream()——之前那样写，
+    生成过程中一旦出错（比如API瞬时抖动），实测st.write_stream()会把异常
+    悄悄吞掉、返回空字符串，页面上就变成"总结性分析"标题下面空空如也，
+    连报错都看不到。手动迭代能兜住异常，出错时给一句明确的错误提示，
+    不会把空字符串存进缓存。
     """
     placeholder = st.empty()
-    full_text = placeholder.write_stream(gen)
+    full_text = ""
+    try:
+        for chunk in gen:
+            full_text += chunk
+            placeholder.markdown(full_text + "▌")
+    except Exception as e:
+        placeholder.empty()
+        return f"汇总失败：{e}"
     placeholder.empty()
+    if not full_text.strip():
+        return "汇总失败：AI 没有返回任何内容，请点「重新分析」再试一次。"
+    return full_text
+
+
+def _write_stream_safe(gen) -> str:
+    """给AI模块用的流式显示——不直接调st.write_stream(gen)，实测生成过程中
+    一旦出错（API瞬时抖动之类），st.write_stream()会把异常悄悄吞掉、返回
+    空字符串，缓存进session_state后页面上就是标题下面空空如也，连报错都
+    看不见（"总结性分析"那块就踩过这个坑）。手动逐块迭代、显式捕获异常，
+    出错时抛出去让调用方的try/except接住，绝不会把空字符串当成正常结果存住。
+    """
+    placeholder = st.empty()
+    full_text = ""
+    for chunk in gen:
+        full_text += chunk
+        placeholder.markdown(full_text + "▌")
+    placeholder.markdown(full_text)
+    if not full_text.strip():
+        raise RuntimeError("AI 没有返回任何内容")
     return full_text
 
 
@@ -452,7 +485,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
             news, _ = _fetch_news_items(stock_name, symbol, market)
             news_summary = _news_to_summary(news)
             try:
-                ai_text = st.write_stream(summarize_news(symbol, news_summary))
+                ai_text = _write_stream_safe(summarize_news(symbol, news_summary))
             except Exception as e:
                 st.error(f"分析失败：{e}")
                 return
@@ -468,7 +501,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                 financial_summary = fin.head(10).to_string(index=False)
                 st.caption("AI 解读")
                 try:
-                    ai_text = st.write_stream(summarize_financials(symbol, financial_summary))
+                    ai_text = _write_stream_safe(summarize_financials(symbol, financial_summary))
                 except Exception as e:
                     st.error(f"分析失败：{e}")
                     return
@@ -493,7 +526,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                 bm_pct = (float(benchmark.iloc[-1]["收盘"]) / float(benchmark.iloc[0]["收盘"]) - 1) * 100
                 st.caption("AI 解读")
                 try:
-                    ai_text = st.write_stream(summarize_benchmark(symbol, stock_pct, bm_name, bm_pct))
+                    ai_text = _write_stream_safe(summarize_benchmark(symbol, stock_pct, bm_name, bm_pct))
                 except Exception as e:
                     st.error(f"分析失败：{e}")
                     return
@@ -545,7 +578,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
             news_summary = _news_to_summary(news)
 
             try:
-                ai_text = st.write_stream(
+                ai_text = _write_stream_safe(
                     cross_validate(symbol, history_summary, financial_summary, news_summary, technical_summary)
                 )
             except Exception as e:
@@ -980,7 +1013,7 @@ def _render_index_detail(name: str, code: str, market: str):
             try:
                 news, _ = get_index_news(name, limit=8)
                 news_summary = _news_to_summary(news)
-                ai_text = st.write_stream(summarize_index_news(name, news_summary))
+                ai_text = _write_stream_safe(summarize_index_news(name, news_summary))
                 st.session_state[f"{idx_ai_key}_news"] = {"ai_text": ai_text, "summary": news_summary}
             except Exception as e:
                 st.session_state[f"{idx_ai_key}_news"] = {"ai_text": f"获取失败：{e}", "summary": "无相关新闻"}
@@ -1027,7 +1060,7 @@ def _render_index_detail(name: str, code: str, market: str):
         if _idx_cross_fresh:
             news_summary = st.session_state.get(f"{idx_ai_key}_news", {}).get("summary", "无相关新闻")
             try:
-                ai_text = st.write_stream(analyze_index(name, technical_summary, news_summary))
+                ai_text = _write_stream_safe(analyze_index(name, technical_summary, news_summary))
             except Exception as e:
                 st.session_state[f"{idx_ai_key}_cross"] = {"ai_text": f"分析失败：{e}"}
                 st.error(f"分析失败：{e}")
