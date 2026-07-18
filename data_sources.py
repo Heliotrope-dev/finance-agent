@@ -482,14 +482,13 @@ def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
 
 
 def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
-    """港股核心股列表——优先按热度排（东财个股人气榜），这个接口不稳定时
-    退回按涨跌幅排的知名股名单，好过直接给用户看一坨Python异常。
+    """港股核心股列表——直接走涨跌幅榜（新浪快照+知名股名单），不走东财人气榜。
+    东财人气榜数据是更真实的"热度"，但接口本身不稳定，_with_retry重试+全局限流
+    加起来经常要好几秒才失败一次，"行情"页每次打开港股都要扛这个延迟，用户明确
+    反馈"加载好慢"——两边取舍下来，稳定快速更重要，人气榜这条路径不再用在这里
+    （get_index_top_movers的港股成分股仍然用_get_hk_hot_rank_raw，那边场景不同，
+    是点开指数详情页才触发，不是每次进港股行情都要等）。
     """
-    df = _get_hk_hot_rank_raw()
-    if df is not None:
-        df = df.head(limit)
-        keep = [c for c in ("当前排名", "代码", "名称", "最新价", "涨跌幅") if c in df.columns]
-        return df[keep].reset_index(drop=True)
     return _get_hk_movers_by_change(limit)
 
 

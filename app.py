@@ -1624,10 +1624,9 @@ else:
                         f"{south['净买额']:+.2f}亿</span></div>",
                         unsafe_allow_html=True,
                     )
-                st.markdown("**港股核心股（按热度排）**")
+                st.markdown("**港股核心股（按涨跌幅排）**")
                 try:
-                    with st.spinner("加载中（第一次会慢一些）..."):
-                        hk_movers = get_hk_famous_movers(15)
+                    hk_movers = get_hk_famous_movers(15)
                     if hk_movers is not None and not hk_movers.empty:
                         _render_stock_movers_cards(hk_movers, "HK")
                     else:
