@@ -806,6 +806,56 @@ def _render_index_top_movers(market: str):
                 st.rerun()
 
 
+def _render_hot_sectors(market: str):
+    """"热门板块"——按热度（成交额代理）排序的行业板块，3×3宫格展示前9名，
+    "更多板块"展开到前30。板块在这个app里不是可跳转详情的实体，纯展示卡片，
+    不带链接，跟涨跌停池/核心股那种可点击卡片是两回事。
+    """
+    try:
+        sectors = get_hot_sectors(market, limit=30)
+    except Exception:
+        sectors = None
+    if sectors is None or sectors.empty:
+        st.caption("暂时获取不到板块数据。")
+        return
+
+    if market == "A":
+        st.caption("按板块总成交额排序（成交额代理热度，不是官方板块人气榜）。")
+    else:
+        st.caption("按板块成交额排序（成交额代理热度，需本地 Futu 网关支持，未连接时暂不可用）。")
+
+    expand_key = f"_sectors_expand_{market}"
+    show_n = 30 if st.session_state.get(expand_key) else 9
+    shown = sectors.head(show_n).reset_index(drop=True)
+
+    for row_start in range(0, len(shown), 3):
+        cols = st.columns(3)
+        for i, col in enumerate(cols):
+            idx = row_start + i
+            if idx >= len(shown):
+                continue
+            row = shown.iloc[idx]
+            s_color = "#e02020" if row["涨跌幅"] >= 0 else "#22a06b"
+            with col:
+                with st.container(border=True):
+                    st.markdown(
+                        f"<div style='font-weight:600;color:#0f172a'>{row['板块']}</div>"
+                        f"<div style='color:{s_color};font-weight:700;font-size:1.1rem'>{row['涨跌幅']:+.2f}%</div>"
+                        f"<div style='color:#94a3b8;font-size:0.78rem'>热度第{idx + 1}名</div>",
+                        unsafe_allow_html=True,
+                    )
+
+    if len(sectors) > 9:
+        if not st.session_state.get(expand_key):
+            if st.button("更多板块", key=f"_sectors_more_btn_{market}"):
+                st.session_state[expand_key] = True
+                st.rerun()
+        else:
+            if st.button("收起", key=f"_sectors_collapse_btn_{market}"):
+                st.session_state[expand_key] = False
+                st.rerun()
+
+
 def _render_stock_detail(symbol: str, market: str, name: str):
     _inject_auto_refresh(30, f"stock_{symbol}_{market}")
     st.markdown(
@@ -1592,6 +1642,10 @@ else:
                         st.caption("暂时获取不到数据。")
                 except Exception as e:
                     st.caption(f"获取失败：{e}")
+
+            st.divider()
+            st.markdown("**热门板块**")
+            _render_hot_sectors(mkt_code)
 
         elif active_section == "自选股":
             _email = st.session_state["user_email"]

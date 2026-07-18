@@ -670,6 +670,59 @@ def get_us_famous_movers(limit: int = 15) -> pd.DataFrame:
     return pd.DataFrame(rows).head(limit).reset_index(drop=True)
 
 
+@st.cache_data(ttl=180, show_spinner=False)
+def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
+    """"热门板块"用——按热度排序的行业板块列表，columns固定为
+    [板块, 涨跌幅, 热度]。三个市场都没有找到真正意义上的"板块人气榜"
+    （不像个股有东财人气榜那种真实热度数据），"热度"这里用成交额/成交量
+    做代理指标——板块本身是一堆股票的聚合，钱往哪个板块涌得多，本来就
+    比"点了多少次"更能说明这个板块今天是不是真的热，是个合理的替代指标，
+    页面上会如实标注这不是官方热度指数。
+
+    A股：同花顺的行业板块汇总接口（stock_board_industry_summary_ths），
+    不依赖东财——今晚测试的时候东财的板块接口（stock_board_industry_name_em）
+    连续多次连接失败，同花顺这条线稳定。
+    港股/美股：Futu的板块快照——get_plate_list拿到这个市场全部行业板块，
+    再用get_market_snapshot批量查这些板块自己的价格快照（Futu把板块当成
+    一个可以查快照的"标的"，last_price/prev_close_price算出板块涨跌幅，
+    turnover就是板块成交额）。
+    """
+    if market == "A":
+        try:
+            df = _with_retry(ak.stock_board_industry_summary_ths, retries=1, backoff=2, throttle=False)
+        except Exception:
+            return pd.DataFrame()
+        if df is None or df.empty or "板块" not in df.columns:
+            return pd.DataFrame()
+        df = df.rename(columns={"总成交额": "热度"})
+        df = df.sort_values("热度", ascending=False).head(limit)
+        return df[["板块", "涨跌幅", "热度"]].reset_index(drop=True)
+
+    # HK / US：走 Futu 板块快照
+    ctx = _get_futu_ctx()
+    if ctx is None:
+        return pd.DataFrame()
+    try:
+        ret, plates = ctx.get_plate_list(market, ft.Plate.INDUSTRY)
+    except Exception:
+        return pd.DataFrame()
+    if ret != ft.RET_OK or plates is None or plates.empty:
+        return pd.DataFrame()
+    codes = plates["code"].tolist()
+    try:
+        ret2, snap = ctx.get_market_snapshot(codes)
+    except Exception:
+        return pd.DataFrame()
+    if ret2 != ft.RET_OK or snap is None or snap.empty:
+        return pd.DataFrame()
+
+    snap = snap[snap["prev_close_price"] > 0].copy()
+    snap["涨跌幅"] = (snap["last_price"] - snap["prev_close_price"]) / snap["prev_close_price"] * 100
+    snap = snap.rename(columns={"name": "板块", "turnover": "热度"})
+    snap = snap.sort_values("热度", ascending=False).head(limit)
+    return snap[["板块", "涨跌幅", "热度"]].reset_index(drop=True)
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def get_index_top_movers(market: str, limit: int = 30) -> pd.DataFrame:
     """指数详情页"成分股"板块用——不是严格意义上的官方成分股名单（A股几个
