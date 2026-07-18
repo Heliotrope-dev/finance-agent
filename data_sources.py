@@ -689,7 +689,7 @@ def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
     """
     if market == "A":
         try:
-            df = _with_retry(ak.stock_board_industry_summary_ths, retries=1, backoff=2, throttle=False)
+            df = _with_retry(ak.stock_board_industry_summary_ths, throttle=False)
         except Exception:
             return pd.DataFrame()
         if df is None or df.empty or "板块" not in df.columns:
