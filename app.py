@@ -344,6 +344,19 @@ def _render_overall_summary(raw_text: str):
     st.markdown(display_text)
 
 
+def _stream_overall_summary(gen) -> str:
+    """总结性分析首次生成时的流式处理——先在一个占位区域里打字机效果播放AI
+    的原始输出（这时候末尾的[综合评分: N]标签会跟着文字一起可见地闪过去，
+    这是流式效果本身带来的、可以接受的小瑕疵），生成完之后清空占位区域，
+    换成_render_overall_summary画的最终版本（评分标签从正文里摘出来，
+    做成上面的可视化打分条，不再在正文里裸露出现）。
+    """
+    placeholder = st.empty()
+    full_text = placeholder.write_stream(gen)
+    placeholder.empty()
+    return full_text
+
+
 def _render_news_section(keyword: str, symbol: str | None = None, market: str = "A", is_index: bool = False):
     """一手资讯单独成块，标题不截断——是AI解读的依据来源，放在AI解读前面让用户
     自己先看一手材料。A股优先用官方公告（监管强制披露，永远免费，比新闻评论
@@ -419,120 +432,135 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
 
 
 def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
-    """AI 模块按需加载：每个模块独立缓存，点开哪个才跑哪个的 AI 调用，不会一次性全跑。"""
+    """AI 模块按需加载：每个模块独立缓存，点开哪个才跑哪个的 AI 调用，不会一次性全跑。
+
+    非AI的部分（原始数据表格/图表/统计指标）每次都重新算一遍——这些本来就有
+    @st.cache_data缓存，重算很便宜，不用塞进session_state。真正要缓存的只有
+    AI生成的文字：第一次生成时用st.write_stream()流式显示（用户反馈"一下子
+    蹦出来"不像实时生成，改成打字机效果），生成完的完整文本存进session_state；
+    之后重新渲染这个模块时（比如切换K线周期触发的rerun）直接用session_state
+    里存好的文本静态显示，不会又调一次AI、也不会重新流式播放一遍。
+    """
     mod_key = f"_detail_mod_{symbol}_{market}_{module}"
-    if mod_key not in st.session_state:
-        with st.spinner("分析中..."):
+    is_fresh = mod_key not in st.session_state
+
+    if module == "news":
+        stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
+        # 原始新闻列表已经在页面上方单独一块展示了（_render_news_section），
+        # 这里不重复摆一次，只放AI解读，避免同一份数据在页面上出现两遍。
+        if is_fresh:
+            news, _ = _fetch_news_items(stock_name, symbol, market)
+            news_summary = _news_to_summary(news)
             try:
-                if module == "news":
-                    stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
-                    news, _ = _fetch_news_items(stock_name, symbol, market)
-                    news_summary = _news_to_summary(news)
-                    ai_text = summarize_news(symbol, news_summary)
-                    st.session_state[mod_key] = {"news": news, "ai_text": ai_text}
-
-                elif module == "financial":
-                    fin = get_financial_abstract(symbol, market=market)
-                    financial_summary = (
-                        fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
-                    )
-                    ai_text = summarize_financials(symbol, financial_summary) if fin is not None and not fin.empty else ""
-                    st.session_state[mod_key] = {"fin": fin, "ai_text": ai_text}
-
-                elif module == "benchmark":
-                    end = datetime.now().strftime("%Y%m%d")
-                    start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
-                    benchmark = get_benchmark_history(start, end, market=market)
-                    bm_name = _BENCHMARK_NAMES[market]
-                    stock_pct = (float(hist.iloc[-1]["收盘"]) / float(hist.iloc[0]["收盘"]) - 1) * 100
-                    bm_pct = (
-                        (float(benchmark.iloc[-1]["收盘"]) / float(benchmark.iloc[0]["收盘"]) - 1) * 100
-                        if benchmark is not None and not benchmark.empty else None
-                    )
-                    ai_text = summarize_benchmark(symbol, stock_pct, bm_name, bm_pct) if bm_pct is not None else ""
-                    st.session_state[mod_key] = {"benchmark": benchmark, "bm_name": bm_name, "ai_text": ai_text}
-
-                else:  # "cross" —— 完整交叉验证
-                    end = datetime.now().strftime("%Y%m%d")
-                    start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
-                    stats = compute_stats(hist)
-                    history_summary = hist.tail(20).to_string(index=False)
-                    if spot and spot.get("最新价"):
-                        history_summary += (
-                            f"\n\n实时行情快照：最新价{spot['最新价']}，今开{spot.get('今开')}，"
-                            f"最高{spot.get('最高')}，最低{spot.get('最低')}，昨收{spot.get('昨收')}"
-                        )
-                    history_summary += "\n\n统计指标：" + "，".join(f"{k}={v}" for k, v in stats.items())
-
-                    fin = get_financial_abstract(symbol, market=market)
-                    financial_summary = (
-                        fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
-                    )
-                    stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
-                    news, _ = _fetch_news_items(stock_name, symbol, market)
-                    news_summary = _news_to_summary(news)
-
-                    try:
-                        _intraday_for_signal = (
-                            get_stock_intraday_a(symbol) if market == "A" else get_stock_intraday_futu(symbol, market)
-                        )
-                    except Exception:
-                        _intraday_for_signal = None
-                    realtime_signal = compute_realtime_signal(spot, _intraday_for_signal)
-                    technical_summary = compute_technical_signal(hist) + " 【盘中实时信号】" + realtime_signal
-                    ai_text = cross_validate(symbol, history_summary, financial_summary, news_summary, technical_summary)
-                    current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
-                    verdict = extract_verdict(ai_text)
-                    stock_name = spot.get("名称", symbol) if spot else symbol
-                    log_analysis(
-                        st.session_state["user_email"], symbol, float(current_price), ai_text,
-                        verdict=verdict, market=market, name=stock_name,
-                    )
-                    st.session_state[mod_key] = {
-                        "ai_text": ai_text, "stats": stats, "technical_summary": technical_summary,
-                    }
+                ai_text = st.write_stream(summarize_news(symbol, news_summary))
             except Exception as e:
                 st.error(f"分析失败：{e}")
                 return
+            st.session_state[mod_key] = {"ai_text": ai_text}
+        else:
+            st.markdown(st.session_state[mod_key]["ai_text"])
 
-    data = st.session_state[mod_key]
-
-    if module == "news":
-        # 原始新闻列表已经在页面上方单独一块展示了（_render_news_section），
-        # 这里不重复摆一次，只放AI解读，避免同一份数据在页面上出现两遍。
-        st.markdown(data["ai_text"])
     elif module == "financial":
-        if data["fin"] is not None and not data["fin"].empty:
-            st.dataframe(data["fin"], use_container_width=True, hide_index=True)
-            if data["ai_text"]:
+        fin = get_financial_abstract(symbol, market=market)
+        if fin is not None and not fin.empty:
+            st.dataframe(fin, use_container_width=True, hide_index=True)
+            if is_fresh:
+                financial_summary = fin.head(10).to_string(index=False)
                 st.caption("AI 解读")
-                st.markdown(data["ai_text"])
+                try:
+                    ai_text = st.write_stream(summarize_financials(symbol, financial_summary))
+                except Exception as e:
+                    st.error(f"分析失败：{e}")
+                    return
+                st.session_state[mod_key] = {"ai_text": ai_text}
+            else:
+                st.caption("AI 解读")
+                st.markdown(st.session_state[mod_key]["ai_text"])
         else:
             st.caption("暂无财务数据。")
+
     elif module == "benchmark":
-        if data["benchmark"] is not None and not data["benchmark"].empty:
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+        benchmark = get_benchmark_history(start, end, market=market)
+        bm_name = _BENCHMARK_NAMES[market]
+        if benchmark is not None and not benchmark.empty:
             st.plotly_chart(
-                build_benchmark_comparison(hist, data["benchmark"], benchmark_name=data["bm_name"]),
-                use_container_width=True,
+                build_benchmark_comparison(hist, benchmark, benchmark_name=bm_name), use_container_width=True,
             )
-            st.caption("AI 解读")
-            st.markdown(data["ai_text"])
+            if is_fresh:
+                stock_pct = (float(hist.iloc[-1]["收盘"]) / float(hist.iloc[0]["收盘"]) - 1) * 100
+                bm_pct = (float(benchmark.iloc[-1]["收盘"]) / float(benchmark.iloc[0]["收盘"]) - 1) * 100
+                st.caption("AI 解读")
+                try:
+                    ai_text = st.write_stream(summarize_benchmark(symbol, stock_pct, bm_name, bm_pct))
+                except Exception as e:
+                    st.error(f"分析失败：{e}")
+                    return
+                st.session_state[mod_key] = {"ai_text": ai_text}
+            else:
+                st.caption("AI 解读")
+                st.markdown(st.session_state[mod_key]["ai_text"])
         else:
             st.caption("基准数据暂时获取不到。")
-    else:
-        stats = data.get("stats") or {}
+
+    else:  # "cross" —— 完整交叉验证
+        stats = compute_stats(hist)
         if stats:
             scol1, scol2, scol3, scol4 = st.columns(4)
             scol1.metric("区间收益率", stats.get("区间收益率", "—"))
             scol2.metric("年化波动率", stats.get("年化波动率", "—"))
             scol3.metric("最大回撤", stats.get("最大回撤", "—"))
             scol4.metric("夏普比率(简化)", stats.get("夏普比率(简化)", "—"))
-        if data.get("technical_summary"):
-            st.markdown(f"**技术面信号**：{data['technical_summary']}")
+
+        try:
+            _intraday_for_signal = (
+                get_stock_intraday_a(symbol) if market == "A" else get_stock_intraday_futu(symbol, market)
+            )
+        except Exception:
+            _intraday_for_signal = None
+        realtime_signal = compute_realtime_signal(spot, _intraday_for_signal)
+        technical_summary = compute_technical_signal(hist) + " 【盘中实时信号】" + realtime_signal
+        st.markdown(f"**技术面信号**：{technical_summary}")
+
         if hist is not None and not hist.empty:
             st.plotly_chart(build_return_histogram(hist), use_container_width=True)
+
         st.caption("AI 解读（交叉验证消息面、财务、技术面是否一致）")
-        st.markdown(data["ai_text"])
+        if is_fresh:
+            history_summary = hist.tail(20).to_string(index=False)
+            if spot and spot.get("最新价"):
+                history_summary += (
+                    f"\n\n实时行情快照：最新价{spot['最新价']}，今开{spot.get('今开')}，"
+                    f"最高{spot.get('最高')}，最低{spot.get('最低')}，昨收{spot.get('昨收')}"
+                )
+            history_summary += "\n\n统计指标：" + "，".join(f"{k}={v}" for k, v in stats.items())
+
+            fin = get_financial_abstract(symbol, market=market)
+            financial_summary = (
+                fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
+            )
+            stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
+            news, _ = _fetch_news_items(stock_name, symbol, market)
+            news_summary = _news_to_summary(news)
+
+            try:
+                ai_text = st.write_stream(
+                    cross_validate(symbol, history_summary, financial_summary, news_summary, technical_summary)
+                )
+            except Exception as e:
+                st.error(f"分析失败：{e}")
+                return
+            current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
+            verdict = extract_verdict(ai_text)
+            stock_name = spot.get("名称", symbol) if spot else symbol
+            log_analysis(
+                st.session_state["user_email"], symbol, float(current_price), ai_text,
+                verdict=verdict, market=market, name=stock_name,
+            )
+            st.session_state[mod_key] = {"ai_text": ai_text}
+        else:
+            st.markdown(st.session_state[mod_key]["ai_text"])
 
 
 def _inject_auto_refresh(seconds: int, key: str):
@@ -860,15 +888,14 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     with st.container(border=True):
         st.markdown("**总结性分析**")
         if summary_key not in st.session_state:
-            with st.spinner("汇总中..."):
-                try:
-                    section_texts = {
-                        mod_label: st.session_state.get(f"_detail_mod_{symbol}_{market}_{mod_key}", {}).get("ai_text", "")
-                        for mod_key, mod_label in module_defs
-                    }
-                    st.session_state[summary_key] = summarize_overall(symbol, section_texts)
-                except Exception as e:
-                    st.session_state[summary_key] = f"汇总失败：{e}"
+            try:
+                section_texts = {
+                    mod_label: st.session_state.get(f"_detail_mod_{symbol}_{market}_{mod_key}", {}).get("ai_text", "")
+                    for mod_key, mod_label in module_defs
+                }
+                st.session_state[summary_key] = _stream_overall_summary(summarize_overall(symbol, section_texts))
+            except Exception as e:
+                st.session_state[summary_key] = f"汇总失败：{e}"
         _render_overall_summary(st.session_state[summary_key])
 
 
@@ -946,81 +973,81 @@ def _render_index_detail(name: str, code: str, market: str):
         for _suffix in ("_news", "_cross", "_summary"):
             st.session_state.pop(f"{idx_ai_key}{_suffix}", None)
         st.rerun()
+    _idx_news_fresh = f"{idx_ai_key}_news" not in st.session_state
     with st.container(border=True):
         st.markdown("**资讯解读**")
-        if f"{idx_ai_key}_news" not in st.session_state:
-            with st.spinner("分析中..."):
-                try:
-                    news, _ = get_index_news(name, limit=8)
-                    news_summary = _news_to_summary(news)
-                    ai_text = summarize_index_news(name, news_summary)
-                    st.session_state[f"{idx_ai_key}_news"] = {"ai_text": ai_text, "summary": news_summary}
-                except Exception as e:
-                    st.session_state[f"{idx_ai_key}_news"] = {"ai_text": f"获取失败：{e}", "summary": "无相关新闻"}
-        st.markdown(st.session_state[f"{idx_ai_key}_news"]["ai_text"])
+        if _idx_news_fresh:
+            try:
+                news, _ = get_index_news(name, limit=8)
+                news_summary = _news_to_summary(news)
+                ai_text = st.write_stream(summarize_index_news(name, news_summary))
+                st.session_state[f"{idx_ai_key}_news"] = {"ai_text": ai_text, "summary": news_summary}
+            except Exception as e:
+                st.session_state[f"{idx_ai_key}_news"] = {"ai_text": f"获取失败：{e}", "summary": "无相关新闻"}
+        else:
+            st.markdown(st.session_state[f"{idx_ai_key}_news"]["ai_text"])
 
+    _idx_cross_fresh = f"{idx_ai_key}_cross" not in st.session_state
     with st.container(border=True):
         st.markdown("**综合数据分析**")
-        if f"{idx_ai_key}_cross" not in st.session_state:
-            with st.spinner("分析中..."):
-                try:
-                    daily_hist = get_index_history(code, market, "日K")
-                    has_hist = daily_hist is not None and not daily_hist.empty
-                    technical_summary = compute_technical_signal(daily_hist) if has_hist else "暂无技术面数据"
-                    stats = compute_stats(daily_hist) if has_hist and len(daily_hist) > 5 else {}
+        daily_hist = get_index_history(code, market, "日K")
+        has_hist = daily_hist is not None and not daily_hist.empty
+        technical_summary = compute_technical_signal(daily_hist) if has_hist else "暂无技术面数据"
+        stats = compute_stats(daily_hist) if has_hist and len(daily_hist) > 5 else {}
 
-                    try:
-                        _idx_snap_now = next((i for i in get_multi_index_snapshot(market) if i["名称"] == name), None)
-                        if _idx_snap_now:
-                            _idx_spot = {
-                                "最新价": _idx_snap_now["最新"],
-                                "昨收": _idx_snap_now["最新"] - _idx_snap_now["涨跌"],
-                            }
-                            _idx_intraday = (
-                                get_index_intraday_a(code) if market == "A"
-                                else get_index_intraday_futu(name, market, _idx_spot["昨收"])
-                            )
-                        else:
-                            _idx_spot, _idx_intraday = {}, None
-                    except Exception:
-                        _idx_spot, _idx_intraday = {}, None
-                    realtime_signal = compute_realtime_signal(_idx_spot, _idx_intraday)
-                    technical_summary += " 【盘中实时信号】" + realtime_signal
-                    news_summary = st.session_state.get(f"{idx_ai_key}_news", {}).get("summary", "无相关新闻")
-                    ai_text = analyze_index(name, technical_summary, news_summary)
-                    st.session_state[f"{idx_ai_key}_cross"] = {
-                        "ai_text": ai_text, "stats": stats, "technical_summary": technical_summary,
-                        "daily_hist": daily_hist if has_hist else None,
-                    }
-                except Exception as e:
-                    st.session_state[f"{idx_ai_key}_cross"] = {"ai_text": f"分析失败：{e}", "stats": {}, "technical_summary": "", "daily_hist": None}
-        cross_data = st.session_state[f"{idx_ai_key}_cross"]
-        if cross_data.get("stats"):
+        try:
+            _idx_snap_now = next((i for i in get_multi_index_snapshot(market) if i["名称"] == name), None)
+            if _idx_snap_now:
+                _idx_spot = {
+                    "最新价": _idx_snap_now["最新"],
+                    "昨收": _idx_snap_now["最新"] - _idx_snap_now["涨跌"],
+                }
+                _idx_intraday = (
+                    get_index_intraday_a(code) if market == "A"
+                    else get_index_intraday_futu(name, market, _idx_spot["昨收"])
+                )
+            else:
+                _idx_spot, _idx_intraday = {}, None
+        except Exception:
+            _idx_spot, _idx_intraday = {}, None
+        realtime_signal = compute_realtime_signal(_idx_spot, _idx_intraday)
+        technical_summary += " 【盘中实时信号】" + realtime_signal
+
+        if stats:
             scol1, scol2, scol3, scol4 = st.columns(4)
-            scol1.metric("区间收益率", cross_data["stats"].get("区间收益率", "—"))
-            scol2.metric("年化波动率", cross_data["stats"].get("年化波动率", "—"))
-            scol3.metric("最大回撤", cross_data["stats"].get("最大回撤", "—"))
-            scol4.metric("夏普比率(简化)", cross_data["stats"].get("夏普比率(简化)", "—"))
-        if cross_data.get("technical_summary"):
-            st.markdown(f"**技术面信号**：{cross_data['technical_summary']}")
-        if cross_data.get("daily_hist") is not None:
-            st.plotly_chart(build_return_histogram(cross_data["daily_hist"]), use_container_width=True)
+            scol1.metric("区间收益率", stats.get("区间收益率", "—"))
+            scol2.metric("年化波动率", stats.get("年化波动率", "—"))
+            scol3.metric("最大回撤", stats.get("最大回撤", "—"))
+            scol4.metric("夏普比率(简化)", stats.get("夏普比率(简化)", "—"))
+        st.markdown(f"**技术面信号**：{technical_summary}")
+        if has_hist:
+            st.plotly_chart(build_return_histogram(daily_hist), use_container_width=True)
+
         st.caption("AI 解读")
-        st.markdown(cross_data["ai_text"])
+        if _idx_cross_fresh:
+            news_summary = st.session_state.get(f"{idx_ai_key}_news", {}).get("summary", "无相关新闻")
+            try:
+                ai_text = st.write_stream(analyze_index(name, technical_summary, news_summary))
+            except Exception as e:
+                st.session_state[f"{idx_ai_key}_cross"] = {"ai_text": f"分析失败：{e}"}
+                st.error(f"分析失败：{e}")
+                return
+            st.session_state[f"{idx_ai_key}_cross"] = {"ai_text": ai_text}
+        else:
+            st.markdown(st.session_state[f"{idx_ai_key}_cross"]["ai_text"])
 
     idx_summary_key = f"{idx_ai_key}_summary"
     with st.container(border=True):
         st.markdown("**总结性分析**")
         if idx_summary_key not in st.session_state:
-            with st.spinner("汇总中..."):
-                try:
-                    section_texts = {
-                        "资讯解读": st.session_state.get(f"{idx_ai_key}_news", {}).get("ai_text", ""),
-                        "综合数据分析": st.session_state.get(f"{idx_ai_key}_cross", {}).get("ai_text", ""),
-                    }
-                    st.session_state[idx_summary_key] = summarize_overall(name, section_texts)
-                except Exception as e:
-                    st.session_state[idx_summary_key] = f"汇总失败：{e}"
+            try:
+                section_texts = {
+                    "资讯解读": st.session_state.get(f"{idx_ai_key}_news", {}).get("ai_text", ""),
+                    "综合数据分析": st.session_state.get(f"{idx_ai_key}_cross", {}).get("ai_text", ""),
+                }
+                st.session_state[idx_summary_key] = _stream_overall_summary(summarize_overall(name, section_texts))
+            except Exception as e:
+                st.session_state[idx_summary_key] = f"汇总失败：{e}"
         _render_overall_summary(st.session_state[idx_summary_key])
 
 
