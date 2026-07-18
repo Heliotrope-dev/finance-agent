@@ -813,8 +813,11 @@ def _render_hot_sectors(market: str):
     """
     try:
         sectors = get_hot_sectors(market, limit=30)
-    except Exception:
+    except Exception as e:
+        print(f"[hot_sectors debug] market={market} exception: {e!r}")
         sectors = None
+    if sectors is not None and sectors.empty:
+        print(f"[hot_sectors debug] market={market} returned empty df, no exception")
     if sectors is None or sectors.empty:
         if market == "A":
             st.caption("暂时获取不到板块数据。")

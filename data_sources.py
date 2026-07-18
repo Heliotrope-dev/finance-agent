@@ -694,9 +694,11 @@ def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
     if market == "A":
         try:
             df = _with_retry(ak.stock_board_industry_summary_ths, throttle=False)
-        except Exception:
+        except Exception as e:
+            print(f"[get_hot_sectors debug] A分支异常: {e!r}")
             return pd.DataFrame()
         if df is None or df.empty or "板块" not in df.columns:
+            print(f"[get_hot_sectors debug] A分支拿到空/异常df: {df}")
             return pd.DataFrame()
         df = df.rename(columns={"总成交额": "热度"})
         df = df.sort_values("热度", ascending=False).head(limit)
