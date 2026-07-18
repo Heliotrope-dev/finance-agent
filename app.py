@@ -816,7 +816,10 @@ def _render_hot_sectors(market: str):
     except Exception:
         sectors = None
     if sectors is None or sectors.empty:
-        st.caption("暂时获取不到板块数据。")
+        if market == "A":
+            st.caption("暂时获取不到板块数据。")
+        else:
+            st.caption("港股/美股板块数据需要本地或服务器跑 Futu OpenD 网关，当前没有检测到连接，暂不可用。")
         return
 
     if market == "A":
