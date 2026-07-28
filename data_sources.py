@@ -487,9 +487,35 @@ def _get_hk_hot_rank_raw():
 
 
 def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
-    """热度榜挂了时的兜底——退回手动维护的知名港股名单+全市场快照，按涨跌幅排。
-    这是get_hk_famous_movers改成热度榜之前的老实现，稳定性验证过很多次。
+    """知名港股名单按涨跌幅排序，给"行情"页港股核心股用。
+
+    优先走Futu批量快照，只查_HK_FAMOUS_CODES这几十只知名股（秒级返回）。
+    之前这里是用ak.stock_hk_spot()先拉整个港股市场（几千只股票）的快照，
+    再从里面筛出_HK_FAMOUS_CODES这几十条——用户反馈"港股行情加载异常慢"，
+    实测ak.stock_hk_spot()单次调用本身就要30-40秒（内部分页拉全市场），
+    而这个函数最终只用得上其中29条数据，等于为了29只股票拉了全市场几千只
+    股票的快照，完全没必要。Futu本来就已经连着、给指数快照用（那边0.5秒内
+    返回），这里改成直接查这份知名股清单，不用再绕全市场快照这条慢路径。
+    只有Futu没连上时才退回旧的akshare全市场快照兜底（慢，但至少能用）。
     """
+    ctx = _get_futu_ctx()
+    if ctx is not None:
+        codes = [f"HK.{c}" for c in _HK_FAMOUS_CODES]
+        try:
+            ret, snap = ctx.get_market_snapshot(codes)
+        except Exception:
+            ret, snap = None, None
+        if ret == ft.RET_OK and snap is not None and not snap.empty:
+            snap = snap[snap["prev_close_price"] > 0].copy()
+            if not snap.empty:
+                snap["涨跌幅"] = (snap["last_price"] - snap["prev_close_price"]) / snap["prev_close_price"] * 100
+                snap["涨跌额"] = snap["last_price"] - snap["prev_close_price"]
+                snap["代码"] = snap["code"].str.replace("HK.", "", regex=False)
+                snap = snap.rename(columns={"name": "名称", "last_price": "最新价"})
+                snap = snap.sort_values("涨跌幅", ascending=False).head(limit)
+                return snap[["代码", "名称", "最新价", "涨跌幅", "涨跌额"]].reset_index(drop=True)
+
+    # Futu没连上时的兜底：老的全市场快照方案，慢但能用
     with _akshare_js_lock:
         df = _with_retry(ak.stock_hk_spot, retries=1, throttle=False)  # 新浪，不是东财
     if df is None or df.empty or "涨跌幅" not in df.columns:

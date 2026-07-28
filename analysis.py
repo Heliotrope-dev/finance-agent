@@ -23,14 +23,22 @@ def _client() -> OpenAI:
     return OpenAI(api_key=key, base_url=_DEEPSEEK_BASE, max_retries=2)
 
 
-def _stream_chat(system_prompt: str, user_content: str, max_tokens: int = 700):
+def _stream_chat(system_prompt: str, user_content: str, max_tokens: int = 2000):
     """所有AI模块共用的流式调用——之前是等DeepSeek整段返回完了才一次性显示，
     用户反馈"一下子蹦出来"不像在实时生成。改成stream=True，一个字一个字yield出来，
     配合Streamlit的st.write_stream()用，视觉上跟打字机一样，边生成边显示。
 
-    max_tokens给个上限（默认700，够400字中文正文+标签用了），不是为了截断
-    正常输出，是防止极端情况下模型收不住尾巴、生成远超提示词要求的长度，
-    拖慢总耗时——提示词里已经写了字数要求，这里只是兜底不让它跑飞。
+    max_tokens给个上限，不是为了截断正常输出，是防止极端情况下模型收不住尾巴、
+    生成远超提示词要求的长度，拖慢总耗时——提示词里已经写了字数要求，这里只是
+    兜底不让它跑飞。
+
+    **重要踩坑记录**：deepseek-v4-flash会在正式回答前先输出一段隐藏的思考过程
+    （delta.reasoning_content，不是delta.content），这部分同样计入max_tokens。
+    之前这里默认给700、部分调用点给350/180这种"刚好够正文字数"的预算，完全没
+    留思考过程的余地——实测同一个请求思考过程有时候几十字，有时候能吃掉几百字，
+    运气不好时思考直接把预算全部吃完，content一个字都没剩，finish_reason变成
+    "length"，页面上就是"AI没有返回任何内容"（不是必现，是概率性失败，取决于
+    这次模型想了多久）。改成默认2000，给思考过程留足够空间，不再靠运气。
     """
     stream = _client().chat.completions.create(
         model=_MODEL,
@@ -121,7 +129,7 @@ def summarize_financials(symbol: str, financial_summary: str):
     """把财务摘要那张几十行的原始表格，转成一段人话总结，摆在表格下面。流式生成器。"""
     yield from _stream_chat(
         _FINANCIAL_SUMMARY_PROMPT, f"股票代码：{symbol}\n\n财务摘要原始数据：\n{financial_summary}",
-        max_tokens=350,
+        max_tokens=1200,
     )
 
 
@@ -168,7 +176,7 @@ def summarize_benchmark(symbol: str, stock_pct: float, benchmark_name: str, benc
     yield from _stream_chat(
         _BENCHMARK_SUMMARY_PROMPT,
         f"股票 {symbol} 区间涨跌幅：{stock_pct:+.2f}%\n{benchmark_name} 同期涨跌幅：{benchmark_pct:+.2f}%",
-        max_tokens=180,
+        max_tokens=800,
     )
 
 
@@ -217,7 +225,7 @@ def summarize_overall(symbol: str, section_texts: dict):
     展示层面转成一个可视化打分条，比纯文字更直观。流式生成器。
     """
     sections = "\n\n".join(f"【{k}】\n{v}" for k, v in section_texts.items() if v)
-    yield from _stream_chat(_OVERALL_SUMMARY_PROMPT, f"标的：{symbol}\n\n{sections}", max_tokens=350)
+    yield from _stream_chat(_OVERALL_SUMMARY_PROMPT, f"标的：{symbol}\n\n{sections}", max_tokens=1200)
 
 
 def extract_score(analysis_text: str) -> int | None:
