@@ -36,6 +36,15 @@ _last_call_ts = 0.0
 
 _baostock_lock = threading.Lock()  # BaoStock的login/logout是全局会话，并发调用要加锁
 
+# akshare 内部一部分接口（新浪源的日线/分钟线、部分指数、同花顺板块概要等）
+# 用 py_mini_racer（内嵌V8引擎）执行网页反爬JS——实测验证过：两个线程同时
+# 各自创建一个MiniRacer实例会直接触发V8内部的致命断言崩溃整个进程
+# （"[FATAL:address_pool_manager.cc] Check failed: !pool->IsInitialized()"，
+# SIGABRT，不是能try/except捕获的Python异常）。Streamlit给每个用户会话开
+# 独立线程，两个用户同时分别打开不同市场的详情页就可能撞上，所以这里跟
+# BaoStock一样，全部会触发py_mini_racer的调用点统一加锁串行执行。
+_akshare_js_lock = threading.Lock()
+
 
 def _throttle():
     global _last_call_ts
@@ -182,9 +191,10 @@ def _fetch_history_baostock(symbol: str, start_date: str, end_date: str, frequen
 
 def _fetch_history_sina(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """新浪源，第二层兜底。列名对齐主数据源，让上层不用关心具体来源。"""
-    df = ak.stock_zh_a_daily(
-        symbol=f"{_sina_symbol(symbol)}{symbol}", start_date=start_date, end_date=end_date
-    )
+    with _akshare_js_lock:
+        df = ak.stock_zh_a_daily(
+            symbol=f"{_sina_symbol(symbol)}{symbol}", start_date=start_date, end_date=end_date
+        )
     df = df.rename(
         columns={
             "date": "日期",
@@ -225,13 +235,15 @@ def _benchmark_history_a(start_date: str, end_date: str, index_code: str) -> pd.
 def get_benchmark_history(start_date: str, end_date: str, market: str = "A") -> pd.DataFrame:
     """基准指数历史收盘价：A股用沪深300，港股用恒生指数，美股用标普500。"""
     if market == "HK":
-        df = ak.stock_hk_index_daily_sina(symbol="HSI")
+        with _akshare_js_lock:
+            df = ak.stock_hk_index_daily_sina(symbol="HSI")
         df = df.rename(columns={"date": "日期", "close": "收盘"})
         df["日期"] = pd.to_datetime(df["日期"])
         start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
         return df[(df["日期"] >= start) & (df["日期"] <= end)][["日期", "收盘"]]
     if market == "US":
-        df = ak.index_us_stock_sina(symbol=".INX")
+        with _akshare_js_lock:
+            df = ak.index_us_stock_sina(symbol=".INX")
         df = df.rename(columns={"date": "日期", "close": "收盘"})
         df["日期"] = pd.to_datetime(df["日期"])
         start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
@@ -277,12 +289,14 @@ def _one_index_snapshot(market: str, name: str, code: str) -> dict | None:
             if futu_snap:
                 return {"名称": name, **futu_snap}
             # Futu不可用时的兜底——新浪的指数日线接口是EOD数据，交易时段内会滞后一天。
-            df = ak.stock_hk_index_daily_sina(symbol=code)
+            with _akshare_js_lock:
+                df = ak.stock_hk_index_daily_sina(symbol=code)
             if len(df) < 2:
                 return None
             last, prev = float(df.iloc[-1]["close"]), float(df.iloc[-2]["close"])
         else:
-            df = ak.index_us_stock_sina(symbol=code)
+            with _akshare_js_lock:
+                df = ak.index_us_stock_sina(symbol=code)
             if len(df) < 2:
                 return None
             prev = float(df.iloc[-2]["close"])
@@ -332,10 +346,12 @@ def get_index_history(code: str, market: str, period: str = "日K") -> pd.DataFr
                 bs.logout()
         df = pd.DataFrame(rows, columns=["日期", "开盘", "最高", "最低", "收盘", "成交量"])
     elif market == "HK":
-        raw = ak.stock_hk_index_daily_sina(symbol=code)
+        with _akshare_js_lock:
+            raw = ak.stock_hk_index_daily_sina(symbol=code)
         df = raw.rename(columns={"date": "日期", "open": "开盘", "high": "最高", "low": "最低", "close": "收盘", "volume": "成交量"})
     else:
-        raw = ak.index_us_stock_sina(symbol=code)
+        with _akshare_js_lock:
+            raw = ak.index_us_stock_sina(symbol=code)
         df = raw.rename(columns={"date": "日期", "open": "开盘", "high": "最高", "low": "最低", "close": "收盘", "volume": "成交量"})
 
     df["日期"] = pd.to_datetime(df["日期"])
@@ -474,7 +490,8 @@ def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
     """热度榜挂了时的兜底——退回手动维护的知名港股名单+全市场快照，按涨跌幅排。
     这是get_hk_famous_movers改成热度榜之前的老实现，稳定性验证过很多次。
     """
-    df = _with_retry(ak.stock_hk_spot, retries=1, throttle=False)  # 新浪，不是东财
+    with _akshare_js_lock:
+        df = _with_retry(ak.stock_hk_spot, retries=1, throttle=False)  # 新浪，不是东财
     if df is None or df.empty or "涨跌幅" not in df.columns:
         return pd.DataFrame()
     df = df[df["代码"].isin(_HK_FAMOUS_CODES)]
@@ -695,7 +712,8 @@ def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
     """
     if market == "A":
         try:
-            df = _with_retry(ak.stock_board_industry_summary_ths, throttle=False)
+            with _akshare_js_lock:
+                df = _with_retry(ak.stock_board_industry_summary_ths, throttle=False)
         except Exception:
             return pd.DataFrame()
         if df is None or df.empty or "板块" not in df.columns:
@@ -794,7 +812,8 @@ def get_index_top_movers(market: str, limit: int = 30) -> pd.DataFrame:
 def _fetch_history_hk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """港股日线，新浪源。stock_hk_daily 不接受日期范围参数，返回全部历史，本地按日期筛。"""
     try:
-        df = ak.stock_hk_daily(symbol=symbol, adjust="")
+        with _akshare_js_lock:
+            df = ak.stock_hk_daily(symbol=symbol, adjust="")
     except Exception:
         # 代码不存在/格式不对时，akshare 内部解析新浪返回的空数据会直接抛
         # KeyError/IndexError 这类看不懂的底层异常，统一转成明确提示。
@@ -814,7 +833,8 @@ def _fetch_history_hk(symbol: str, start_date: str, end_date: str) -> pd.DataFra
 def _fetch_history_us(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """美股日线，新浪源。同样返回全部历史，本地按日期筛。"""
     try:
-        df = ak.stock_us_daily(symbol=symbol, adjust="")
+        with _akshare_js_lock:
+            df = ak.stock_us_daily(symbol=symbol, adjust="")
     except Exception:
         raise ValueError(f"「{symbol}」不是有效的美股代码（应为英文股票代码，如 AAPL）。")
     if df is None or df.empty or "date" not in df.columns:
@@ -1210,7 +1230,8 @@ def _sina_minute_intraday(sina_code: str) -> pd.DataFrame:
     今天没有分时数据（周末/节假日/还没开盘）就退到接口返回的历史里最近一个
     交易日的分时——跟只剩日K比，好歹还是分时的形状，视觉上更一致。
     """
-    df = ak.stock_zh_a_minute(symbol=sina_code, period="1")
+    with _akshare_js_lock:
+        df = ak.stock_zh_a_minute(symbol=sina_code, period="1")
     if df is None or df.empty:
         return pd.DataFrame()
     today = datetime.now().strftime("%Y-%m-%d")
