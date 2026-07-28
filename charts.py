@@ -297,6 +297,15 @@ def compute_realtime_signal(spot: dict, intraday: pd.DataFrame | None = None) ->
 def compute_stats(hist: pd.DataFrame) -> dict:
     """真正的统计计算：区间收益率、年化波动率、最大回撤、夏普比率(简化版)。"""
     close = hist["收盘"].astype(float)
+    if len(close) < 3:
+        # 样本不足3天时算不出可靠的日收益率标准差：close只有1行时daily_ret是
+        # 空Series，只有2行时daily_ret也只有1个元素——pandas对单元素Series的
+        # .std()同样返回NaN（样本标准差数学上需要至少2个观测值）。NaN在
+        # Python里是真值，下面"if std_daily else 0.0"这层保护形同虚设，
+        # 会算出显示给用户的字面"nan%"。样本太少时直接不给这组统计量，
+        # 比硬凑出一个NaN更诚实。（用真实数据测过：2行输入不加这层判断
+        # 依然会漏出nan，只挡len<2不够。）
+        return {}
     daily_ret = close.pct_change().dropna()
 
     period_return = (close.iloc[-1] / close.iloc[0] - 1) * 100
