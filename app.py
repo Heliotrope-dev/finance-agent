@@ -82,7 +82,10 @@ def _show_login_page():
                 _ok, _msg = _check_user(_em, _pw)
                 if _ok:
                     _tok = _create_token(_em)
-                    st.query_params["_auth"] = _tok
+                    # token 不写进 st.query_params——7天免登录凭证常驻在可见地址栏里
+                    # 会被Nginx access log/浏览器历史明文留存。当次会话靠session_state
+                    # 就够了，后续每个卡片链接会通过_auth_qs()从session_state重新
+                    # 拼一份，不依赖当前地址栏残留的这一份。
                     st.session_state["logged_in"] = True
                     st.session_state["user_email"] = _em
                     st.session_state["_token"] = _tok
@@ -146,6 +149,13 @@ if _stored_token and not st.session_state.get("logged_in"):
         st.session_state["logged_in"] = True
         st.session_state["user_email"] = _auto_email
         st.session_state["_token"] = _stored_token
+        # 校验通过就从可见地址栏删掉——_auth只是"把localStorage里的token桥接进
+        # 这次全新页面加载"的一次性载体，往后每个卡片链接都会用_auth_qs()
+        # 从session_state重新生成一份，不依赖地址栏是否还留着这一份。
+        try:
+            del st.query_params["_auth"]
+        except Exception:
+            pass
     else:
         try:
             del st.query_params["_auth"]
