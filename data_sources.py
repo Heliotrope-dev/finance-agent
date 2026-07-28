@@ -709,11 +709,14 @@ def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
     turnover就是板块成交额）。
     """
     if market == "A":
-        try:
-            with _akshare_js_lock:
-                df = _with_retry(ak.stock_board_industry_summary_ths, throttle=False)
-        except Exception:
-            return pd.DataFrame()
+        # 这里故意不 try/except 吞掉异常——get_hot_sectors 被 @st.cache_data(ttl=180)
+        # 缓存，之前吞掉异常返回空DataFrame会被当成一次"正常"结果缓存180秒：
+        # 哪怕只是一次瞬时网络抖动，"暂时获取不到"这个空结果会被冻结3分钟，
+        # 期间所有用户都看到同样的失败提示，即便数据源早就恢复了。让异常
+        # 正常抛出，st.cache_data 不会缓存抛异常的调用，下次访问会重新请求；
+        # 调用方 _render_hot_sectors 已经有 try/except 兜底展示。
+        with _akshare_js_lock:
+            df = _with_retry(ak.stock_board_industry_summary_ths, throttle=False)
         if df is None or df.empty or "板块" not in df.columns:
             return pd.DataFrame()
         df = df.rename(columns={"总成交额": "热度"})
