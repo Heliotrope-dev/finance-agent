@@ -608,40 +608,6 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
             st.markdown(st.session_state[mod_key]["ai_text"])
 
 
-def _inject_auto_refresh(seconds: int, key: str):
-    """定时自动刷新——分时价格/图表这些字段缓存TTL就20-30秒，光靠用户手动交互
-    触发rerun的话，数字看着就像"点进来那一刻定住了"。用JS定时器点一个隐藏按钮
-    触发rerun，配合后端缓存TTL自然过期重新拉数据，效果上数字就会自己动起来。
-    """
-    marker = f"自动刷新-{key}"
-    if st.button(marker, key=f"_autorefresh_trigger_{key}"):
-        pass
-    _cv1.html(
-        f"""
-        <script>
-        (function() {{
-            function bind(attemptsLeft) {{
-                const doc = window.parent.document;
-                const buttons = Array.from(doc.querySelectorAll('button'));
-                const hiddenBtn = buttons.find(function(b) {{ return b.innerText.trim() === "{marker}"; }});
-                if (hiddenBtn) {{
-                    const wrap = hiddenBtn.closest('[data-testid="stButton"]');
-                    if (wrap) wrap.style.display = 'none';
-                    const flagKey = "_autorefresh_timer_{key}";
-                    if (window.parent[flagKey]) {{ clearInterval(window.parent[flagKey]); }}
-                    window.parent[flagKey] = setInterval(function() {{ hiddenBtn.click(); }}, {seconds * 1000});
-                }} else if (attemptsLeft > 0) {{
-                    setTimeout(function() {{ bind(attemptsLeft - 1); }}, 200);
-                }}
-            }}
-            bind(15);
-        }})();
-        </script>
-        """,
-        height=0,
-    )
-
-
 _PRICE_FLASH_CSS = (
     "<style>"
     "@keyframes priceFlashUp { 0% { background: rgba(224,32,32,0.28); } 100% { background: transparent; } }"
@@ -871,7 +837,13 @@ def _render_hot_sectors(market: str):
 
 
 def _render_stock_detail(symbol: str, market: str, name: str):
-    _inject_auto_refresh(30, f"stock_{symbol}_{market}")
+    # 之前这里还挂着 _inject_auto_refresh(30,...) 强制整页每30秒rerun一次——
+    # 是_render_price_header改成@st.fragment(run_every=15)独立刷新之前的老
+    # 机制，早就没被清理掉。K线数据(hist)本来就缓存在session_state[core_key]
+    # 里、AI分析生成后也缓存，全页面rerun并不会让它们变得更"新"，只是白白把
+    # 图表/AI文字这些开销大的部分每30秒重新渲染一次——这正是"网页卡卡的"的
+    # 真实来源。价格的"活着的感觉"已经由下面的fragment用更轻量的方式做到了，
+    # 删掉这个多余的整页定时rerun。
     st.markdown(
         "<style>"
         "[class*='st-key-detail_back_'] button p { font-size: 1.5rem !important; font-weight: 700; }"
@@ -1020,7 +992,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
 
 
 def _render_index_detail(name: str, code: str, market: str):
-    _inject_auto_refresh(30, f"index_{code}_{market}")
+    # 同样的原因删掉了_inject_auto_refresh，见_render_stock_detail开头的注释。
     st.markdown(
         "<style>"
         "[class*='st-key-idx_back_'] button p { font-size: 1.5rem !important; font-weight: 700; }"
