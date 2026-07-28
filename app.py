@@ -33,6 +33,7 @@ from data_sources import (
     get_index_top_movers,
     get_southbound_flow,
     get_us_famous_movers,
+    get_hot_sectors,
     resolve_symbol_by_name,
     detect_symbol_candidates,
 )
@@ -783,10 +784,157 @@ def _render_index_top_movers(market: str):
                 st.rerun()
 
 
+@st.fragment
+def _render_index_snapshot(mkt_code: str):
+    """"行情"tab顶部的指数快照卡片。做成fragment的原因见_render_a_share_overview
+    开头的注释——本质是同一个问题：这几个区块以前全挤在同一段代码里，点其中
+    任何一个的交互按钮都会连带其余区块一起重新拉一遍数据。
+    """
+    try:
+        idx_list = get_multi_index_snapshot(mkt_code)
+    except Exception:
+        idx_list = []
+
+    _idx_code_by_name = dict(_MULTI_INDICES.get(mkt_code, []))
+
+    if not idx_list:
+        st.caption("指数数据暂时获取不到。")
+        return
+
+    st.markdown(
+        "<style>"
+        "a.idx-card-link, a.idx-card-link:link, a.idx-card-link:visited {"
+        "  text-decoration: none !important; color: inherit !important;"
+        "  display: block; cursor: pointer;"
+        "}"
+        "a.idx-card-link:hover { opacity: 0.85; }"
+        "</style>"
+        "<div style='display:flex;padding:4px 8px;font-size:0.78rem;color:#888'>"
+        "<div style='flex:2.4'>指数</div>"
+        "<div style='flex:1;text-align:right'>最新</div>"
+        "<div style='flex:1;text-align:right'>涨幅</div>"
+        "<div style='flex:1;text-align:right'>涨跌</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    for idx in idx_list:
+        color = "#e02020" if idx["涨跌"] >= 0 else "#22a06b"
+        idx_code = _idx_code_by_name.get(idx["名称"], "")
+        href = (
+            f"?open_index_code={urllib.parse.quote(idx_code)}"
+            f"&open_index_market={urllib.parse.quote(mkt_code)}"
+            f"&open_index_name={urllib.parse.quote(idx['名称'])}"
+            f"{_auth_qs()}"
+        )
+        with st.container(border=True):
+            st.markdown(
+                f"<a class='idx-card-link' href='{href}' target='_self'>"
+                f"<div style='display:flex;align-items:center'>"
+                f"<div style='flex:2.4;font-weight:600;color:#0f172a;text-decoration:none'>{idx['名称']}</div>"
+                f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{idx['最新']:,.2f}</div>"
+                f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
+                f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌']:+.2f}</div>"
+                f"</div></a>",
+                unsafe_allow_html=True,
+            )
+
+
+@st.fragment
+def _render_a_share_overview():
+    """A股大盘统计+涨停/跌停股池。之前这几块和指数快照、热门板块全部挤在
+    "行情"tab同一段代码里——点"显示更多（前30）"这一个按钮，会触发整个
+    tab重新rerun，连带指数快照、热门板块这些跟这次点击完全无关的区块也要
+    重新拉一遍数据（其中指数快照缓存只有25秒，涨停跌停池等未必命中缓存），
+    这是页面交互感觉卡顿的主要原因。拆成独立fragment后，点这个按钮只会
+    重新跑这一个区块。
+    """
+    try:
+        breadth = get_market_breadth()
+    except Exception:
+        breadth = {}
+    if breadth:
+        bcols = st.columns(6)
+        for col, key in zip(bcols, ["上涨", "下跌", "涨停", "跌停", "平盘", "活跃度"]):
+            col.metric(key, breadth.get(key, "—"))
+        st.caption(f"统计时间：{breadth.get('统计日期', '未知')}（数据来自乐咕乐股网）")
+
+    st.divider()
+    up_col, down_col = st.columns(2)
+    show_n = 30 if st.session_state.get("_show_more_limit_pool") else 10
+    with up_col:
+        st.markdown("**涨停股池**")
+        try:
+            up_pool = get_limit_pool("up", show_n)
+            if up_pool is not None and not up_pool.empty:
+                _render_stock_movers_cards(up_pool, "A")
+            else:
+                st.caption("暂时没有数据。")
+        except Exception as e:
+            st.caption(f"获取失败：{e}")
+    with down_col:
+        st.markdown("**跌停股池**")
+        try:
+            down_pool = get_limit_pool("down", show_n)
+            if down_pool is not None and not down_pool.empty:
+                _render_stock_movers_cards(down_pool, "A")
+            else:
+                st.caption("暂时没有数据。")
+        except Exception as e:
+            st.caption(f"获取失败：{e}")
+    if not st.session_state.get("_show_more_limit_pool"):
+        if st.button("显示更多（前30）", key="_more_limit_pool"):
+            st.session_state["_show_more_limit_pool"] = True
+            st.rerun()
+
+
+@st.fragment
+def _render_hk_overview():
+    """港股南向资金+核心股，独立fragment，原因同_render_a_share_overview。"""
+    try:
+        south = get_southbound_flow()
+    except Exception:
+        south = None
+    if south:
+        _s_color = "#e02020" if south["净买额"] >= 0 else "#22a06b"
+        st.markdown(
+            f"<div style='margin:4px 0 12px'>南向资金净买额　"
+            f"<span style='color:{_s_color};font-weight:700;font-size:1.2rem'>"
+            f"{south['净买额']:+.2f}亿</span></div>",
+            unsafe_allow_html=True,
+        )
+    st.markdown("**港股核心股（按涨跌幅排）**")
+    try:
+        hk_movers = get_hk_famous_movers(15)
+        if hk_movers is not None and not hk_movers.empty:
+            _render_stock_movers_cards(hk_movers, "HK")
+        else:
+            st.caption("暂时获取不到数据。")
+    except Exception as e:
+        st.caption(f"获取失败：{e}")
+
+
+@st.fragment
+def _render_us_overview():
+    """美股核心股，独立fragment，原因同_render_a_share_overview。"""
+    st.markdown("**美股核心股**")
+    try:
+        us_movers = get_us_famous_movers(15)
+        if us_movers is not None and not us_movers.empty:
+            _render_stock_movers_cards(us_movers, "US")
+        else:
+            st.caption("暂时获取不到数据。")
+    except Exception as e:
+        st.caption(f"获取失败：{e}")
+
+
+@st.fragment
 def _render_hot_sectors(market: str):
     """"热门板块"——按热度（成交额代理）排序的行业板块，3×3宫格展示前9名，
     "更多板块"展开到前30。板块在这个app里不是可跳转详情的实体，纯展示卡片，
     不带链接，跟涨跌停池/核心股那种可点击卡片是两回事。
+
+    做成fragment：点"更多板块/收起"之前会带动整个"行情"tab（指数快照、
+    涨停跌停池等）一起重新拉一遍数据，明明只是想展开这一个板块列表。
     """
     try:
         sectors = get_hot_sectors(market, limit=30)
@@ -1516,130 +1664,23 @@ else:
         )
 
         if active_section == "行情":
+            # 指数快照/大盘统计+涨停跌停池/南向资金+核心股/热门板块，这几块
+            # 之前全挤在一段代码里顺序往下跑——点其中任何一个的交互按钮
+            # （比如"显示更多"、"更多板块"）都会带动其余几块跟着重新拉一遍
+            # 数据，是页面交互卡顿的主要原因。现在各自是独立的@st.fragment，
+            # 点一个按钮只重新跑对应那一块。
             mkt_pick = st.radio("市场", ["A股", "港股", "美股"], horizontal=True, key="_market_overview_pick")
             mkt_code = {"A股": "A", "港股": "HK", "美股": "US"}[mkt_pick]
 
-            try:
-                idx_list = get_multi_index_snapshot(mkt_code)
-            except Exception:
-                idx_list = []
-
-            _idx_code_by_name = dict(_MULTI_INDICES.get(mkt_code, []))
-
-            if idx_list:
-                st.markdown(
-                    "<style>"
-                    "a.idx-card-link, a.idx-card-link:link, a.idx-card-link:visited {"
-                    "  text-decoration: none !important; color: inherit !important;"
-                    "  display: block; cursor: pointer;"
-                    "}"
-                    "a.idx-card-link:hover { opacity: 0.85; }"
-                    "</style>"
-                    "<div style='display:flex;padding:4px 8px;font-size:0.78rem;color:#888'>"
-                    "<div style='flex:2.4'>指数</div>"
-                    "<div style='flex:1;text-align:right'>最新</div>"
-                    "<div style='flex:1;text-align:right'>涨幅</div>"
-                    "<div style='flex:1;text-align:right'>涨跌</div>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-                for idx in idx_list:
-                    color = "#e02020" if idx["涨跌"] >= 0 else "#22a06b"
-                    idx_code = _idx_code_by_name.get(idx["名称"], "")
-                    href = (
-                        f"?open_index_code={urllib.parse.quote(idx_code)}"
-                        f"&open_index_market={urllib.parse.quote(mkt_code)}"
-                        f"&open_index_name={urllib.parse.quote(idx['名称'])}"
-                        f"{_auth_qs()}"
-                    )
-                    with st.container(border=True):
-                        st.markdown(
-                            f"<a class='idx-card-link' href='{href}' target='_self'>"
-                            f"<div style='display:flex;align-items:center'>"
-                            f"<div style='flex:2.4;font-weight:600;color:#0f172a;text-decoration:none'>{idx['名称']}</div>"
-                            f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{idx['最新']:,.2f}</div>"
-                            f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
-                            f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌']:+.2f}</div>"
-                            f"</div></a>",
-                            unsafe_allow_html=True,
-                        )
-            else:
-                st.caption("指数数据暂时获取不到。")
-
+            _render_index_snapshot(mkt_code)
             st.divider()
 
             if mkt_code == "A":
-                try:
-                    breadth = get_market_breadth()
-                except Exception:
-                    breadth = {}
-                if breadth:
-                    bcols = st.columns(6)
-                    for col, key in zip(bcols, ["上涨", "下跌", "涨停", "跌停", "平盘", "活跃度"]):
-                        col.metric(key, breadth.get(key, "—"))
-                    st.caption(f"统计时间：{breadth.get('统计日期', '未知')}（数据来自乐咕乐股网）")
-
-                st.divider()
-                up_col, down_col = st.columns(2)
-                show_n = 30 if st.session_state.get("_show_more_limit_pool") else 10
-                with up_col:
-                    st.markdown("**涨停股池**")
-                    try:
-                        up_pool = get_limit_pool("up", show_n)
-                        if up_pool is not None and not up_pool.empty:
-                            _render_stock_movers_cards(up_pool, "A")
-                        else:
-                            st.caption("暂时没有数据。")
-                    except Exception as e:
-                        st.caption(f"获取失败：{e}")
-                with down_col:
-                    st.markdown("**跌停股池**")
-                    try:
-                        down_pool = get_limit_pool("down", show_n)
-                        if down_pool is not None and not down_pool.empty:
-                            _render_stock_movers_cards(down_pool, "A")
-                        else:
-                            st.caption("暂时没有数据。")
-                    except Exception as e:
-                        st.caption(f"获取失败：{e}")
-                if not st.session_state.get("_show_more_limit_pool"):
-                    if st.button("显示更多（前30）", key="_more_limit_pool"):
-                        st.session_state["_show_more_limit_pool"] = True
-                        st.rerun()
-
+                _render_a_share_overview()
             elif mkt_code == "HK":
-                try:
-                    south = get_southbound_flow()
-                except Exception:
-                    south = None
-                if south:
-                    _s_color = "#e02020" if south["净买额"] >= 0 else "#22a06b"
-                    st.markdown(
-                        f"<div style='margin:4px 0 12px'>南向资金净买额　"
-                        f"<span style='color:{_s_color};font-weight:700;font-size:1.2rem'>"
-                        f"{south['净买额']:+.2f}亿</span></div>",
-                        unsafe_allow_html=True,
-                    )
-                st.markdown("**港股核心股（按涨跌幅排）**")
-                try:
-                    hk_movers = get_hk_famous_movers(15)
-                    if hk_movers is not None and not hk_movers.empty:
-                        _render_stock_movers_cards(hk_movers, "HK")
-                    else:
-                        st.caption("暂时获取不到数据。")
-                except Exception as e:
-                    st.caption(f"获取失败：{e}")
-
+                _render_hk_overview()
             else:
-                st.markdown("**美股核心股**")
-                try:
-                    us_movers = get_us_famous_movers(15)
-                    if us_movers is not None and not us_movers.empty:
-                        _render_stock_movers_cards(us_movers, "US")
-                    else:
-                        st.caption("暂时获取不到数据。")
-                except Exception as e:
-                    st.caption(f"获取失败：{e}")
+                _render_us_overview()
 
             st.divider()
             st.markdown("**热门板块**")
