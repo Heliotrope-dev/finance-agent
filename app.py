@@ -64,6 +64,45 @@ for _k in ("SUPABASE_URL", "SUPABASE_KEY"):
 
 st.set_page_config(page_title="Invest Agent", layout="wide")
 
+# ── 加载中遮罩 ────────────────────────────────────────────────────────────────
+# 这个app所有页面跳转（列表点进详情页、返回列表、切换市场等）走的都是真实的
+# <a href="?...">整页导航，浏览器会先展示上一个页面最后一帧，再等Streamlit
+# 把新页面整个渲染完替换上去——中间这段空档用户看到的是"新旧内容短暂重叠
+# 闪一下"（math-agent那边遇到过同一个问题，已经用一层遮罩盖住这段过渡状态，
+# 这里原样搬过来）。遮罩在Streamlit的状态组件不再显示"Running"时淡出移除，
+# 不依赖固定延迟时间去猜多久算加载完。
+# 总是渲染（不放在登录判断后面），让这个组件iframe每次页面跳转都重新挂载
+# 执行一遍——这本身就是遮罩能在新页面重新出现的关键。
+_cv1.html("""
+<script>
+(function() {
+try {
+    var doc = window.parent.document;
+    var ov = doc.getElementById('_fa_loader');
+    if (!ov) {
+        ov = doc.createElement('div');
+        ov.id = '_fa_loader';
+        ov.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;transition:opacity 0.35s;background:#F8F8FA';
+        ov.innerHTML = '<div style="width:36px;height:36px;border:3px solid #e0e0e8;border-top-color:#e02020;border-radius:50%;animation:_fa_spin 0.8s linear infinite"></div><div style="font-size:0.9rem;color:#aaa;font-family:Inter,sans-serif;letter-spacing:.03em;margin-top:4px">加载中…</div><style>@keyframes _fa_spin{to{transform:rotate(360deg)}}</style>';
+        doc.body.appendChild(ov);
+    }
+    var _ovTries = 0;
+    var _ovIv = setInterval(function() {
+        _ovTries++;
+        if (_ovTries > 40) { clearInterval(_ovIv); if (ov) { ov.style.opacity='0'; setTimeout(function(){ if (ov) ov.remove(); },350); } return; }
+        var status = doc.querySelector('[data-testid="stStatusWidget"]');
+        var running = status && (status.textContent || '').indexOf('Running') !== -1;
+        var app = doc.querySelector('[data-testid="stAppViewContainer"]');
+        if (app && !running) {
+            clearInterval(_ovIv);
+            setTimeout(function(){ if (ov) { ov.style.opacity='0'; setTimeout(function(){ if (ov) ov.remove(); },350); } }, 250);
+        }
+    }, 150);
+} catch(e2) {}
+})();
+</script>
+""", height=0)
+
 
 def _show_login_page():
     st.markdown(
