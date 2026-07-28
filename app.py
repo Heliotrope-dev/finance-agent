@@ -17,6 +17,7 @@ from data_sources import (
     get_index_intraday_a,
     get_stock_history,
     get_stock_realtime,
+    check_stock_valid,
     get_financial_abstract,
     get_stock_news,
     get_stock_notices,
@@ -1328,12 +1329,25 @@ def _do_add_watchlist(email: str, q: str, market_code: str) -> bool:
     if not add_symbol:
         st.error(f"没查到「{q}」的行情——检查一下代码对不对，或者这家公司没上市（比如私营公司本来就没有股票代码）。")
         return False
+    # check_stock_valid 只覆盖 A 股（内部走 BaoStock，港美股没有等价数据源）——
+    # 能提前区分"代码格式对但公司已退市"和"数据源临时故障"这两种情况，
+    # 不再一律甩给用户一句含糊的"检查一下代码对不对"。
+    if market_code == "A":
+        valid, info = check_stock_valid(add_symbol)
+        if not valid:
+            st.error(info)
+            return False
     try:
         add_spot = get_stock_realtime(add_symbol, market=market_code)
     except Exception:
         add_spot = {}
     if not add_spot or not add_spot.get("最新价"):
-        st.error(f"没查到「{q}」的行情——检查一下代码对不对，或者这家公司没上市（比如私营公司本来就没有股票代码）。")
+        if market_code == "A":
+            # 代码本身已经过 check_stock_valid 确认真实存在且在市，这里查不到
+            # 行情就真的是数据源临时故障，不是代码错误，提示要区分开。
+            st.error(f"「{q}」的行情暂时获取不到（数据源可能临时抖动），请稍后重试。")
+        else:
+            st.error(f"没查到「{q}」的行情——检查一下代码对不对，或者这家公司没上市（比如私营公司本来就没有股票代码）。")
         return False
     add_to_watchlist(email, add_symbol, add_spot.get("名称", add_symbol), market=market_code)
     add_search_history(email, q, market_code)
