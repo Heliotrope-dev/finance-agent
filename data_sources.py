@@ -624,10 +624,6 @@ def detect_symbol_candidates(query: str) -> list[dict]:
         return [{"symbol": q, "market": "A", "market_label": "A股"}]
     if re.match(r"^\d{4,5}$", q):
         return [{"symbol": q.zfill(5), "market": "HK", "market_label": "港股"}]
-    if re.match(r"^[A-Za-z.]{1,6}$", q):
-        # 纯字母代码——但字母代码也可能刚好撞上下面手动维护的英文别名
-        # （比如"nio"既是代码又是别名），别名表命中优先，查不到才当纯代码用。
-        pass
 
     results = []
     q_lower = q.lower()
@@ -646,6 +642,8 @@ def detect_symbol_candidates(query: str) -> list[dict]:
     if us_code:
         results.append({"symbol": us_code, "market": "US", "market_label": "美股"})
 
+    # 纯字母代码——但字母代码也可能刚好撞上上面手动维护的英文别名
+    # （比如"nio"既是代码又是别名），别名表命中优先，查不到才当纯代码用。
     if not results and re.match(r"^[A-Za-z.]{1,6}$", q):
         results.append({"symbol": q.upper(), "market": "US", "market_label": "美股"})
 
