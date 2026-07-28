@@ -78,7 +78,7 @@ def search_stock_by_name(query: str) -> list[dict]:
     query = query.strip()
     if not query:
         return []
-    with contextlib.redirect_stdout(io.StringIO()):
+    with _baostock_lock, contextlib.redirect_stdout(io.StringIO()):
         bs.login()
         try:
             rs = bs.query_stock_basic(code_name=query)
@@ -122,7 +122,7 @@ def check_stock_valid(symbol: str) -> tuple[bool, str]:
 
 def _stock_basic_info(symbol: str) -> tuple | None:
     bs_code = f"{_sina_symbol(symbol)}.{symbol}"
-    with contextlib.redirect_stdout(io.StringIO()):
+    with _baostock_lock, contextlib.redirect_stdout(io.StringIO()):
         bs.login()
         try:
             rs = bs.query_stock_basic(code=bs_code)
@@ -149,7 +149,7 @@ def _fetch_history_baostock(symbol: str, start_date: str, end_date: str, frequen
     is_intraday = frequency in _INTRADAY_FREQS
     fields = "date,time,open,high,low,close,volume" if is_intraday else "date,open,high,low,close,volume"
 
-    with contextlib.redirect_stdout(io.StringIO()):  # 屏蔽 baostock 自带的 login/logout 打印
+    with _baostock_lock, contextlib.redirect_stdout(io.StringIO()):  # 屏蔽 baostock 自带的 login/logout 打印
         bs.login()
         try:
             rs = bs.query_history_k_data_plus(
@@ -202,7 +202,7 @@ def _fetch_history_sina(symbol: str, start_date: str, end_date: str) -> pd.DataF
 def _benchmark_history_a(start_date: str, end_date: str, index_code: str) -> pd.DataFrame:
     start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
     end = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
-    with contextlib.redirect_stdout(io.StringIO()):
+    with _baostock_lock, contextlib.redirect_stdout(io.StringIO()):
         bs.login()
         try:
             rs = bs.query_history_k_data_plus(
@@ -254,8 +254,10 @@ def _one_index_snapshot(market: str, name: str, code: str) -> dict | None:
             if sina_snap:
                 return {"名称": name, **sina_snap}
             # 新浪实时快照失败时的兜底——BaoStock日线是EOD数据，交易时段内会滞后一天。
-            # BaoStock 的 login/logout 是全局会话，不是线程安全的；这里3个指数是并发
-            # 跑的，加锁避免真走到这条兜底路径时多个线程同时login/logout互相打架。
+            # BaoStock 的 login/logout 是全局会话，不是线程安全的，不只这里3个指数
+            # 并发跑会撞车——Streamlit给每个用户会话开独立线程，任何两个不同用户
+            # 同时触发本文件里任意两处BaoStock调用都可能互相踢掉对方的登录状态，
+            # 所以全文件所有 bs.login()/bs.logout() 都统一加了 _baostock_lock。
             start = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
             end = datetime.now().strftime("%Y-%m-%d")
             with _baostock_lock, contextlib.redirect_stdout(io.StringIO()):
@@ -317,7 +319,7 @@ def get_index_history(code: str, market: str, period: str = "日K") -> pd.DataFr
     if market == "A":
         end = datetime.now().strftime("%Y-%m-%d")
         start = (datetime.now() - timedelta(days=1825)).strftime("%Y-%m-%d")
-        with contextlib.redirect_stdout(io.StringIO()):
+        with _baostock_lock, contextlib.redirect_stdout(io.StringIO()):
             bs.login()
             try:
                 rs = bs.query_history_k_data_plus(
