@@ -100,15 +100,20 @@ try {
         ov.innerHTML = '<div style="width:36px;height:36px;border:3px solid #e0e0e8;border-top-color:#e02020;border-radius:50%;animation:_fa_spin 0.8s linear infinite"></div><div style="font-size:0.9rem;color:#aaa;font-family:Inter,sans-serif;letter-spacing:.03em;margin-top:4px">加载中…</div><style>@keyframes _fa_spin{to{transform:rotate(360deg)}}</style>';
         doc.body.appendChild(ov);
     }
+    function _fa_removeHideCss() {
+        var css = doc.getElementById('_fa_loader_css');
+        if (css) css.remove();
+    }
     var _ovTries = 0;
     var _ovIv = setInterval(function() {
         _ovTries++;
-        if (_ovTries > 40) { clearInterval(_ovIv); if (ov) { ov.style.opacity='0'; setTimeout(function(){ if (ov) ov.remove(); },350); } return; }
+        if (_ovTries > 40) { clearInterval(_ovIv); _fa_removeHideCss(); if (ov) { ov.style.opacity='0'; setTimeout(function(){ if (ov) ov.remove(); },350); } return; }
         var status = doc.querySelector('[data-testid="stStatusWidget"]');
         var running = status && (status.textContent || '').indexOf('Running') !== -1;
         var app = doc.querySelector('[data-testid="stAppViewContainer"]');
         if (app && !running) {
             clearInterval(_ovIv);
+            _fa_removeHideCss();
             setTimeout(function(){ if (ov) { ov.style.opacity='0'; setTimeout(function(){ if (ov) ov.remove(); },350); } }, 250);
         }
     }, 150);
