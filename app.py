@@ -3,6 +3,7 @@
 import os
 import re
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 import streamlit as st
 import streamlit.components.v1 as _cv1
 from datetime import datetime, timedelta
@@ -66,24 +67,10 @@ for _k in ("SUPABASE_URL", "SUPABASE_KEY"):
 
 st.set_page_config(page_title="Invest Agent", layout="wide")
 
-st.session_state.setdefault("dark_mode", False)
-
-# ── 主题（深浅色模式 + 移动端适配）──────────────────────────────────────────────
-# 之前这个项目一行深色模式都没有，math-agent那边反而做过一整套——同一份作品集
-# 摆在一起，"一个有一个没有"比任何视觉细节都显眼。这里搬math-agent的CSS变量
-# 思路过来（不是逐句照抄，DOM结构不一样），但踩了一个math-agent不需要考虑的坑：
-# 这个项目里涨跌红绿色（UP_COLOR/DOWN_COLOR）是直接写在我们自己生成的HTML
-# style属性里的inline color，如果像math-agent那样用"p,span,div{color:...
-# !important}"整体覆盖文字颜色，inline样式即使不带!important也会被外部样式
-# 表里同选择器的!important规则盖掉——那样会把全站涨跌红绿全部冲成同一个颜色，
-# 是比"没有深色模式"严重得多的回归。所以这里分两条路：
-#   1. 我们自己生成的HTML（价格、涨跌幅这些），Python里直接写var(--fa-text)/
-#      var(--fa-muted)取代写死的十六进制，没有inline color的地方才会吃这两个
-#      变量，天然不会跟涨跌红绿冲突（红绿本身也没打算跟着主题变）。
-#      涨跌红绿本身不切换——两个颜色本来亮度就够高，深色背景下依然清楚可辨。
-#   2. Streamlit原生组件（按钮、radio、expander、说明文字这些，不带我们自己
-#      的inline color），用data-testid选择器 + !important覆盖，跟这些原生
-#      元素不会有inline color冲突，可以放心用!important。
+# ── 主题（移动端适配 + 涨跌红绿色统一）────────────────────────────────────────
+# 这里原来还有一版深色模式，用户实测反馈"按了跟没按一样，很烦"——撤掉了，
+# 只留CSS变量本身（数值固定为浅色，不再有深色分支），移动端适配和涨跌色号
+# 统一这两块跟深色模式无关，继续保留。
 _FA_BASE_CSS = """
 <style>
 :root {
@@ -150,21 +137,7 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 </style>
 """
 
-_FA_DARK_CSS = """
-<style>
-:root {
-    --fa-bg:      #0D0D14;
-    --fa-surface: #16162A;
-    --fa-border:  #282845;
-    --fa-text:    #DEE1F5;
-    --fa-muted:   #9494B8;
-}
-</style>
-"""
-
 st.markdown(_FA_BASE_CSS, unsafe_allow_html=True)
-if st.session_state["dark_mode"]:
-    st.markdown(_FA_DARK_CSS, unsafe_allow_html=True)
 
 # ── 加载中遮罩 ────────────────────────────────────────────────────────────────
 # 这个app所有页面跳转（列表点进详情页、返回列表、切换市场等）走的都是真实的
@@ -189,7 +162,18 @@ st.markdown(
     "<style id='_fa_loader_css'>[data-testid=\"stAppViewContainer\"]{opacity:0!important}</style>",
     unsafe_allow_html=True,
 )
+# 之前这个遮罩只在"真实整页导航"（点<a href>链接）时生效，切"行情/自选股"
+# 这种纯靠st.radio触发的内部rerun时完全不出现——用户反馈"自选股页面还是有
+# 上一页残留"，排查发现st.components.v1.html()传入的HTML/JS内容如果两次
+# rerun之间字节完全相同，Streamlit前端不会重新挂载这个iframe（判定为"没变化"
+# 直接跳过），脚本也就不会重新执行，遮罩自然不会在内部rerun时重新出现。
+# 之前每次整页导航时内容恰好每次都是这同一份固定字符串，只有"完整刷新文档"
+# 这种场景会绕开这层去重（浏览器整个重新加载，不存在"和上次一样跳过"这回事），
+# 这就是"整页导航生效、内部切换不生效"这个差异的真正原因。改成把当前时间戳
+# 埋进一个不可见的HTML注释里，保证每次rerun这段内容字符串都不一样，
+# Streamlit就没法把它当成"没变化"跳过，每次rerun都会重新挂载、重新执行。
 _cv1.html("""
+<!-- __FA_LOADER_NONCE__ -->
 <script>
 (function() {
 try {
@@ -222,7 +206,7 @@ try {
 } catch(e2) {}
 })();
 </script>
-""", height=0)
+""".replace("__FA_LOADER_NONCE__", datetime.now().isoformat()), height=0)
 
 
 def _show_login_page():
@@ -783,9 +767,9 @@ _PRICE_FLASH_CSS = (
 )
 
 
-@st.fragment(run_every=15)
+@st.fragment(run_every=5)
 def _render_price_header(symbol: str, market: str):
-    """价格区块单独做成 fragment，每15秒自己刷新，不带动AI模块、新闻这些重的部分
+    """价格区块单独做成 fragment，每5秒自己刷新，不带动AI模块、新闻这些重的部分
     一起重跑——之前全页面每30秒整体rerun一次，观感上像"每隔一阵闪一下"，跟
     同花顺那种数字持续跳动的实时感完全不一样。数字真变了就闪一下背景色，
     让"活着"这件事肉眼可见，不是纯靠脑补更新时间戳。
@@ -835,7 +819,7 @@ def _render_price_header(symbol: str, market: str):
             st.rerun()
 
 
-@st.fragment(run_every=15)
+@st.fragment(run_every=5)
 def _render_index_price_header(name: str, market: str):
     """指数版的实时价格区块，逻辑跟_render_price_header一样，独立的 fragment。"""
     try:
@@ -1186,7 +1170,7 @@ def _render_hot_sectors(market: str):
 
 def _render_stock_detail(symbol: str, market: str, name: str):
     # 之前这里还挂着 _inject_auto_refresh(30,...) 强制整页每30秒rerun一次——
-    # 是_render_price_header改成@st.fragment(run_every=15)独立刷新之前的老
+    # 是_render_price_header改成@st.fragment(run_every=5)独立刷新之前的老
     # 机制，早就没被清理掉。K线数据(hist)本来就缓存在session_state[core_key]
     # 里、AI分析生成后也缓存，全页面rerun并不会让它们变得更"新"，只是白白把
     # 图表/AI文字这些开销大的部分每30秒重新渲染一次——这正是"网页卡卡的"的
@@ -1508,9 +1492,9 @@ def _render_index_detail(name: str, code: str, market: str):
         _render_overall_summary(st.session_state[idx_summary_key])
 
 
-@st.fragment(run_every=15)
+@st.fragment(run_every=5)
 def _render_watchlist_rows(watched_filtered: list, _email: str):
-    """自选股列表本体单独做成 fragment，价格/涨跌幅每15秒自己刷新，效仿长桥的
+    """自选股列表本体单独做成 fragment，价格/涨跌幅每5秒自己刷新，效仿长桥的
     紧凑列表样式：名称代码 + 迷你走势图 + 现价/成交额 + 涨跌幅色块 + 删除键。
     数字真变了背景闪一下（复用详情页那套red/green flash动画）。每行用
     st.container(border=True)包起来，整行都是一个卡片。
@@ -1564,20 +1548,30 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
     # 边取数据边画一行，用户反馈"一个一个蹦出来很慢"。取数据本身的耗时省不掉
     # （网络请求），但至少不会让用户看着页面一行一行往外挤，而是等一下之后
     # 整批一起出现，观感上干脆很多。
-    def _collect_rows():
-        rows = []
-        for item in watched_filtered:
-            item_market = item.get("market", "A")
-            symbol = item["symbol"]
-            try:
-                wspot = get_stock_realtime(symbol, market=item_market)
-            except Exception:
-                wspot = {}
-            closes = _fetch_sparkline_closes(symbol, item_market)
-            rows.append((item, item_market, symbol, wspot, closes))
-        return rows
+    def _fetch_one(item):
+        item_market = item.get("market", "A")
+        symbol = item["symbol"]
+        try:
+            wspot = get_stock_realtime(symbol, market=item_market)
+        except Exception:
+            wspot = {}
+        closes = _fetch_sparkline_closes(symbol, item_market)
+        return (item, item_market, symbol, wspot, closes)
 
-    # 这个fragment每15秒自动刷新一次——只有真正第一次加载（session里还没有
+    def _collect_rows():
+        # 之前是for循环一只一只顺序取（实时价+迷你图两个接口都要等网络返回），
+        # 用户反馈"自选股加载好慢"——几只股票乘以两次网络请求累加起来确实慢。
+        # A股走BaoStock/akshare，内部各自有全局锁保证线程安全，并发提交时这
+        # 部分本来就会排队，不会因为并发就变快；但港股/美股走Futu，现在走的是
+        # 单一常驻worker线程+队列（见data_sources.py的_futu_call），单次查询
+        # 本身只要零点几秒，并发提交多只互不阻塞。用线程池把每只股票的取数
+        # 并发起来，A股之间该排队还是排队，但A股和港股/美股之间、以及港股/
+        # 美股彼此之间不用再互相等，混合市场的自选股整体加载时间能明显缩短。
+        # ex.map保序，不会打乱原来的展示顺序。
+        with ThreadPoolExecutor(max_workers=min(8, len(watched_filtered))) as ex:
+            return list(ex.map(_fetch_one, watched_filtered))
+
+    # 这个fragment每5秒自动刷新一次——只有真正第一次加载（session里还没有
     # 任何一次成功渲染过）才显示"加载中"，之后的静默自动刷新不再包一层
     # spinner：之前每次刷新都会先弹一下spinner再画出列表，整个列表跟着
     # 抖一下，跟_render_price_header那套"数字变了背景轻轻一闪"的丝滑感
@@ -1882,12 +1876,6 @@ else:
             """,
             unsafe_allow_html=True,
         )
-        _dm_spacer, _dm_toggle_col = st.columns([9, 1])
-        with _dm_toggle_col:
-            _dm_label = "浅色" if st.session_state["dark_mode"] else "深色"
-            if st.button(_dm_label, key="_fa_dark_toggle", use_container_width=True, help="切换深色/浅色模式"):
-                st.session_state["dark_mode"] = not st.session_state["dark_mode"]
-                st.rerun()
 
 
         # "行情"分区的快速搜索框去掉了——用户反馈是累赘（"自选股"分区里
