@@ -774,8 +774,20 @@ def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
     return snap[["板块", "涨跌幅", "热度"]].reset_index(drop=True)
 
 
+# A股三大宽基指数各自覆盖的交易所/板块代码前缀。用来在"涨停股池"（覆盖
+# 全市场）结果里筛掉根本不属于这个指数所在交易所/板块的股票——之前没做
+# 这层过滤，"创业板指"的成分股板块会混进60/68开头（上交所主板/科创板）
+# 的股票，这些公司压根没在创业板上市，比"不是官方成分股名单"这个已知的
+# 近似误差更严重，是直接展示了错误归属的数据。
+_A_INDEX_CODE_PREFIX = {
+    "上证指数": ("60", "68"),  # 上交所主板 + 科创板
+    "深证成指": ("00", "30"),  # 深交所主板/中小板 + 创业板
+    "创业板指": ("30",),       # 创业板专属（300xxx/301xxx）
+}
+
+
 @st.cache_data(ttl=120, show_spinner=False)
-def get_index_top_movers(market: str, limit: int = 30) -> pd.DataFrame:
+def get_index_top_movers(market: str, limit: int = 30, index_name: str = "") -> pd.DataFrame:
     """指数详情页"成分股"板块用——不是严格意义上的官方成分股名单（A股几个
     宽基指数动辄几百上千只成分股，没法也没必要全拉一遍实时行情；港股/美股
     压根没找到带股票代码的官方成分股免费源），而是"这个市场里涨幅最大的一批
@@ -789,7 +801,10 @@ def get_index_top_movers(market: str, limit: int = 30) -> pd.DataFrame:
     10%/20%封顶，当天涨幅最大的股票几乎必然是涨停股，语义上"涨停股池"
     约等于"涨幅最大的一批股票"，直接复用这个已经很快（十几秒，且跟"行情"
     页共用同一份缓存，用户逛过一次"行情"页的话这里经常是秒开）的数据源，
-    不用再单独扛一次全市场扫描。
+    不用再单独扛一次全市场扫描。传入index_name时按_A_INDEX_CODE_PREFIX
+    过滤掉不属于这个指数所在交易所/板块的股票（比如"创业板指"不会再混进
+    上交所主板的股票）——用户反馈过恒生科技那边混进不相关公司的问题，
+    排查时顺带发现A股这边也有同一类问题，一并修了。
     港股：复用已经在用的东财人气榜（stock_hk_hot_rank_em，100只热门港股），
     改成按涨跌幅排序而不是按人气排序。
     美股：复用_US_FAMOUS_CODES这份手动维护的核心股名单（新浪批量行情），
@@ -797,8 +812,15 @@ def get_index_top_movers(market: str, limit: int = 30) -> pd.DataFrame:
     用这份覆盖主要板块龙头的名单。
     """
     if market == "A":
-        df = get_limit_pool("up", limit)
+        prefixes = _A_INDEX_CODE_PREFIX.get(index_name)
+        # 有前缀过滤时多拉一些候选（过滤后可能不够limit条），没有的话按原样取limit
+        df = get_limit_pool("up", limit * 5 if prefixes else limit)
         if df is None or df.empty:
+            return pd.DataFrame()
+        if prefixes:
+            df = df[df["代码"].astype(str).str.startswith(prefixes)]
+        df = df.head(limit)
+        if df.empty:
             return pd.DataFrame()
         keep = [c for c in ("代码", "名称", "最新价", "涨跌幅") if c in df.columns]
         return df[keep].reset_index(drop=True)

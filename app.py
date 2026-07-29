@@ -73,6 +73,20 @@ st.set_page_config(page_title="Invest Agent", layout="wide")
 # 不依赖固定延迟时间去猜多久算加载完。
 # 总是渲染（不放在登录判断后面），让这个组件iframe每次页面跳转都重新挂载
 # 执行一遍——这本身就是遮罩能在新页面重新出现的关键。
+#
+# 光靠下面这个components.v1.html()注入的遮罩div还不够彻底——它本身是在一个
+# 独立iframe里异步加载/执行的，跟页面主体内容的渲染是两条不同步的时间线，
+# 实测iframe加载/执行有自己的延迟，主体内容有时候会抢先画出来，遮罩后到，
+# 反而先看到一下没盖住的内容再被盖住，等于制造了另一次"闪烁"。这里先用
+# st.markdown（原生渲染在Streamlit自己的DOM里，跟页面主体是同一条渲染
+# 时间线，没有iframe那层异步延迟）立刻把主体内容透明度设成0，用!important
+# 保证优先级最高；下面iframe里的JS判断真正加载完成后，直接把这个<style>
+# 标签整个删掉（不是覆盖，删除比设置内联样式更可靠——!important的规则内联
+# style优先级压不过它，必须真删除这条规则本身）。
+st.markdown(
+    "<style id='_fa_loader_css'>[data-testid=\"stAppViewContainer\"]{opacity:0!important}</style>",
+    unsafe_allow_html=True,
+)
 _cv1.html("""
 <script>
 (function() {
@@ -787,14 +801,36 @@ def _render_stock_movers_cards(df, market: str):
             )
 
 
-def _render_index_top_movers(market: str):
+_SECTOR_THEMED_INDICES = {"恒生科技"}
+
+
+def _render_index_top_movers(market: str, index_name: str = ""):
     """指数详情页的"成分股"板块——不是严格的官方成分股清单，是这个市场里
     涨幅最大的一批股票（get_index_top_movers 的说明里有详细原因：A股几百上千
     只成分股没法全拉一遍实时行情，港股/美股也没找到带股票代码的免费成分股源）。
     默认显示前10，点"展开"再显示到前30，卡片点击直接跳去那只股票的详情页。
+
+    **重要**：这个代理指标只对"宽基指数"（上证/深证/创业板/恒生/国企/标普/
+    纳指/道琼斯这类覆盖全市场或大盘蓝筹的指数）勉强说得过去——"这个市场
+    涨幅最大的股票"跟"宽基指数"的重叠度好歹有点意义。但对"恒生科技"这种
+    行业主题指数完全不成立：用户反馈过恒生科技页面下面出现了优然牧业（乳业）、
+    布鲁可（玩具）这些跟科技毫不相关的公司——因为背后拉的是"全部港股热门股
+    按涨跌幅排序"，根本不看行业。查过Futu的免费接口（get_plate_stock等）
+    没找到能查真实指数成分股的能力，尝试直接拿指数代码当板块代码查询直接
+    卡死不返回，说明这条路走不通。与其用误导性的数据硬凑一个"成分股"板块，
+    不如对这类主题指数直接说清楚"做不到"——如实比强行展示不相关数据更重要。
     """
+    if index_name in _SECTOR_THEMED_INDICES:
+        st.caption(
+            f"「{index_name}」是行业主题指数，不是宽基指数——"
+            "「这个市场涨幅最大的股票」这个代理指标对宽基指数勉强适用，但对主题指数意义不大"
+            "（会出现跟这个行业毫不相关的公司）。暂时没找到可靠的免费真实成分股数据源，"
+            "所以这里不展示，避免用不相关的个股误导你。"
+        )
+        return
+
     try:
-        movers = get_index_top_movers(market, limit=30)
+        movers = get_index_top_movers(market, limit=30, index_name=index_name)
     except Exception:
         movers = None
     if movers is None or movers.empty:
@@ -1251,7 +1287,7 @@ def _render_index_detail(name: str, code: str, market: str):
         st.rerun()
 
     st.subheader("成分股")
-    _render_index_top_movers(market)
+    _render_index_top_movers(market, index_name=name)
 
     st.divider()
     _render_news_section(name, is_index=True)
