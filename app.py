@@ -1797,6 +1797,25 @@ else:
                         "方向一致率", f"{stats['一致率']:.0f}%",
                         help=f"过去 {stats['总数']} 次有方向判断的分析里，{stats['一致数']} 次跟事后价格走势一致",
                     )
+                    # 按方向/按市场拆开看——笼统一个数字看不出"偏多判断准还是
+                    # 偏空判断准""在哪个市场准"，样本太少（<3条）的分组百分比
+                    # 波动大、参考意义不大，只展示总数够的分组，不硬凑显示。
+                    _breakdown_cols = st.columns(2)
+                    with _breakdown_cols[0]:
+                        st.caption("按方向")
+                        for _v, _s in stats.get("按方向", {}).items():
+                            if _s["总数"] >= 3:
+                                st.markdown(f"{_v}：{_s['一致率']:.0f}%（{_s['总数']}次）")
+                            elif _s["总数"] > 0:
+                                st.markdown(f"{_v}：样本太少（{_s['总数']}次），暂不统计")
+                    with _breakdown_cols[1]:
+                        st.caption("按市场")
+                        _market_label = {"A": "A股", "HK": "港股", "US": "美股"}
+                        for _m, _s in stats.get("按市场", {}).items():
+                            if _s["总数"] >= 3:
+                                st.markdown(f"{_market_label.get(_m, _m)}：{_s['一致率']:.0f}%（{_s['总数']}次）")
+                            elif _s["总数"] > 0:
+                                st.markdown(f"{_market_label.get(_m, _m)}：样本太少（{_s['总数']}次），暂不统计")
                 else:
                     st.caption("还没有满7天可回看的记录。")
 

@@ -173,12 +173,29 @@ def record_review(analysis_id: int, review_price: float):
         c.commit()
 
 
+def _accuracy_from_rows(rows: list[dict]) -> dict:
+    if not rows:
+        return {"总数": 0, "一致数": 0, "一致率": None}
+    match = 0
+    for r in rows:
+        went_up = r["review_price"] > r["price_at_analysis"]
+        if (r["verdict"] == "偏多" and went_up) or (r["verdict"] == "偏空" and not went_up):
+            match += 1
+    return {"总数": len(rows), "一致数": match, "一致率": match / len(rows) * 100}
+
+
 def get_accuracy_stats(email: str) -> dict:
     """方向倾向 vs 实际价格走势的一致率——只统计已经回访过（review_price不为空）
     且verdict不是"中性"的记录（中性不算方向判断，不参与统计）。
 
     这不是"AI荐股胜率"，是历史方向标签和事后价格的客观比对，页面上展示时
     必须带"不代表未来表现"的说明，避免被理解成投资建议或收益承诺。
+
+    除了总体一致率，额外按市场（A/HK/US）和按方向（偏多/偏空）拆分出子统计
+    （"按市场""按方向"两个字段，各自是"分组值 -> 同样结构的统计字典"）——
+    笼统的一个数字看不出"AI是在A股准还是在美股准""偏多判断准还是偏空判断准"，
+    拆开看才有实际分析价值。样本量小的分组（比如只有1-2条）算出来的百分比
+    统计意义不大，前端展示时会按总数决定要不要显示。
     """
     init_db()
     with closing(_conn()) as c:
@@ -188,14 +205,18 @@ def get_accuracy_stats(email: str) -> dict:
             (email,),
         ).fetchall()
     rows = [dict(r) for r in rows]
-    if not rows:
-        return {"总数": 0, "一致数": 0, "一致率": None}
-    match = 0
-    for r in rows:
-        went_up = r["review_price"] > r["price_at_analysis"]
-        if (r["verdict"] == "偏多" and went_up) or (r["verdict"] == "偏空" and not went_up):
-            match += 1
-    return {"总数": len(rows), "一致数": match, "一致率": match / len(rows) * 100}
+
+    stats = _accuracy_from_rows(rows)
+    stats["按市场"] = {
+        m: _accuracy_from_rows([r for r in rows if r.get("market", "A") == m])
+        for m in sorted(set(r.get("market", "A") for r in rows))
+    }
+    stats["按方向"] = {
+        v: _accuracy_from_rows([r for r in rows if r["verdict"] == v])
+        for v in ("偏多", "偏空")
+        if any(r["verdict"] == v for r in rows)
+    }
+    return stats
 
 
 def add_search_history(email: str, query: str, market: str = "A"):
