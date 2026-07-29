@@ -116,6 +116,40 @@ def cross_validate(symbol: str, history_summary: str, financial_summary: str, ne
     yield from _stream_chat(_SYSTEM_PROMPT, user_prompt)
 
 
+_QUICK_DIGEST_PROMPT = """你是财经数据分析助手。用户在看自己关注的多只股票的"今日复盘"——
+一次要扫完好几只股票，每只只给一段极简判断（100字以内），不是完整的四段式分析。
+说清楚：消息面/财务面/技术面整体是否一致，以及最值得关注的一个具体信号或数字
+（引用真实数字/事件，不要"整体偏利好"这种空话）。不给投资建议。最后必须单独一行
+标注：[方向倾向: 偏多] 或 [方向倾向: 偏空] 或 [方向倾向: 中性]。不要"作为AI"这类
+开场白，不堆砌填充语，直接说结论。"""
+
+
+def quick_digest(symbol: str, history_summary: str, financial_summary: str, news_summary: str, technical_summary: str = ""):
+    """自选股"今日复盘"用的极简版交叉验证——跟cross_validate复用完全相同的
+    数据（行情/财务/新闻/本地技术面信号），只是换成短得多的输出。一次复盘
+    要跑一整个自选股列表，每只都写一遍cross_validate那种完整四段式分析
+    既慢（每只都要等流式吐字）又没必要——"扫一眼今天分别是什么情况"才是
+    这个功能真正要解决的问题，不是要替代详情页里那份完整分析。流式生成器。
+    """
+    user_prompt = f"""股票代码：{symbol}
+
+【近期行情摘要】
+{history_summary}
+
+【财务摘要】
+{financial_summary}
+
+【相关新闻】
+{news_summary}
+
+【本地计算的技术面信号（均线/MACD，非AI判断，仅供你核对是否与消息面一致）】
+{technical_summary or "暂无技术面数据"}
+
+请给一段极简判断，别忘了最后的方向倾向标签。"""
+
+    yield from _stream_chat(_QUICK_DIGEST_PROMPT, user_prompt, max_tokens=800)
+
+
 def extract_verdict(analysis_text: str) -> str:
     """从cross_validate的输出里把[方向倾向: 偏多/偏空/中性]这个标签解析出来，
     用于客观历史记录（不是投资建议，只是给回看页面用的分类标记）。

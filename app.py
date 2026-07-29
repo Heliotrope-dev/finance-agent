@@ -39,7 +39,7 @@ from data_sources import (
 )
 from analysis import (
     cross_validate, summarize_financials, summarize_news, summarize_index_news, summarize_benchmark,
-    extract_verdict, analyze_index, summarize_overall, extract_score,
+    extract_verdict, analyze_index, summarize_overall, extract_score, quick_digest,
 )
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
@@ -1387,6 +1387,129 @@ def _render_index_detail(name: str, code: str, market: str):
         _render_overall_summary(st.session_state[idx_summary_key])
 
 
+def _gather_stock_digest_inputs(symbol: str, market: str) -> dict | None:
+    """"今日复盘"单只股票的数据汇总——复用跟详情页"交叉验证"完全相同的数据源
+    （历史行情/实时快照/本地技术面信号/财务摘要/新闻），保证复盘里的判断
+    跟点开详情页单独看到的是同一套依据，不是另外拼凑的简化版数据。
+    """
+    end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+    hist = get_stock_history(symbol, start, end, market=market)
+    if hist is None or hist.empty:
+        return None
+
+    try:
+        spot = get_stock_realtime(symbol, market=market)
+    except Exception:
+        spot = {}
+    stats = compute_stats(hist)
+    try:
+        intraday = get_stock_intraday_a(symbol) if market == "A" else get_stock_intraday_futu(symbol, market)
+    except Exception:
+        intraday = None
+    realtime_signal = compute_realtime_signal(spot, intraday)
+    technical_summary = compute_technical_signal(hist) + " 【盘中实时信号】" + realtime_signal
+
+    history_summary = hist.tail(20).to_string(index=False)
+    if spot and spot.get("最新价"):
+        history_summary += (
+            f"\n\n实时行情快照：最新价{spot['最新价']}，今开{spot.get('今开')}，"
+            f"最高{spot.get('最高')}，最低{spot.get('最低')}，昨收{spot.get('昨收')}"
+        )
+    if stats:
+        history_summary += "\n\n统计指标：" + "，".join(f"{k}={v}" for k, v in stats.items())
+
+    fin = get_financial_abstract(symbol, market=market)
+    financial_summary = fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
+
+    stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
+    news, _ = _fetch_news_items(stock_name, symbol, market)
+    news_summary = _news_to_summary(news)
+
+    return {
+        "history_summary": history_summary,
+        "financial_summary": financial_summary,
+        "news_summary": news_summary,
+        "technical_summary": technical_summary,
+    }
+
+
+_DIGEST_VERDICT_COLOR = {"偏多": "#e02020", "偏空": "#22a06b", "中性": "#94a3b8"}
+
+
+@st.fragment
+def _render_watchlist_digest(watched: list, email: str):
+    """自选股"今日复盘"——一键把整个自选股列表跑一遍轻量版交叉验证，汇总成
+    一页"今天关注的这几只股票分别是什么情况"，不用逐只点开详情页看。是真
+    要花钱调N次DeepSeek的操作，做成显式按钮触发、结果缓存在session_state
+    里，不会每次进"自选股"tab都自动重新跑一遍。独立fragment，点"生成/
+    重新生成"按钮只重跑这一块，不带动自选股列表本身的15秒自动刷新。
+    """
+    digest_key = f"_wl_digest_{email}"
+    cached = st.session_state.get(digest_key)
+
+    head_col, btn_col = st.columns([3, 1], vertical_alignment="center")
+    with head_col:
+        st.markdown("**今日复盘**")
+        if cached:
+            st.caption(f"生成于 {cached['ts']} · 共 {len(cached['items'])} 只")
+        else:
+            st.caption("一键交叉验证你关注的全部股票，汇总成一页，不用逐只点开看")
+    with btn_col:
+        clicked = st.button(
+            "重新生成" if cached else "生成复盘",
+            key="_wl_digest_btn", use_container_width=True,
+        )
+
+    if clicked:
+        items = []
+        progress = st.progress(0.0, text="开始生成…")
+        total = len(watched)
+        for i, w in enumerate(watched):
+            symbol, market, name = w["symbol"], w.get("market", "A"), w["name"]
+            progress.progress(i / total, text=f"正在分析 {name}…")
+            try:
+                inputs = _gather_stock_digest_inputs(symbol, market)
+                if inputs is None:
+                    items.append({"symbol": symbol, "market": market, "name": name,
+                                  "text": "暂时获取不到行情数据，跳过。", "verdict": "中性"})
+                    continue
+                text = "".join(quick_digest(
+                    symbol, inputs["history_summary"], inputs["financial_summary"],
+                    inputs["news_summary"], inputs["technical_summary"],
+                ))
+                if not text.strip():
+                    items.append({"symbol": symbol, "market": market, "name": name,
+                                  "text": "AI 没有返回内容，稍后可以点「重新生成」再试一次。", "verdict": "中性"})
+                    continue
+                verdict = extract_verdict(text)
+            except Exception as e:
+                items.append({"symbol": symbol, "market": market, "name": name,
+                              "text": f"生成失败：{e}", "verdict": "中性"})
+                continue
+            items.append({"symbol": symbol, "market": market, "name": name, "text": text, "verdict": verdict})
+        progress.progress(1.0, text="完成")
+        st.session_state[digest_key] = {"ts": datetime.now().strftime("%Y-%m-%d %H:%M"), "items": items}
+        st.rerun()
+
+    cached = st.session_state.get(digest_key)
+    if cached:
+        for item in cached["items"]:
+            with st.container(border=True):
+                vcolor = _DIGEST_VERDICT_COLOR.get(item["verdict"], "#94a3b8")
+                st.markdown(
+                    "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px'>"
+                    f"<div style='font-weight:600'>{item['name']}（{item['symbol']}）</div>"
+                    f"<span style='background:{vcolor};color:#fff;font-size:0.75rem;font-weight:600;"
+                    f"padding:2px 9px;border-radius:10px'>{item['verdict']}</span></div>",
+                    unsafe_allow_html=True,
+                )
+                # 正文里可能还带着[方向倾向: ...]这条标签原文，已经用上面的色块徽章
+                # 展示过一次了，摘掉避免正文重复啰嗦。
+                clean_text = re.sub(r"\[方向倾向[：:]\s*(偏多|偏空|中性)\]", "", item["text"]).strip()
+                st.markdown(clean_text)
+
+
 @st.fragment(run_every=15)
 def _render_watchlist_rows(watched_filtered: list, _email: str):
     """自选股列表本体单独做成 fragment，价格/涨跌幅每15秒自己刷新，效仿长桥的
@@ -1795,6 +1918,9 @@ else:
                     )
 
             if watched:
+                _render_watchlist_digest(watched, _email)
+                st.divider()
+
                 # 市场筛选固定显示"全部/A股/港股/美股"四个选项——不管当前自选股
                 # 里有没有对应市场的股票，选项本身应该是稳定的，不随内容忽隐忽现。
                 wl_market_tab = st.radio(
