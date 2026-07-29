@@ -782,8 +782,14 @@ def get_index_top_movers(market: str, limit: int = 30) -> pd.DataFrame:
     股票"，按用户的说法："涨的最多的十个/三十个就好，不用都显示"——够用，
     不用追求跟官方成分股名单逐一对应。
 
-    A股：stock_zh_a_spot_em 全市场快照（几千只），本地按涨跌幅排序取前limit名，
-    这个接口今晚东财那边不太稳定，走_with_retry扛一下。
+    A股：复用涨停股池（stock_zt_pool_em）而不是拉全市场快照——之前这里用
+    stock_zh_a_spot_em 拉全市场几千只股票的快照，本地排序取前limit名，
+    用户反馈"成分股板块卡住了"，实测这个接口单次调用要接近2分钟（内部分页
+    拉全市场，跟之前港股那个"热门板块"慢的问题是同一类根因）。A股涨幅有
+    10%/20%封顶，当天涨幅最大的股票几乎必然是涨停股，语义上"涨停股池"
+    约等于"涨幅最大的一批股票"，直接复用这个已经很快（十几秒，且跟"行情"
+    页共用同一份缓存，用户逛过一次"行情"页的话这里经常是秒开）的数据源，
+    不用再单独扛一次全市场扫描。
     港股：复用已经在用的东财人气榜（stock_hk_hot_rank_em，100只热门港股），
     改成按涨跌幅排序而不是按人气排序。
     美股：复用_US_FAMOUS_CODES这份手动维护的核心股名单（新浪批量行情），
@@ -791,13 +797,9 @@ def get_index_top_movers(market: str, limit: int = 30) -> pd.DataFrame:
     用这份覆盖主要板块龙头的名单。
     """
     if market == "A":
-        try:
-            df = _with_retry(ak.stock_zh_a_spot_em, retries=2, backoff=3)
-        except Exception:
+        df = get_limit_pool("up", limit)
+        if df is None or df.empty:
             return pd.DataFrame()
-        if df is None or df.empty or "涨跌幅" not in df.columns:
-            return pd.DataFrame()
-        df = df.sort_values("涨跌幅", ascending=False).head(limit)
         keep = [c for c in ("代码", "名称", "最新价", "涨跌幅") if c in df.columns]
         return df[keep].reset_index(drop=True)
 
