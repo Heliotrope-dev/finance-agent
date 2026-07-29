@@ -312,7 +312,7 @@ def _one_index_snapshot(market: str, name: str, code: str) -> dict | None:
         return None
 
 
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=3, show_spinner=False)
 def get_multi_index_snapshot(market: str) -> list[dict]:
     """给行情页顶部的指数卡片用：每个市场固定几个核心指数，各自最新值+涨跌。
 
@@ -322,7 +322,7 @@ def get_multi_index_snapshot(market: str) -> list[dict]:
     串行虽然慢一点，但这是能稳定跑的版本。
 
     TTL 跟指数详情页实时价格区块（_render_index_price_header，@st.fragment
-    每 5 秒自动刷新）对齐——原来是25秒，比刷新周期长得多，fragment大部分
+    每 3 秒自动刷新）对齐——原来是25秒，比刷新周期长得多，fragment大部分
     刷新其实都在重画同一份缓存值，数字并不会真的跳动。
     """
     indices = _MULTI_INDICES.get(market, [])
@@ -1508,16 +1508,16 @@ def _us_index_snapshot_futu(name: str, index_prev_close: float) -> dict | None:
     return {"最新": last, "涨跌": last - index_prev_close, "涨跌幅": pct}
 
 
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=3, show_spinner=False)
 def get_stock_realtime(symbol: str, market: str = "A") -> dict:
     """真正的实时行情，港股/美股优先走本地 Futu OpenD 网关，没有就退回新浪。
 
     之前这里是从日线历史数据里取最后一行——那是"最近收盘价"，交易时段内
     跟用户自己在别的地方看到的实时价格对不上。这个接口是新浪的轻量单股查询，
     只查一只股票、不拉全市场。缓存 TTL 跟详情页/自选股的实时价格区块
-    （st.fragment 每 5 秒自动刷新）对齐——TTL 比刷新周期长的话，fragment
+    （st.fragment 每 3 秒自动刷新）对齐——TTL 比刷新周期长的话，fragment
     每次"刷新"其实只是重画同一份缓存值，数字并不会真的跳动，用户反馈过
-    "跳动周期"要缩短到 5 秒，这里就必须让缓存跟着一起缩短，否则前端刷新
+    "跳动周期"要缩短到 3 秒，这里就必须让缓存跟着一起缩短，否则前端刷新
     快了、数据源却还是老的，等于白刷。
 
     A股/港股/美股三个市场 hq.sinajs.cn 返回的字段顺序完全不一样，各写各的解析。

@@ -767,9 +767,9 @@ _PRICE_FLASH_CSS = (
 )
 
 
-@st.fragment(run_every=5)
+@st.fragment(run_every=3)
 def _render_price_header(symbol: str, market: str):
-    """价格区块单独做成 fragment，每5秒自己刷新，不带动AI模块、新闻这些重的部分
+    """价格区块单独做成 fragment，每3秒自己刷新，不带动AI模块、新闻这些重的部分
     一起重跑——之前全页面每30秒整体rerun一次，观感上像"每隔一阵闪一下"，跟
     同花顺那种数字持续跳动的实时感完全不一样。数字真变了就闪一下背景色，
     让"活着"这件事肉眼可见，不是纯靠脑补更新时间戳。
@@ -819,7 +819,7 @@ def _render_price_header(symbol: str, market: str):
             st.rerun()
 
 
-@st.fragment(run_every=5)
+@st.fragment(run_every=3)
 def _render_index_price_header(name: str, market: str):
     """指数版的实时价格区块，逻辑跟_render_price_header一样，独立的 fragment。"""
     try:
@@ -1170,7 +1170,7 @@ def _render_hot_sectors(market: str):
 
 def _render_stock_detail(symbol: str, market: str, name: str):
     # 之前这里还挂着 _inject_auto_refresh(30,...) 强制整页每30秒rerun一次——
-    # 是_render_price_header改成@st.fragment(run_every=5)独立刷新之前的老
+    # 是_render_price_header改成@st.fragment(run_every=3)独立刷新之前的老
     # 机制，早就没被清理掉。K线数据(hist)本来就缓存在session_state[core_key]
     # 里、AI分析生成后也缓存，全页面rerun并不会让它们变得更"新"，只是白白把
     # 图表/AI文字这些开销大的部分每30秒重新渲染一次——这正是"网页卡卡的"的
@@ -1492,9 +1492,9 @@ def _render_index_detail(name: str, code: str, market: str):
         _render_overall_summary(st.session_state[idx_summary_key])
 
 
-@st.fragment(run_every=5)
+@st.fragment(run_every=3)
 def _render_watchlist_rows(watched_filtered: list, _email: str):
-    """自选股列表本体单独做成 fragment，价格/涨跌幅每5秒自己刷新，效仿长桥的
+    """自选股列表本体单独做成 fragment，价格/涨跌幅每3秒自己刷新，效仿长桥的
     紧凑列表样式：名称代码 + 迷你走势图 + 现价/成交额 + 涨跌幅色块 + 删除键。
     数字真变了背景闪一下（复用详情页那套red/green flash动画）。每行用
     st.container(border=True)包起来，整行都是一个卡片。
@@ -1571,7 +1571,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         with ThreadPoolExecutor(max_workers=min(8, len(watched_filtered))) as ex:
             return list(ex.map(_fetch_one, watched_filtered))
 
-    # 这个fragment每5秒自动刷新一次——只有真正第一次加载（session里还没有
+    # 这个fragment每3秒自动刷新一次——只有真正第一次加载（session里还没有
     # 任何一次成功渲染过）才显示"加载中"，之后的静默自动刷新不再包一层
     # spinner：之前每次刷新都会先弹一下spinner再画出列表，整个列表跟着
     # 抖一下，跟_render_price_header那套"数字变了背景轻轻一闪"的丝滑感
