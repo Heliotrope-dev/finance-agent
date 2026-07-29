@@ -34,6 +34,7 @@ from data_sources import (
     get_southbound_flow,
     get_us_famous_movers,
     get_hot_sectors,
+    get_hstech_constituents,
     resolve_symbol_by_name,
     detect_symbol_candidates,
 )
@@ -810,32 +811,46 @@ def _render_stock_movers_cards(df, market: str):
             )
 
 
-_SECTOR_THEMED_INDICES = {"恒生科技"}
+_HSTECH_ASOF = "2026-06-08"  # _HSTECH_CONSTITUENTS名单的生效日期，手动维护，见data_sources.py里的说明
 
 
 def _render_index_top_movers(market: str, index_name: str = ""):
-    """指数详情页的"成分股"板块——不是严格的官方成分股清单，是这个市场里
-    涨幅最大的一批股票（get_index_top_movers 的说明里有详细原因：A股几百上千
-    只成分股没法全拉一遍实时行情，港股/美股也没找到带股票代码的免费成分股源）。
-    默认显示前10，点"展开"再显示到前30，卡片点击直接跳去那只股票的详情页。
+    """指数详情页的"成分股"板块。宽基指数（上证/深证/创业板/恒生/国企/标普/
+    纳指/道琼斯）用get_index_top_movers那套"这个市场涨幅最大的股票"代理
+    指标——不是严格的官方成分股清单，但对宽基指数勉强说得过去。
 
-    **重要**：这个代理指标只对"宽基指数"（上证/深证/创业板/恒生/国企/标普/
-    纳指/道琼斯这类覆盖全市场或大盘蓝筹的指数）勉强说得过去——"这个市场
-    涨幅最大的股票"跟"宽基指数"的重叠度好歹有点意义。但对"恒生科技"这种
-    行业主题指数完全不成立：用户反馈过恒生科技页面下面出现了优然牧业（乳业）、
-    布鲁可（玩具）这些跟科技毫不相关的公司——因为背后拉的是"全部港股热门股
-    按涨跌幅排序"，根本不看行业。查过Futu的免费接口（get_plate_stock等）
-    没找到能查真实指数成分股的能力，尝试直接拿指数代码当板块代码查询直接
-    卡死不返回，说明这条路走不通。与其用误导性的数据硬凑一个"成分股"板块，
-    不如对这类主题指数直接说清楚"做不到"——如实比强行展示不相关数据更重要。
+    "恒生科技"这种行业主题指数走单独的真实成分股路径（get_hstech_
+    constituents）：之前也用这套代理指标，结果混进了优然牧业（乳业）、
+    布鲁可（玩具）这些跟科技毫不相关的公司；改成完全不展示后用户又反馈
+    "之前虽然错但至少有内容，现在啥都没有"——两头都不是想要的效果，最后
+    查了真实的恒生科技成分股名单手动维护起来（见data_sources.py），比
+    "编数据"和"不展示"都更贴近用户实际想要的东西。默认显示前10，点
+    "展开"再显示到前30，卡片点击直接跳去那只股票的详情页。
     """
-    if index_name in _SECTOR_THEMED_INDICES:
+    if index_name == "恒生科技":
+        try:
+            movers = get_hstech_constituents(limit=30)
+        except Exception:
+            movers = None
+        if movers is None or movers.empty:
+            st.caption("恒生科技成分股数据需要本地/服务器跑 Futu OpenD 网关，当前没有检测到连接，暂不可用。")
+            return
         st.caption(
-            f"「{index_name}」是行业主题指数，不是宽基指数——"
-            "「这个市场涨幅最大的股票」这个代理指标对宽基指数勉强适用，但对主题指数意义不大"
-            "（会出现跟这个行业毫不相关的公司）。暂时没找到可靠的免费真实成分股数据源，"
-            "所以这里不展示，避免用不相关的个股误导你。"
+            f"恒生科技指数真实成分股（名单截至 {_HSTECH_ASOF} 生效，手动维护——"
+            "指数公司按季度调整，这份名单可能跟最新官方名单有出入），按当日涨跌幅排序。"
         )
+        expand_key = f"_movers_expand_{market}_hstech"
+        show_n = 30 if st.session_state.get(expand_key) else 10
+        _render_stock_movers_cards(movers.head(show_n), market)
+        if len(movers) > 10:
+            if not st.session_state.get(expand_key):
+                if st.button("展开（前30）", key=f"_movers_expand_btn_{market}_hstech"):
+                    st.session_state[expand_key] = True
+                    st.rerun()
+            else:
+                if st.button("收起", key=f"_movers_collapse_btn_{market}_hstech"):
+                    st.session_state[expand_key] = False
+                    st.rerun()
         return
 
     try:

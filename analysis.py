@@ -192,11 +192,18 @@ _INDEX_ANALYSIS_PROMPT = """你是财经数据分析助手，分析对象是一�
 
 
 def analyze_index(name: str, technical_summary: str, news_summary: str):
-    """指数版的综合分析——没有财务、没有个股新闻，只有技术面+大盘相关资讯两条线。流式生成器。"""
+    """指数版的综合分析——没有财务、没有个股新闻，只有技术面+大盘相关资讯两条线。流式生成器。
+
+    这里之前是max_tokens=400，是修"AI分析概率性返回空内容"那次漏掉的一处——
+    deepseek-v4-flash的隐藏思考过程(reasoning_content)跟正式回答共用同一个
+    token预算，400的预算比其它几处调大过的地方（1200/800/默认2000）都更
+    紧张，运气不好思考过程就把预算吃完了，正式回答一个字都没剩。这次一并
+    调大，跟其它调用点统一到差不多的量级。
+    """
     yield from _stream_chat(
         _INDEX_ANALYSIS_PROMPT,
         f"指数：{name}\n\n技术面信号：\n{technical_summary}\n\n相关新闻：\n{news_summary}",
-        max_tokens=400,
+        max_tokens=1200,
     )
 
 

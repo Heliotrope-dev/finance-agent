@@ -526,6 +526,73 @@ def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
     return df[keep].rename(columns={"中文名称": "名称"}).reset_index(drop=True)
 
 
+# 恒生科技指数(HSTECH)真实成分股，截至2026-06-08生效（用WebFetch核实过、
+# 跟另一独立信息源交叉验证过——比亚迪/腾讯音乐/地平线机器人是这一次调整
+# 新纳入的，阅文集团/东方甄选/众安在线被剔除了，两边说法一致）。之前这里
+# 用"港股全市场热门股按涨跌幅排序"代替真实成分股，用户反馈里面混进了
+# 优然牧业（乳业）、布鲁可（玩具）这些跟科技毫不相关的公司；改成不展示后
+# 用户又反馈"之前虽然错但至少有内容，现在啥都没有"——两头权衡，用这份
+# 手动核实过的真实名单，比"编一份数据"或者"完全不展示"都更合适。
+# **需要人工维护**：恒生指数公司按季度调整成分股，这份名单会过时，如果
+# 官方有调整、这里没跟着更新，就会漏掉新纳入的或者错误保留已剔除的——
+# 跟_HK_FAMOUS_CODES这类手动维护名单是同一类已知局限，不是自动同步的。
+_HSTECH_CONSTITUENTS = [
+    "09999", "00700", "01810", "01211", "09988", "03690", "00981", "09618",
+    "09888", "00992", "01024", "01347", "09961", "09868", "02015", "09660",
+    "00300", "00020", "02382", "06690", "09626", "06618", "09863", "09866",
+    "02513", "00241", "00285", "00780", "00100", "01698",
+]
+
+
+def get_hstech_constituents(limit: int = 30) -> pd.DataFrame:
+    """恒生科技指数的真实成分股（见_HSTECH_CONSTITUENTS上面的说明），只走
+    Futu批量快照——这份名单本来就是手动维护的真实成分股，不是"全市场筛出来
+    的近似"，没有必要也不应该再退回akshare全市场快照那条路（那条路径拉到的
+    是全市场排名，用来"筛"这30只反而会因为快照对不上时点而产生误差，直接
+    Futu查这30只自己的实时快照最准）。Futu没连上时返回空，调用方按"暂不
+    可用"处理，不硬凑数据。
+
+    不复用共享的 _get_futu_ctx()——那个 ctx 是在后台线程里连接、传回主线程
+    长期持有的，这里如果直接用它同步查询30只股票的快照，就是"连接和调用不是
+    同一个线程"，实测会直接卡死超过90秒不返回（跟 get_futu_news /
+    get_stock_realtime_futu 那边记录的教训一样）。改成跟 get_futu_news 一样：
+    连接+查询+关闭全部放在同一个子线程里做完，超时兜底返回空。
+    """
+    if not _FUTU_SDK_AVAILABLE:
+        return pd.DataFrame()
+
+    codes = [f"HK.{c}" for c in _HSTECH_CONSTITUENTS]
+
+    def _fetch():
+        ctx = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
+        try:
+            return ctx.get_market_snapshot(codes)
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
+    try:
+        result = _run_with_timeout(_fetch, timeout=8, default=None)
+    except Exception:
+        result = None
+    if result is None:
+        return pd.DataFrame()
+    ret, snap = result
+    if ret != ft.RET_OK or snap is None or snap.empty:
+        return pd.DataFrame()
+    snap = snap[snap["prev_close_price"] > 0].copy()
+    if snap.empty:
+        return pd.DataFrame()
+    snap["涨跌幅"] = (snap["last_price"] - snap["prev_close_price"]) / snap["prev_close_price"] * 100
+    snap["涨跌额"] = snap["last_price"] - snap["prev_close_price"]
+    snap["代码"] = snap["code"].str.replace("HK.", "", regex=False)
+    snap = snap.rename(columns={"name": "名称", "last_price": "最新价"})
+    snap = snap.sort_values("涨跌幅", ascending=False).head(limit)
+    return snap[["代码", "名称", "最新价", "涨跌幅", "涨跌额"]].reset_index(drop=True)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
     """港股核心股列表——直接走涨跌幅榜（新浪快照+知名股名单），不走东财人气榜。
