@@ -203,13 +203,17 @@ if _stored_token and not st.session_state.get("logged_in"):
         st.session_state["logged_in"] = True
         st.session_state["user_email"] = _auto_email
         st.session_state["_token"] = _stored_token
-        # 校验通过就从可见地址栏删掉——_auth只是"把localStorage里的token桥接进
-        # 这次全新页面加载"的一次性载体，往后每个卡片链接都会用_auth_qs()
-        # 从session_state重新生成一份，不依赖地址栏是否还留着这一份。
-        try:
-            del st.query_params["_auth"]
-        except Exception:
-            pass
+        # 这里之前有一行 del st.query_params["_auth"]（出发点：校验通过就从
+        # 地址栏删掉token，避免常驻URL）——在math-agent上实测过一模一样的
+        # 写法会出真实的生产问题：st.query_params的修改会触发Streamlit自动
+        # 重跑脚本，而上面"localStorage自动登录"那段JS判断要不要注入的时机
+        # （`if not st.session_state.get("logged_in")`，在脚本更靠前的位置）
+        # 跟这里token校验真正把logged_in置位的时机之间有代码距离，这次由
+        # del触发的额外重跑会让那段JS在某些时序窗口下又判断成"还没登录"，
+        # 重新触发"从localStorage读token→塞进URL→800ms后强制刷新"，造成
+        # 登录后网页陷入固定几秒一次的无限刷新循环。安全加固和"网站能正常
+        # 打开"冲突时选后者，这里不删，token继续留在URL里（7天有效期本身
+        # 不变）。
     else:
         try:
             del st.query_params["_auth"]
