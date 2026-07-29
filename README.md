@@ -4,8 +4,6 @@
 
 线上地址：[invest.heliotrope.online](https://invest.heliotrope.online)
 
-同一套账号体系下还有一个姊妹项目 [Math Agent](https://math.heliotrope.online)（AI 数学解题 + RAG 知识库问答），两个项目共用同一个 Supabase 账号系统。
-
 ## 设计原则
 
 - **只摆事实，先讲依据**：详情页先看一手资讯（官方公告/富途资讯/财新摘要，各市场优先级不同）和原始数据（K线、财务表、统计指标），AI 分析摆在后面，交叉核实新闻、财务、技术面是否一致，不直接给"买入/卖出"这类指令。
