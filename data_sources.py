@@ -498,22 +498,17 @@ def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
     返回），这里改成直接查这份知名股清单，不用再绕全市场快照这条慢路径。
     只有Futu没连上时才退回旧的akshare全市场快照兜底（慢，但至少能用）。
     """
-    ctx = _get_futu_ctx()
-    if ctx is not None:
-        codes = [f"HK.{c}" for c in _HK_FAMOUS_CODES]
-        try:
-            ret, snap = ctx.get_market_snapshot(codes)
-        except Exception:
-            ret, snap = None, None
-        if ret == ft.RET_OK and snap is not None and not snap.empty:
-            snap = snap[snap["prev_close_price"] > 0].copy()
-            if not snap.empty:
-                snap["涨跌幅"] = (snap["last_price"] - snap["prev_close_price"]) / snap["prev_close_price"] * 100
-                snap["涨跌额"] = snap["last_price"] - snap["prev_close_price"]
-                snap["代码"] = snap["code"].str.replace("HK.", "", regex=False)
-                snap = snap.rename(columns={"name": "名称", "last_price": "最新价"})
-                snap = snap.sort_values("涨跌幅", ascending=False).head(limit)
-                return snap[["代码", "名称", "最新价", "涨跌幅", "涨跌额"]].reset_index(drop=True)
+    codes = [f"HK.{c}" for c in _HK_FAMOUS_CODES]
+    ret, snap = _futu_call(lambda ctx: ctx.get_market_snapshot(codes), default=(None, None))
+    if ret == ft.RET_OK and snap is not None and not snap.empty:
+        snap = snap[snap["prev_close_price"] > 0].copy()
+        if not snap.empty:
+            snap["涨跌幅"] = (snap["last_price"] - snap["prev_close_price"]) / snap["prev_close_price"] * 100
+            snap["涨跌额"] = snap["last_price"] - snap["prev_close_price"]
+            snap["代码"] = snap["code"].str.replace("HK.", "", regex=False)
+            snap = snap.rename(columns={"name": "名称", "last_price": "最新价"})
+            snap = snap.sort_values("涨跌幅", ascending=False).head(limit)
+            return snap[["代码", "名称", "最新价", "涨跌幅", "涨跌额"]].reset_index(drop=True)
 
     # Futu没连上时的兜底：老的全市场快照方案，慢但能用
     with _akshare_js_lock:
@@ -661,13 +656,7 @@ def search_quote_futu(keyword: str) -> list[dict]:
     """Futu 的全市场模糊搜索（get_search_quote），支持中英文/拼音，覆盖全市场股票，
     不是手动维护的名单——只在本机连得上 OpenD 时可用，连不上返回空列表。
     """
-    ctx = _get_futu_ctx()
-    if ctx is None:
-        return []
-    result = _run_with_timeout(lambda: ctx.get_search_quote(keyword, 10), timeout=6, default=None)
-    if result is None:
-        return []
-    ret, data = result
+    ret, data = _futu_call(lambda ctx: ctx.get_search_quote(keyword, 10), timeout=6, default=(None, None))
     if ret != ft.RET_OK or data is None or data.empty:
         return []
     results = []
@@ -817,20 +806,11 @@ def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
         return df[["板块", "涨跌幅", "热度"]].reset_index(drop=True)
 
     # HK / US：走 Futu 板块快照
-    ctx = _get_futu_ctx()
-    if ctx is None:
-        return pd.DataFrame()
-    try:
-        ret, plates = ctx.get_plate_list(market, ft.Plate.INDUSTRY)
-    except Exception:
-        return pd.DataFrame()
+    ret, plates = _futu_call(lambda ctx: ctx.get_plate_list(market, ft.Plate.INDUSTRY), default=(None, None))
     if ret != ft.RET_OK or plates is None or plates.empty:
         return pd.DataFrame()
     codes = plates["code"].tolist()
-    try:
-        ret2, snap = ctx.get_market_snapshot(codes)
-    except Exception:
-        return pd.DataFrame()
+    ret2, snap = _futu_call(lambda ctx: ctx.get_market_snapshot(codes), default=(None, None))
     if ret2 != ft.RET_OK or snap is None or snap.empty:
         return pd.DataFrame()
 
@@ -1034,15 +1014,11 @@ def get_stock_history(symbol: str, start_date: str, end_date: str, frequency: st
     raise RuntimeError("三个数据源（BaoStock/东财/新浪）全部获取失败，稍后再试。")
 
 
-_futu_ctx = None
-_futu_ctx_checked = False
-
-
 def _run_with_timeout(fn, timeout=8, default=None):
-    """只用在 request_history_kline 这一条可选路径上——实测这个接口延迟不稳定，
-    偶尔卡住十几秒到几分钟不返回，且不受"同步调用/清干净连接"这些条件影响。
-    拿子线程跑，主线程最多等 timeout 秒就放弃走兜底；卡住的线程会泄漏，
-    但这条路径只在用户主动切换K线周期时触发，频率低，好过点一下周期切换整页卡死。
+    """通用的"拿子线程跑、主线程最多等timeout秒"包装，跟Futu无关的地方
+    （比如别处一次性小任务）可以直接用。卡住的线程会泄漏，但用在低频路径上
+    好过卡住整页不返回。Futu相关的调用不要用这个直接包一层ctx.xxx(...)——
+    见下面_futu_call的说明，那样会导致连接线程和调用线程不一致。
     """
     q = _queue.Queue(maxsize=1)
 
@@ -1059,52 +1035,75 @@ def _run_with_timeout(fn, timeout=8, default=None):
         return default
 
 
-_futu_ctx_last_attempt = 0.0
+_futu_ctx = None  # 只在 _futu_worker_loop 这一个线程里创建/读写，其它地方不要直接碰
+_futu_queue = None
+_futu_worker_lock = threading.Lock()
+_futu_worker_started = False
+_futu_last_connect_attempt = 0.0
 
 
-def _get_futu_ctx():
-    """本地/服务器 Futu OpenD 网关（127.0.0.1:11111）的连接句柄。
-
-    实测踩过一个坑：进程刚起来那一下，OpenD 握手偶尔要一两分钟才完成（比这里
-    的超时长得多），而旧版逻辑是"查过一次就永久记住结果"——一旦第一次因为
-    超时判定成None，_futu_ctx_checked就再也不会重新尝试，哪怕OpenD其实几十秒后
-    就握手成功了，也要等下次重启进程才能恢复，整个进程生命周期里所有Futu功能
-    全部跟着躺尸。现在改成：超时返回None不是永久结论，只是"最近30秒内不用再等"，
-    过了冷却期允许重试；同时worker线程自己成功后直接把结果写回全局变量，就算
-    调用方已经等超时放弃了，那次连接握手本身如果稍后真的成功了，也不会白跑，
-    下一次调用能直接捡到用。
+def _futu_worker_loop():
+    """Futu OpenD 连接的唯一owner线程——所有连接和方法调用永远发生在这一个
+    线程里执行。这是让 Futu SDK 稳定工作的硬要求：实测 ctx 在一个线程里
+    创建、换另一个线程调用它的方法，会导致 SDK 内部状态错乱直接卡死不返回
+    （不是慢，是几十秒到几分钟都拿不到结果，"恒生科技成分股"这个功能踩过，
+    排查后发现旧版 _get_futu_ctx() 是在自己开的子线程里连接、把 ctx 传回
+    调用方线程使用——这本身就已经犯了这个错，此前各个功能点各自又用
+    _run_with_timeout 再包一层去调用 ctx 的方法，等于线程还换了不止一次）。
+    现在改成一个进程只有这一个线程碰 ctx：所有请求排队交给它做，调用方
+    通过独立的 Queue 拿超时保护的结果，超时不影响这个线程继续处理后面的请求。
     """
-    global _futu_ctx, _futu_ctx_checked, _futu_ctx_last_attempt
-    if _futu_ctx_checked:
-        return _futu_ctx
+    global _futu_ctx, _futu_last_connect_attempt
+    while True:
+        fn, out_q = _futu_queue.get()
+        if _futu_ctx is None:
+            now = time.time()
+            if now - _futu_last_connect_attempt >= 30:
+                _futu_last_connect_attempt = now
+                try:
+                    candidate = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
+                    ret, _ = candidate.get_global_state()
+                    if ret == ft.RET_OK:
+                        _futu_ctx = candidate
+                    else:
+                        candidate.close()
+                except Exception:
+                    pass
+        try:
+            result = fn(_futu_ctx) if _futu_ctx is not None else None
+        except Exception:
+            result = None
+        out_q.put(result)
+
+
+def _ensure_futu_worker():
+    global _futu_queue, _futu_worker_started
+    if _futu_worker_started:
+        return
+    with _futu_worker_lock:
+        if _futu_worker_started:
+            return
+        _futu_queue = _queue.Queue()
+        threading.Thread(target=_futu_worker_loop, daemon=True).start()
+        _futu_worker_started = True
+
+
+def _futu_call(fn, timeout: float = 8, default=None):
+    """所有 Futu 查询的统一入口，取代旧的 "ctx = _get_futu_ctx(); ctx.xxx(...)"
+    写法。fn 接收 ctx 并返回结果；ctx 还没连上/连接失败/排队超时/fn 抛异常，
+    统一按 default 处理（fn 正常返回 None 的情况这里认为不存在——Futu SDK的
+    调用永远是 (ret, data) 元组，跟 default 的失败语义不冲突）。
+    """
     if not _FUTU_SDK_AVAILABLE:
-        _futu_ctx_checked = True
-        return None
-
-    now = time.time()
-    if now - _futu_ctx_last_attempt < 30:
-        return None
-    _futu_ctx_last_attempt = now
-
-    def _connect():
-        ctx = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
-        ret, _ = ctx.get_global_state()
-        if ret != ft.RET_OK:
-            ctx.close()
-            return None
-        global _futu_ctx, _futu_ctx_checked
-        _futu_ctx = ctx
-        _futu_ctx_checked = True
-        return ctx
-
+        return default
+    _ensure_futu_worker()
+    out_q = _queue.Queue(maxsize=1)
+    _futu_queue.put((fn, out_q))
     try:
-        result = _run_with_timeout(_connect, timeout=8, default=None)
-    except Exception:
+        result = out_q.get(timeout=timeout)
+    except _queue.Empty:
         result = None
-    if result is not None:
-        _futu_ctx = result
-        _futu_ctx_checked = True
-    return _futu_ctx
+    return default if result is None else result
 
 
 def get_stock_realtime_futu(symbol: str, market: str) -> dict:
@@ -1114,17 +1113,8 @@ def get_stock_realtime_futu(symbol: str, market: str) -> dict:
     """
     if market not in ("HK", "US"):
         return {}
-    ctx = _get_futu_ctx()
-    if ctx is None:
-        return {}
     code = f"HK.{symbol}" if market == "HK" else f"US.{symbol}"
-    # 注意：这里故意不用 _run_with_timeout 包一层新线程去调用——实测 ctx 在一个线程里
-    # 创建、又从另一个线程调用请求方法，会导致 SDK 内部状态错乱直接卡死不返回。
-    # ctx 本身的连接已经在 _get_futu_ctx() 里做过超时保护，这里就同步直调。
-    try:
-        ret, data = ctx.get_market_snapshot([code])
-    except Exception:
-        return {}
+    ret, data = _futu_call(lambda ctx: ctx.get_market_snapshot([code]), default=(None, None))
     if ret != ft.RET_OK or data is None or data.empty:
         return {}
     row = data.iloc[0]
@@ -1224,18 +1214,16 @@ def get_stock_kline_futu(symbol: str, market: str, period: str) -> pd.DataFrame:
     """
     if market not in ("HK", "US") or period not in _FUTU_KTYPE_MAP:
         return pd.DataFrame()
-    ctx = _get_futu_ctx()
-    if ctx is None:
-        return pd.DataFrame()
     code = f"HK.{symbol}" if market == "HK" else f"US.{symbol}"
     ktype = getattr(ft.KLType, _FUTU_KTYPE_MAP[period])
     days_back = _FUTU_DAYS_BACK[period]
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-    # 这个接口实测延迟不稳定（偶尔卡住半天不返回，跟连接状态/线程模型都无关），
-    # 套超时兜底——这条路径只在用户主动切周期时触发，卡的话最多耽误这一次点击。
-    result = _run_with_timeout(
-        lambda: ctx.request_history_kline(
+    # 这个接口实测延迟不稳定（偶尔卡住半天不返回）——套超时兜底，这条路径只在
+    # 用户主动切周期时触发，卡的话最多耽误这一次点击（_futu_call本身已经保证
+    # 连接和调用在同一个线程，这里的timeout只是"等结果"的超时，不是线程隔离）。
+    result = _futu_call(
+        lambda ctx: ctx.request_history_kline(
             code, start=start, end=end, ktype=ktype, autype=ft.AuType.QFQ, max_count=1000,
         ),
         timeout=8, default=None,
@@ -1264,6 +1252,9 @@ def _futu_ensure_subscribed(ctx, code: str) -> bool:
 
     简单的额度管理：已订阅就直接放行；额度满了就找一个订阅超过60秒的（Futu规定
     订阅后至少1分钟才能反订阅）踢掉腾地方；实在腾不出来就订阅失败，上层退回K线兜底。
+
+    只会在 _futu_call 派给 worker 线程的任务内部被调用，同步直调 ctx 的方法
+    即可——不需要再套一层线程超时（那样反而会制造"连接线程≠调用线程"的问题）。
     """
     now = time.time()
     if code in _futu_subscribed:
@@ -1273,12 +1264,15 @@ def _futu_ensure_subscribed(ctx, code: str) -> bool:
         if not evictable:
             return False
         oldest = min(evictable, key=lambda c: _futu_subscribed[c])
-        _run_with_timeout(lambda: ctx.unsubscribe([oldest], [ft.SubType.RT_DATA]), timeout=5, default=None)
+        try:
+            ctx.unsubscribe([oldest], [ft.SubType.RT_DATA])
+        except Exception:
+            pass
         _futu_subscribed.pop(oldest, None)
-    result = _run_with_timeout(lambda: ctx.subscribe([code], [ft.SubType.RT_DATA]), timeout=8, default=None)
-    if result is None:
+    try:
+        ret, _ = ctx.subscribe([code], [ft.SubType.RT_DATA])
+    except Exception:
         return False
-    ret, _ = result
     if ret != ft.RET_OK:
         return False
     _futu_subscribed[code] = now
@@ -1288,19 +1282,16 @@ def _futu_ensure_subscribed(ctx, code: str) -> bool:
 def _futu_last_day_intraday(ctx, code: str) -> pd.DataFrame:
     """今日没有分时数据时（周末/节假日/还没开盘）的兜底——用历史1分钟K线接口
     （不需要订阅），取最近一个交易日的分钟线当分时用。跟只剩日K比，好歹还是
-    分时的形状。这条路径本来就有超时保护，卡了也就是这次兜底没拿到，不影响别的。
+    分时的形状。同样只在 _futu_call 的 worker 线程任务里被调用，同步直调。
     """
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    result = _run_with_timeout(
-        lambda: ctx.request_history_kline(
+    try:
+        ret, data, _ = ctx.request_history_kline(
             code, start=start, end=end, ktype=ft.KLType.K_1M, autype=ft.AuType.QFQ, max_count=1000,
-        ),
-        timeout=8, default=None,
-    )
-    if result is None:
+        )
+    except Exception:
         return pd.DataFrame()
-    ret, data, _ = result
     if ret != ft.RET_OK or data is None or data.empty:
         return pd.DataFrame()
     data = data.rename(columns={"time_key": "时间", "close": "价格", "volume": "成交量"})
@@ -1314,32 +1305,40 @@ def _futu_last_day_intraday(ctx, code: str) -> pd.DataFrame:
 
 
 def _futu_intraday_by_code(code: str) -> pd.DataFrame:
-    """真分时数据的公共取数逻辑，个股和指数都走这条路，区别只在 code 怎么拼。"""
-    ctx = _get_futu_ctx()
-    if ctx is None:
-        return pd.DataFrame()
-    if not _futu_ensure_subscribed(ctx, code):
-        return pd.DataFrame()
-    result = _run_with_timeout(lambda: ctx.get_rt_data(code), timeout=8, default=None)
-    data = None
-    if result is not None:
-        ret, raw = result
+    """真分时数据的公共取数逻辑，个股和指数都走这条路，区别只在 code 怎么拼。
+
+    订阅+取数这一步整体包进同一个 _futu_call，保证跟ctx有关的操作都在
+    Futu专属worker线程里连续完成，不会因为中途换线程调用ctx方法而卡死。
+    """
+    def _fetch(ctx):
+        if not _futu_ensure_subscribed(ctx, code):
+            return ("empty", None)
+        try:
+            ret, raw = ctx.get_rt_data(code)
+        except Exception:
+            ret, raw = None, None
         if ret == ft.RET_OK and raw is not None and not raw.empty:
-            data = raw
-    if data is None:
-        return _futu_last_day_intraday(ctx, code)
-    # is_blank=True 是午间休市那种没有真实成交的占位行（价格是拿上一个真实价格填的），
-    # 保留会在图上画出一段假的平线——这些行本来就不该出现在真分时曲线里。
-    if "is_blank" in data.columns:
-        data = data[~data["is_blank"].astype(bool)]
-    df = data.rename(columns={"time": "时间", "cur_price": "价格", "volume": "成交量"})
-    df["时间"] = pd.to_datetime(df["时间"])
-    df["价格"] = df["价格"].astype(float)
-    df["成交量"] = df["成交量"].astype(float)
-    df = df[df["价格"] > 0]
-    if df.empty:
-        return _futu_last_day_intraday(ctx, code)
-    return df[["时间", "价格", "成交量"]]
+            return ("data", raw)
+        return ("last_day", None)
+
+    kind, raw = _futu_call(_fetch, timeout=10, default=("empty", None))
+    if kind == "data":
+        data = raw
+        # is_blank=True 是午间休市那种没有真实成交的占位行（价格是拿上一个真实价格填的），
+        # 保留会在图上画出一段假的平线——这些行本来就不该出现在真分时曲线里。
+        if "is_blank" in data.columns:
+            data = data[~data["is_blank"].astype(bool)]
+        df = data.rename(columns={"time": "时间", "cur_price": "价格", "volume": "成交量"})
+        df["时间"] = pd.to_datetime(df["时间"])
+        df["价格"] = df["价格"].astype(float)
+        df["成交量"] = df["成交量"].astype(float)
+        df = df[df["价格"] > 0]
+        if not df.empty:
+            return df[["时间", "价格", "成交量"]]
+        kind = "last_day"
+    if kind == "last_day":
+        return _futu_call(lambda ctx: _futu_last_day_intraday(ctx, code), timeout=10, default=pd.DataFrame())
+    return pd.DataFrame()
 
 
 def _sina_minute_intraday(sina_code: str) -> pd.DataFrame:
@@ -1418,13 +1417,7 @@ def get_index_intraday_futu(name: str, market: str, index_prev_close: float | No
         if not etf or not index_prev_close:
             return pd.DataFrame()
         code = f"US.{etf}"
-        ctx = _get_futu_ctx()
-        if ctx is None:
-            return pd.DataFrame()
-        result = _run_with_timeout(lambda: ctx.get_market_snapshot([code]), timeout=5, default=None)
-        if result is None:
-            return pd.DataFrame()
-        ret, snap = result
+        ret, snap = _futu_call(lambda ctx: ctx.get_market_snapshot([code]), timeout=5, default=(None, None))
         if ret != ft.RET_OK or snap is None or snap.empty:
             return pd.DataFrame()
         etf_prev_close = float(snap.iloc[0]["prev_close_price"])
@@ -1473,16 +1466,8 @@ def _hk_index_snapshot_futu(name: str) -> dict | None:
     futu_code = _HK_INDEX_FUTU_CODE.get(name)
     if not futu_code:
         return None
-    ctx = _get_futu_ctx()
-    if ctx is None:
-        return None
     code = f"HK.{futu_code}"
-    # 同步直调，不套线程超时——理由同 get_stock_realtime_futu：ctx 跨线程调用会导致
-    # SDK 内部状态错乱卡死，get_market_snapshot 本身够快，不需要额外超时保护。
-    try:
-        ret, data = ctx.get_market_snapshot([code])
-    except Exception:
-        return None
+    ret, data = _futu_call(lambda ctx: ctx.get_market_snapshot([code]), default=(None, None))
     if ret != ft.RET_OK or data is None or data.empty:
         return None
     row = data.iloc[0]
@@ -1505,14 +1490,8 @@ def _us_index_snapshot_futu(name: str, index_prev_close: float) -> dict | None:
     etf = _US_INDEX_ETF_PROXY.get(name)
     if not etf or not index_prev_close:
         return None
-    ctx = _get_futu_ctx()
-    if ctx is None:
-        return None
     code = f"US.{etf}"
-    try:
-        ret, data = ctx.get_market_snapshot([code])
-    except Exception:
-        return None
+    ret, data = _futu_call(lambda ctx: ctx.get_market_snapshot([code]), default=(None, None))
     if ret != ft.RET_OK or data is None or data.empty:
         return None
     row = data.iloc[0]
