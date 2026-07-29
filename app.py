@@ -55,6 +55,7 @@ from auth import (
     _check_user, _register_user, _create_token, _validate_token,
     _invalidate_token, _hash_pw, _user_exists,
 )
+from theme import UP_COLOR, DOWN_COLOR, NEUTRAL_COLOR
 
 for _k in ("SUPABASE_URL", "SUPABASE_KEY"):
     if _k not in os.environ:
@@ -64,6 +65,106 @@ for _k in ("SUPABASE_URL", "SUPABASE_KEY"):
             pass
 
 st.set_page_config(page_title="Invest Agent", layout="wide")
+
+st.session_state.setdefault("dark_mode", False)
+
+# ── 主题（深浅色模式 + 移动端适配）──────────────────────────────────────────────
+# 之前这个项目一行深色模式都没有，math-agent那边反而做过一整套——同一份作品集
+# 摆在一起，"一个有一个没有"比任何视觉细节都显眼。这里搬math-agent的CSS变量
+# 思路过来（不是逐句照抄，DOM结构不一样），但踩了一个math-agent不需要考虑的坑：
+# 这个项目里涨跌红绿色（UP_COLOR/DOWN_COLOR）是直接写在我们自己生成的HTML
+# style属性里的inline color，如果像math-agent那样用"p,span,div{color:...
+# !important}"整体覆盖文字颜色，inline样式即使不带!important也会被外部样式
+# 表里同选择器的!important规则盖掉——那样会把全站涨跌红绿全部冲成同一个颜色，
+# 是比"没有深色模式"严重得多的回归。所以这里分两条路：
+#   1. 我们自己生成的HTML（价格、涨跌幅这些），Python里直接写var(--fa-text)/
+#      var(--fa-muted)取代写死的十六进制，没有inline color的地方才会吃这两个
+#      变量，天然不会跟涨跌红绿冲突（红绿本身也没打算跟着主题变）。
+#      涨跌红绿本身不切换——两个颜色本来亮度就够高，深色背景下依然清楚可辨。
+#   2. Streamlit原生组件（按钮、radio、expander、说明文字这些，不带我们自己
+#      的inline color），用data-testid选择器 + !important覆盖，跟这些原生
+#      元素不会有inline color冲突，可以放心用!important。
+_FA_BASE_CSS = """
+<style>
+:root {
+    --fa-bg:      #F8F8FA;
+    --fa-surface: #FFFFFF;
+    --fa-border:  #E4E6EA;
+    --fa-text:    #0F172A;
+    --fa-muted:   #6E6E82;
+}
+
+html, body { background: var(--fa-bg) !important; }
+.stApp, [data-testid="stAppViewContainer"],
+[data-testid="stMain"], [data-testid="stMainBlockContainer"],
+section.main, .main, .block-container,
+[data-testid="stBottom"], .stBottom,
+[data-testid="stBottomBlockContainer"],
+footer {
+    background: var(--fa-bg) !important;
+}
+header[data-testid="stHeader"] { background: var(--fa-bg) !important; box-shadow: none !important; }
+[data-testid="stHorizontalBlock"] { background: transparent !important; }
+[data-testid="stColumn"] { background: transparent !important; }
+[data-testid="stElementContainer"] { background: transparent !important; }
+[data-testid="stVerticalBlockBorderWrapper"] { background: var(--fa-surface) !important; border-color: var(--fa-border) !important; }
+[data-testid="stExpander"] { background: var(--fa-surface) !important; border: 1px solid var(--fa-border) !important; }
+hr { border-color: var(--fa-border) !important; }
+
+/* 下面这几条只作用于 Streamlit 自己生成的文字节点（radio标签、caption、
+   纯文本markdown的<p>），不会碰到我们自己写的带inline color的<div>/<span>
+   （那些本来就没有匹配到<p>标签选择器）。*/
+[data-testid="stMarkdownContainer"] p { color: var(--fa-text) !important; }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * { color: var(--fa-muted) !important; }
+[data-testid="stWidgetLabel"] p { color: var(--fa-text) !important; }
+
+.stButton button {
+    background: var(--fa-surface) !important; border: 1px solid var(--fa-border) !important;
+    color: var(--fa-text) !important;
+}
+div[data-testid="stButtonGroup"] button,
+div[data-testid="stButtonGroup"] [role="radio"] {
+    background-color: var(--fa-surface) !important; border: 1px solid var(--fa-border) !important;
+    color: var(--fa-muted) !important;
+}
+div[data-testid="stButtonGroup"] button[aria-checked="true"],
+div[data-testid="stButtonGroup"] [aria-checked="true"] {
+    background-color: #e02020 !important; border-color: #e02020 !important; color: #fff !important;
+}
+div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { color: inherit !important; }
+
+/* ── 移动端（窄屏）适配 ──────────────────────────────────────────────────────
+   之前这个项目完全没有@media适配——大量信息密集的卡片（涨跌停池/核心股/
+   成分股卡片、指数快照表头、自选股行、热门板块宫格）都是手写flex比例布局，
+   不会跟着窄屏自动折行，手机打开容易挤出文字截断、数字错位。这里不重做
+   信息架构，只让这几处关键卡片在窄屏下改成允许换行/压缩字号，同时保留
+   数据本身的可读性。 */
+@media (max-width: 768px) {
+    .fa-flex-row { flex-wrap: wrap !important; }
+    .fa-flex-row > div { flex: 1 1 auto !important; }
+    [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
+    .stButton button { font-size: 0.8rem !important; padding: 6px 10px !important; }
+    div[data-testid="stButtonGroup"] button,
+    div[data-testid="stButtonGroup"] [role="radio"] { font-size: 0.75rem !important; padding: 3px 8px !important; }
+}
+</style>
+"""
+
+_FA_DARK_CSS = """
+<style>
+:root {
+    --fa-bg:      #0D0D14;
+    --fa-surface: #16162A;
+    --fa-border:  #282845;
+    --fa-text:    #DEE1F5;
+    --fa-muted:   #9494B8;
+}
+</style>
+"""
+
+st.markdown(_FA_BASE_CSS, unsafe_allow_html=True)
+if st.session_state["dark_mode"]:
+    st.markdown(_FA_DARK_CSS, unsafe_allow_html=True)
 
 # ── 加载中遮罩 ────────────────────────────────────────────────────────────────
 # 这个app所有页面跳转（列表点进详情页、返回列表、切换市场等）走的都是真实的
@@ -128,7 +229,7 @@ def _show_login_page():
     st.markdown(
         "<div style='text-align:center;padding:60px 0 24px'>"
         "<div style='font-size:1.5rem;font-weight:600;margin:8px 0 4px'>Invest Agent</div>"
-        "<div style='font-size:0.85rem;color:#888'>行情 + 财务 + 新闻交叉验证 · 登录后开始使用</div>"
+        "<div style='font-size:0.85rem;color:var(--fa-muted)'>行情 + 财务 + 新闻交叉验证 · 登录后开始使用</div>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -299,7 +400,7 @@ def _build_sparkline_svg(values: list, color: str, width: int = 60, height: int 
     """
     vals = [v for v in values if v is not None]
     if len(vals) < 2:
-        return "<span style='color:#ccc;font-size:0.7rem'>--</span>"
+        return "<span style='color:var(--fa-muted);font-size:0.7rem'>--</span>"
     lo, hi = min(vals), max(vals)
     rng = (hi - lo) or (abs(lo) * 0.01 or 1)
     n = len(vals)
@@ -395,16 +496,16 @@ def _render_overall_summary(raw_text: str):
 
     if score is not None:
         if score >= 65:
-            color, zone = "#e02020", "偏多"
+            color, zone = UP_COLOR, "偏多"
         elif score <= 35:
-            color, zone = "#22a06b", "偏空"
+            color, zone = DOWN_COLOR, "偏空"
         else:
             color, zone = "#888", "中性"
         st.markdown(
             f"<div style='margin-bottom:14px'>"
             + f"<div style='display:flex;align-items:baseline;gap:8px;margin-bottom:6px'>"
             + f"<span style='font-size:1.6rem;font-weight:700;color:{color}'>{score}</span>"
-            + f"<span style='font-size:0.85rem;color:#888'>/ 100 "
+            + f"<span style='font-size:0.85rem;color:var(--fa-muted)'>/ 100 "
             + f"<span style='color:{color};font-weight:600'>{zone}</span></span>"
             + "</div>"
             + f"<div style='position:relative;height:6px;border-radius:3px;background:linear-gradient(to right,#22a06b,#d8d8d8,#e02020)'>"
@@ -496,14 +597,14 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
         for _, r in news.iterrows():
             _title = r["新闻标题"]
             _title_html = (
-                f"<a href='{r.get('url', '')}' target='_blank' style='color:#0f172a;text-decoration:none'>{_title}</a>"
-                if idx_clickable else f"<span style='color:#0f172a'>{_title}</span>"
+                f"<a href='{r.get('url', '')}' target='_blank' style='color:var(--fa-text);text-decoration:none'>{_title}</a>"
+                if idx_clickable else f"<span style='color:var(--fa-text)'>{_title}</span>"
             )
             st.markdown(
                 f"<div style='margin:6px 0;font-size:0.9rem'>"
-                f"<span style='color:#888;font-size:0.78rem'>{r.get('日期', '') or ''}</span>　"
+                f"<span style='color:var(--fa-muted);font-size:0.78rem'>{r.get('日期', '') or ''}</span>　"
                 f"{_title_html}　"
-                f"<span style='color:#888;font-size:0.75rem'>{r.get('分类', '')}</span>"
+                f"<span style='color:var(--fa-muted);font-size:0.75rem'>{r.get('分类', '')}</span>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -527,14 +628,14 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
         title = r["新闻标题"]
         tag = r.get("分类", "")
         title_html = (
-            f"<a href='{r.get('url', '')}' target='_blank' style='color:#0f172a;text-decoration:none'>{title}</a>"
-            if clickable else f"<span style='color:#0f172a'>{title}</span>"
+            f"<a href='{r.get('url', '')}' target='_blank' style='color:var(--fa-text);text-decoration:none'>{title}</a>"
+            if clickable else f"<span style='color:var(--fa-text)'>{title}</span>"
         )
         st.markdown(
             f"<div style='margin:6px 0;font-size:0.9rem'>"
-            f"<span style='color:#888;font-size:0.78rem'>{date}</span>　"
+            f"<span style='color:var(--fa-muted);font-size:0.78rem'>{date}</span>　"
             f"{title_html}　"
-            f"<span style='color:#888;font-size:0.75rem'>{tag}</span>"
+            f"<span style='color:var(--fa-muted);font-size:0.75rem'>{tag}</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -699,7 +800,7 @@ def _render_price_header(symbol: str, market: str):
 
     change = spot["最新价"] - spot.get("昨收", spot["最新价"])
     change_pct = change / spot["昨收"] * 100 if spot.get("昨收") else 0
-    color = "#e02020" if change >= 0 else "#22a06b"
+    color = UP_COLOR if change >= 0 else DOWN_COLOR
 
     flash_key = f"_last_price_{symbol}_{market}"
     prev = st.session_state.get(flash_key)
@@ -745,7 +846,7 @@ def _render_index_price_header(name: str, market: str):
         st.caption("实时行情暂时取不到。")
         return
 
-    color = "#e02020" if idx_snap["涨跌"] >= 0 else "#22a06b"
+    color = UP_COLOR if idx_snap["涨跌"] >= 0 else DOWN_COLOR
     flash_key = f"_last_price_idx_{name}_{market}"
     prev = st.session_state.get(flash_key)
     st.session_state[flash_key] = idx_snap["最新"]
@@ -791,7 +892,7 @@ def _render_stock_movers_cards(df, market: str):
     _inject_wl_card_css()
     for _, row in df.iterrows():
         mv_symbol = str(row["代码"])
-        mv_color = "#e02020" if row["涨跌幅"] >= 0 else "#22a06b"
+        mv_color = UP_COLOR if row["涨跌幅"] >= 0 else DOWN_COLOR
         href = (
             f"?open_symbol={urllib.parse.quote(mv_symbol)}"
             f"&open_market={urllib.parse.quote(market)}"
@@ -801,8 +902,8 @@ def _render_stock_movers_cards(df, market: str):
         with st.container(border=True):
             st.markdown(
                 f"<a class='wl-card-link' href='{href}' target='_self'>"
-                f"<div style='display:flex;align-items:center'>"
-                f"<div style='flex:2;font-weight:600;color:#0f172a;text-decoration:none'>"
+                f"<div class='fa-flex-row' style='display:flex;align-items:center'>"
+                f"<div style='flex:2;font-weight:600;color:var(--fa-text);text-decoration:none'>"
                 f"{row['名称']}（{mv_symbol}）</div>"
                 f"<div style='flex:1;text-align:right;font-weight:600;color:{mv_color}'>{row['最新价']:.2f}</div>"
                 f"<div style='flex:1;text-align:right;color:{mv_color}'>{row['涨跌幅']:+.2f}%</div>"
@@ -908,7 +1009,7 @@ def _render_index_snapshot(mkt_code: str):
         "}"
         "a.idx-card-link:hover { opacity: 0.85; }"
         "</style>"
-        "<div style='display:flex;padding:4px 8px;font-size:0.78rem;color:#888'>"
+        "<div class='fa-flex-row' style='display:flex;padding:4px 8px;font-size:0.78rem;color:var(--fa-muted)'>"
         "<div style='flex:2.4'>指数</div>"
         "<div style='flex:1;text-align:right'>最新</div>"
         "<div style='flex:1;text-align:right'>涨幅</div>"
@@ -917,7 +1018,7 @@ def _render_index_snapshot(mkt_code: str):
         unsafe_allow_html=True,
     )
     for idx in idx_list:
-        color = "#e02020" if idx["涨跌"] >= 0 else "#22a06b"
+        color = UP_COLOR if idx["涨跌"] >= 0 else DOWN_COLOR
         idx_code = _idx_code_by_name.get(idx["名称"], "")
         href = (
             f"?open_index_code={urllib.parse.quote(idx_code)}"
@@ -928,8 +1029,8 @@ def _render_index_snapshot(mkt_code: str):
         with st.container(border=True):
             st.markdown(
                 f"<a class='idx-card-link' href='{href}' target='_self'>"
-                f"<div style='display:flex;align-items:center'>"
-                f"<div style='flex:2.4;font-weight:600;color:#0f172a;text-decoration:none'>{idx['名称']}</div>"
+                f"<div class='fa-flex-row' style='display:flex;align-items:center'>"
+                f"<div style='flex:2.4;font-weight:600;color:var(--fa-text);text-decoration:none'>{idx['名称']}</div>"
                 f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{idx['最新']:,.2f}</div>"
                 f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
                 f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌']:+.2f}</div>"
@@ -994,7 +1095,7 @@ def _render_hk_overview():
     except Exception:
         south = None
     if south:
-        _s_color = "#e02020" if south["净买额"] >= 0 else "#22a06b"
+        _s_color = UP_COLOR if south["净买额"] >= 0 else DOWN_COLOR
         st.markdown(
             f"<div style='margin:4px 0 12px'>南向资金净买额　"
             f"<span style='color:{_s_color};font-weight:700;font-size:1.2rem'>"
@@ -1062,13 +1163,13 @@ def _render_hot_sectors(market: str):
             if idx >= len(shown):
                 continue
             row = shown.iloc[idx]
-            s_color = "#e02020" if row["涨跌幅"] >= 0 else "#22a06b"
+            s_color = UP_COLOR if row["涨跌幅"] >= 0 else DOWN_COLOR
             with col:
                 with st.container(border=True):
                     st.markdown(
-                        f"<div style='font-weight:600;color:#0f172a'>{row['板块']}</div>"
+                        f"<div style='font-weight:600;color:var(--fa-text)'>{row['板块']}</div>"
                         f"<div style='color:{s_color};font-weight:700;font-size:1.1rem'>{row['涨跌幅']:+.2f}%</div>"
-                        f"<div style='color:#94a3b8;font-size:0.78rem'>热度第{idx + 1}名</div>",
+                        f"<div style='color:var(--fa-muted);font-size:0.78rem'>热度第{idx + 1}名</div>",
                         unsafe_allow_html=True,
                     )
 
@@ -1097,7 +1198,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
         "</style>",
         unsafe_allow_html=True,
     )
-    if st.button("×", key=f"detail_back_{symbol}_{market}", type="tertiary", help="返回自选股"):
+    if st.button("←", key=f"detail_back_{symbol}_{market}", type="tertiary", help="返回自选股"):
         for k in ("_detail_symbol", "_detail_market", "_detail_name", "_detail_module"):
             st.session_state.pop(k, None)
         st.session_state["_active_section"] = "自选股"
@@ -1246,7 +1347,7 @@ def _render_index_detail(name: str, code: str, market: str):
         "</style>",
         unsafe_allow_html=True,
     )
-    if st.button("×", key=f"idx_back_{code}_{market}", type="tertiary", help="返回行情"):
+    if st.button("←", key=f"idx_back_{code}_{market}", type="tertiary", help="返回行情"):
         for k in ("_index_detail_code", "_index_detail_market", "_index_detail_name"):
             st.session_state.pop(k, None)
         st.session_state["_active_section"] = "行情"
@@ -1450,7 +1551,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
     # 看着就没对齐。
     _head_content_col, _head_del_col = st.columns([9, 1])
     _head_content_col.markdown(
-        "<div style='display:flex;align-items:center;padding:4px 8px;font-size:0.75rem;color:#888'>"
+        "<div class='fa-flex-row' style='display:flex;align-items:center;padding:4px 8px;font-size:0.75rem;color:var(--fa-muted)'>"
         "<div style='flex:2.1'>名称/代码</div>"
         "<div style='flex:1.1;text-align:center'>走势</div>"
         "<div style='flex:1.3;text-align:right'>最新/成交额</div>"
@@ -1463,8 +1564,8 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
     # 边取数据边画一行，用户反馈"一个一个蹦出来很慢"。取数据本身的耗时省不掉
     # （网络请求），但至少不会让用户看着页面一行一行往外挤，而是等一下之后
     # 整批一起出现，观感上干脆很多。
-    _rows_data = []
-    with st.spinner("加载中..."):
+    def _collect_rows():
+        rows = []
         for item in watched_filtered:
             item_market = item.get("market", "A")
             symbol = item["symbol"]
@@ -1473,18 +1574,32 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
             except Exception:
                 wspot = {}
             closes = _fetch_sparkline_closes(symbol, item_market)
-            _rows_data.append((item, item_market, symbol, wspot, closes))
+            rows.append((item, item_market, symbol, wspot, closes))
+        return rows
+
+    # 这个fragment每15秒自动刷新一次——只有真正第一次加载（session里还没有
+    # 任何一次成功渲染过）才显示"加载中"，之后的静默自动刷新不再包一层
+    # spinner：之前每次刷新都会先弹一下spinner再画出列表，整个列表跟着
+    # 抖一下，跟_render_price_header那套"数字变了背景轻轻一闪"的丝滑感
+    # 完全相反。改成只有首次展示这一遭才等得起spinner，后续刷新静默取数，
+    # 取完直接原地重画，观感上就是"数字自己跳动"而不是"列表重绘"。
+    if not st.session_state.get("_wl_seen_once"):
+        with st.spinner("加载中..."):
+            _rows_data = _collect_rows()
+        st.session_state["_wl_seen_once"] = True
+    else:
+        _rows_data = _collect_rows()
 
     for item, item_market, symbol, wspot, closes in _rows_data:
         spark_color = "#999"
         if wspot and wspot.get("最新价") and wspot.get("昨收"):
-            spark_color = "#e02020" if wspot["最新价"] >= wspot["昨收"] else "#22a06b"
+            spark_color = UP_COLOR if wspot["最新价"] >= wspot["昨收"] else DOWN_COLOR
         spark_svg = _build_sparkline_svg(closes, spark_color)
 
         if wspot and wspot.get("最新价"):
             wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
             wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
-            color = "#e02020" if wchange >= 0 else "#22a06b"
+            color = UP_COLOR if wchange >= 0 else DOWN_COLOR
 
             flash_key = f"_wl_last_price_{symbol}_{item_market}"
             prev = st.session_state.get(flash_key)
@@ -1496,7 +1611,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
             price_html = (
                 f"<div class='{flash_class}' style='text-align:right;border-radius:4px'>"
                 f"<div style='font-weight:600;color:{color}'>{wspot['最新价']:.2f}</div>"
-                f"<div style='font-size:0.72rem;color:#999'>{_fmt_turnover(wspot.get('成交额'))}</div>"
+                f"<div style='font-size:0.72rem;color:var(--fa-muted)'>{_fmt_turnover(wspot.get('成交额'))}</div>"
                 f"</div>"
             )
             badge_html = (
@@ -1506,7 +1621,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
                 f"{wchange_pct:+.2f}%</span></div>"
             )
         else:
-            price_html = "<div style='text-align:right;color:#999'>—</div>"
+            price_html = "<div style='text-align:right;color:var(--fa-muted)'>—</div>"
             badge_html = ""
 
         with st.container(border=True):
@@ -1520,12 +1635,12 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
             )
             link_col.markdown(
                 f"<a class='wl-card-link' href='{href}' target='_self'>"
-                f"<div style='display:flex;align-items:center'>"
+                f"<div class='fa-flex-row' style='display:flex;align-items:center'>"
                 # 颜色直接写在这个div自己身上，不靠继承父级<a>的color——之前靠
                 # a.wl-card-link{{color:inherit!important}}死活压不过浏览器
                 # 默认的a:link蓝色，元素自己的inline style优先级天然最高，不用
                 # 再跟CSS特异性较劲。
-                f"<div style='flex:2.1;font-weight:600;color:#0f172a;text-decoration:none'>{item['name']}（{symbol}）</div>"
+                f"<div style='flex:2.1;font-weight:600;color:var(--fa-text);text-decoration:none'>{item['name']}（{symbol}）</div>"
                 f"<div style='flex:1.1;display:flex;justify-content:center'>{spark_svg}</div>"
                 f"<div style='flex:1.3'>{price_html}</div>"
                 f"<div style='flex:1'>{badge_html}</div>"
@@ -1657,7 +1772,7 @@ else:
         with st.sidebar:
             _uemail = st.session_state.get("user_email", "")
             _uemail_safe = _uemail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            st.markdown(f"<p style='font-size:0.8rem;color:#888'>{_uemail_safe}</p>", unsafe_allow_html=True)
+            st.markdown(f"<p style='font-size:0.8rem;color:var(--fa-muted)'>{_uemail_safe}</p>", unsafe_allow_html=True)
             if st.button("退出登录", use_container_width=True):
                 _tok = st.session_state.pop("_token", None)
                 if _tok:
@@ -1718,7 +1833,7 @@ else:
 
                 history = get_history(_uemail, limit=10)
                 for h in history:
-                    verdict_color = {"偏多": "#e02020", "偏空": "#22a06b", "中性": "#888"}.get(h["verdict"], "#888")
+                    verdict_color = {"偏多": UP_COLOR, "偏空": DOWN_COLOR, "中性": NEUTRAL_COLOR}.get(h["verdict"], NEUTRAL_COLOR)
                     line = f"{h.get('name') or h['symbol']}（{h['symbol']}） {h['created_at'][:10]}"
                     st.markdown(
                         f"<div style='font-size:0.78rem;margin:6px 0'>{line}　"
@@ -1759,7 +1874,7 @@ else:
 
         st.markdown(
             """
-            <div style='background:#e02020;margin:-1rem -1rem 0 -1rem;padding:14px 24px;
+            <div class='fa-flex-row' style='background:#e02020;margin:-1rem -1rem 0 -1rem;padding:14px 24px;
                         display:flex;align-items:center;justify-content:space-between'>
                 <span style='color:#fff;font-size:1.3rem;font-weight:700;letter-spacing:.02em'>Invest Agent</span>
                 <span style='color:#fff;font-size:0.8rem;opacity:0.85'>行情 · 财务 · 新闻交叉验证</span>
@@ -1767,6 +1882,12 @@ else:
             """,
             unsafe_allow_html=True,
         )
+        _dm_spacer, _dm_toggle_col = st.columns([9, 1])
+        with _dm_toggle_col:
+            _dm_label = "浅色" if st.session_state["dark_mode"] else "深色"
+            if st.button(_dm_label, key="_fa_dark_toggle", use_container_width=True, help="切换深色/浅色模式"):
+                st.session_state["dark_mode"] = not st.session_state["dark_mode"]
+                st.rerun()
 
 
         # "行情"分区的快速搜索框去掉了——用户反馈是累赘（"自选股"分区里
@@ -1829,7 +1950,10 @@ else:
                 _, mid_empty, _ = st.columns([1, 2, 1])
                 with mid_empty:
                     st.markdown(
-                        "<div style='text-align:center;color:#888;padding:20px 0 10px'>还没有关注任何股票</div>",
+                        "<div style='text-align:center;color:var(--fa-muted);padding:20px 0 10px'>"
+                        "还没有关注任何股票<br>"
+                        "<span style='font-size:0.82rem'>点右上角的搜索按钮添加</span>"
+                        "</div>",
                         unsafe_allow_html=True,
                     )
 

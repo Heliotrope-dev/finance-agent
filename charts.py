@@ -8,6 +8,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from theme import UP_COLOR, DOWN_COLOR
+
 
 def _compute_macd(close: pd.Series) -> pd.DataFrame:
     """标准MACD：EMA12/EMA26算DIF，DIF的9日EMA是DEA，柱状图=2*(DIF-DEA)。"""
@@ -156,8 +158,8 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
             high=df["最高"],
             low=df["最低"],
             close=df["收盘"],
-            increasing_line_color="#ef4444",
-            decreasing_line_color="#22c55e",
+            increasing_line_color=UP_COLOR,
+            decreasing_line_color=DOWN_COLOR,
             name="K线",
         ),
         row=1,
@@ -175,7 +177,7 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
     )
 
     vol_colors = [
-        "#ef4444" if c >= o else "#22c55e" for o, c in zip(df["开盘"], df["收盘"])
+        UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(df["开盘"], df["收盘"])
     ]
     fig.add_trace(
         go.Bar(x=df["日期"], y=df["成交量"], marker_color=vol_colors, name="成交量"),
@@ -183,7 +185,7 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
         col=1,
     )
 
-    macd_colors = ["#ef4444" if v >= 0 else "#22c55e" for v in macd["MACD"]]
+    macd_colors = [UP_COLOR if v >= 0 else DOWN_COLOR for v in macd["MACD"]]
     fig.add_trace(
         go.Bar(x=df["日期"], y=macd["MACD"], marker_color=macd_colors, name="MACD柱"),
         row=3,
