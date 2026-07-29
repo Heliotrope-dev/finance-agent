@@ -1388,9 +1388,12 @@ def _render_index_detail(name: str, code: str, market: str):
 
 
 def _gather_stock_digest_inputs(symbol: str, market: str) -> dict | None:
-    """"今日复盘"单只股票的数据汇总——复用跟详情页"交叉验证"完全相同的数据源
-    （历史行情/实时快照/本地技术面信号/财务摘要/新闻），保证复盘里的判断
-    跟点开详情页单独看到的是同一套依据，不是另外拼凑的简化版数据。
+    """"今日复盘"单只股票的数据汇总——历史行情/实时快照/本地技术面信号/财务
+    摘要复用跟详情页"交叉验证"完全相同的数据源，**故意不取新闻**：实测
+    _fetch_news_items（A股这边尤其明显）单只股票要卡近40秒，而财务+技术面
+    加起来才5-8秒——复盘是要一次跑完整个自选股列表的场景，用户反馈"速度
+    能不能适当变快，可以分析的不那么透彻"，这是复盘场景特意要的"快但浅"，
+    不是详情页"交叉验证"那种要慢工出细活的场景，两者数据深度本来就该不同。
     """
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
@@ -1422,14 +1425,11 @@ def _gather_stock_digest_inputs(symbol: str, market: str) -> dict | None:
     fin = get_financial_abstract(symbol, market=market)
     financial_summary = fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
 
-    stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
-    news, _ = _fetch_news_items(stock_name, symbol, market)
-    news_summary = _news_to_summary(news)
-
     return {
         "history_summary": history_summary,
         "financial_summary": financial_summary,
-        "news_summary": news_summary,
+        "news_summary": "（今日复盘为了速度没有拉取新闻，只看财务+技术面+实时行情，"
+                         "完整消息面分析请点进这只股票的详情页看）",
         "technical_summary": technical_summary,
     }
 
