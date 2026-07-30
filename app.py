@@ -1276,24 +1276,32 @@ def _render_hot_sectors(market: str):
                 continue
             row = shown.iloc[idx]
             s_color = UP_COLOR if row["涨跌幅"] >= 0 else DOWN_COLOR
-            href = (
-                f"?open_sector={urllib.parse.quote(str(row['板块']))}"
-                f"&open_sector_market={urllib.parse.quote(market)}"
-                f"{_auth_qs()}"
+            inner = (
+                f"<div style='font-weight:600;color:var(--fa-text)'>{_esc(str(row['板块']))}</div>"
+                f"<div style='color:{s_color};font-weight:700;font-size:1.1rem'>{row['涨跌幅']:+.2f}%</div>"
+                f"<div style='color:var(--fa-muted);font-size:0.78rem'>热度第{idx + 1}名</div>"
             )
             with col:
                 with st.container(border=True):
-                    st.markdown(
-                        "<style>a.sector-card-link, a.sector-card-link:link, a.sector-card-link:visited {"
-                        "text-decoration:none !important; color:inherit !important; display:block; cursor:pointer;"
-                        "}</style>"
-                        f"<a class='sector-card-link' href='{href}' target='_self'>"
-                        f"<div style='font-weight:600;color:var(--fa-text)'>{_esc(str(row['板块']))}</div>"
-                        f"<div style='color:{s_color};font-weight:700;font-size:1.1rem'>{row['涨跌幅']:+.2f}%</div>"
-                        f"<div style='color:var(--fa-muted);font-size:0.78rem'>热度第{idx + 1}名</div>"
-                        f"</a>",
-                        unsafe_allow_html=True,
-                    )
+                    if market == "A":
+                        # A股板块成分股走东财接口，实测连接经常失败（东财板块类
+                        # 接口的老问题），点进去大概率只看到"获取不到"，体验比
+                        # 不能点还差——干脆A股这边先不做成可点击，跟原来一样纯展示。
+                        # 港股/美股走Futu，可靠，保留可点击。
+                        st.markdown(inner, unsafe_allow_html=True)
+                    else:
+                        href = (
+                            f"?open_sector={urllib.parse.quote(str(row['板块']))}"
+                            f"&open_sector_market={urllib.parse.quote(market)}"
+                            f"{_auth_qs()}"
+                        )
+                        st.markdown(
+                            "<style>a.sector-card-link, a.sector-card-link:link, a.sector-card-link:visited {"
+                            "text-decoration:none !important; color:inherit !important; display:block; cursor:pointer;"
+                            "}</style>"
+                            f"<a class='sector-card-link' href='{href}' target='_self'>{inner}</a>",
+                            unsafe_allow_html=True,
+                        )
 
     if len(sectors) > 9:
         if not st.session_state.get(expand_key):
