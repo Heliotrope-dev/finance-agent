@@ -21,6 +21,10 @@ def _conn():
 
 def init_db():
     with closing(_conn()) as c:
+        # WAL模式：_conn()每次都是新开关一次连接（没有常驻连接池），默认的
+        # rollback journal模式下写操作会短暂独占锁、并发读写容易互相等待；
+        # WAL允许读和写并发进行，对这种"频繁短连接"的用法更合适。
+        c.execute("PRAGMA journal_mode=WAL")
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS analyses (
@@ -151,15 +155,22 @@ def get_history(email: str, symbol: str | None = None, limit: int = 50) -> list[
         return [dict(r) for r in rows]
 
 
-def get_due_for_review(email: str, min_age_days: int = 7) -> list[dict]:
-    """找出已经过去足够久、但还没补录回看价格的分析记录（只看当前用户自己的）。"""
+def get_due_for_review(email: str, min_age_days: int = 7, limit: int = 20) -> list[dict]:
+    """找出已经过去足够久、但还没补录回看价格的分析记录（只看当前用户自己的）。
+
+    limit：这份列表拿到手后，调用方要逐条发网络请求去查实时价格补录——不加上限
+    的话，用户攒得越多，侧边栏「历史回看」这个st.expander每次页面渲染（不管
+    展没展开都会执行内部代码）就要发越多请求，越用越慢。默认给20条，按
+    created_at从旧到新补，配合调用方改成并发请求。
+    """
     init_db()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=min_age_days)).isoformat()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
         rows = c.execute(
-            "SELECT * FROM analyses WHERE email = ? AND review_price IS NULL AND created_at <= ?",
-            (email, cutoff),
+            "SELECT * FROM analyses WHERE email = ? AND review_price IS NULL AND created_at <= ? "
+            "ORDER BY created_at ASC LIMIT ?",
+            (email, cutoff, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -217,6 +228,40 @@ def get_accuracy_stats(email: str) -> dict:
         if any(r["verdict"] == v for r in rows)
     }
     return stats
+
+
+def get_accuracy_trend(email: str, window: int = 5) -> list[dict]:
+    """"方向一致率"随时间的变化趋势——之前只有 get_accuracy_stats 算出来的
+    一个孤零零的总体百分比，看不出这个数字是一直稳定在这附近，还是最近变好/
+    变差了。这里按 created_at 升序排列已回看的记录（口径跟 get_accuracy_stats
+    一致：只看 review_price 不为空、verdict 不是"中性"的），用滑动窗口
+    （默认最近5次）算出每个时间点"往前数window次"的区间一致率，串成一条趋势线。
+
+    样本少于 window+1 条时趋势没有意义（只能画出0-1个点），直接返回空列表，
+    调用方应该判断空列表就不画图、只保留原来那个总体的 st.metric。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM analyses WHERE email = ? AND review_price IS NOT NULL AND verdict != '中性' "
+            "ORDER BY created_at ASC",
+            (email,),
+        ).fetchall()
+    rows = [dict(r) for r in rows]
+    if len(rows) < window + 1:
+        return []
+
+    trend = []
+    for i in range(window - 1, len(rows)):
+        window_rows = rows[i - window + 1 : i + 1]
+        acc = _accuracy_from_rows(window_rows)["一致率"]
+        trend.append({
+            "序号": i + 1,
+            "日期": window_rows[-1]["created_at"][:10],
+            "一致率": acc,
+        })
+    return trend
 
 
 def add_search_history(email: str, query: str, market: str = "A"):

@@ -53,7 +53,11 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
     last_price = float(df["价格"].iloc[-1])
     base = prev_close if prev_close else float(df["价格"].iloc[0])
     up = last_price >= base
-    line_color = "#e02020" if up else "#22a06b"
+    line_color = UP_COLOR if up else DOWN_COLOR
+    # rgba版本的填充色没法直接复用UP_COLOR/DOWN_COLOR这两个十六进制字符串
+    # （CSS的rgba()要十进制分量），这两组数字是UP_COLOR(#e02020)/DOWN_COLOR
+    # (#22a06b)按十六进制拆开换算过来的，跟上面line_color是同一个颜色，
+    # 只是多了0.08的透明度做填充，不是另外瞎起的一个颜色。
     fill_color = "rgba(224,32,32,0.08)" if up else "rgba(34,160,107,0.08)"
 
     # 指数没有真实成交量（指数本身不是被直接交易的标的，Futu的分时接口对指数
@@ -364,7 +368,10 @@ def build_benchmark_comparison(hist: pd.DataFrame, benchmark: pd.DataFrame, benc
 
     fig = go.Figure()
     fig.add_trace(
-        go.Scatter(x=stock["日期"], y=stock["归一化"], name="个股", line=dict(color="#ef4444", width=2))
+        # 之前这里写的是"#ef4444"——本文件开头theme.py的说明里提到的"旧charts.py
+        # 红"，跟app.py/candlestick统一用的品牌红(UP_COLOR="#e02020")肉眼能看出
+        # 不是同一个红，这里补上遗漏的一处。
+        go.Scatter(x=stock["日期"], y=stock["归一化"], name="个股", line=dict(color=UP_COLOR, width=2))
     )
     fig.add_trace(
         go.Scatter(
@@ -380,7 +387,11 @@ def build_benchmark_comparison(hist: pd.DataFrame, benchmark: pd.DataFrame, benc
     return fig
 
 
-_MULTI_COLORS = ["#ef4444", "#3b82f6", "#22c55e", "#f59e0b", "#a855f7"]
+# 第一个和第三个位置分别用品牌红/绿（跟UP_COLOR/DOWN_COLOR保持同一个色号），
+# 后面几个是纯粹的分类色（蓝/橙/紫/青），不代表涨跌方向，只用来区分不同标的。
+# 凑够6个——自选股对比入口（app.py _show_compare_dialog）最多允许勾选6只，
+# 凑够6个颜色能保证6只同时对比时每条线颜色都不重复。
+_MULTI_COLORS = [UP_COLOR, "#3b82f6", DOWN_COLOR, "#f59e0b", "#a855f7", "#0891b2"]
 
 
 def build_multi_comparison(hist_by_name: dict) -> go.Figure:

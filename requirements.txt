@@ -1,8 +1,8 @@
-streamlit>=1.40.0
-akshare
-baostock
-pandas
-requests
-openai
-plotly
-futu-api
+streamlit==1.59.2
+akshare==1.18.64
+baostock==0.9.3
+pandas==3.0.3
+requests==2.34.2
+openai==2.45.0
+plotly==6.9.0
+futu-api==10.9.6908

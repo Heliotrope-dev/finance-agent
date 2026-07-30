@@ -1,10 +1,13 @@
 """Invest Agent —— 行情+财务+新闻交叉验证，不做黑箱荐股。"""
 
+import html
 import json
 import os
 import re
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as _cv1
 from datetime import datetime, timedelta
@@ -41,6 +44,7 @@ from data_sources import (
     get_hstech_constituents,
     resolve_symbol_by_name,
     detect_symbol_candidates,
+    get_data_source_health,
 )
 from analysis import (
     cross_validate, summarize_financials, summarize_news, summarize_index_news, summarize_benchmark,
@@ -48,12 +52,12 @@ from analysis import (
 )
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
-    add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
+    get_accuracy_trend, add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
     add_search_history, get_search_history,
 )
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
-    build_benchmark_comparison, build_return_histogram,
+    build_benchmark_comparison, build_return_histogram, build_multi_comparison,
 )
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
@@ -140,7 +144,12 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 </style>
 """
 
-st.markdown(_FA_BASE_CSS, unsafe_allow_html=True)
+# _FA_BASE_CSS 是个大的三引号CSS字符串，里面有大量`{}`（CSS规则本身），
+# 不适合直接转成f-string（要逐个转义花括号，容易改错）。这里选用最小风险的
+# 办法达到同样的目的——选中态用的品牌红是字面量"#e02020"，跟theme.py里
+# UP_COLOR是同一个值，用.replace()把它换成UP_COLOR变量值，日后改
+# theme.py时这里能跟着变，不用再在两个文件里各改一次。
+st.markdown(_FA_BASE_CSS.replace("#e02020", UP_COLOR), unsafe_allow_html=True)
 
 # ── 加载中遮罩 ────────────────────────────────────────────────────────────────
 # 这个app所有页面跳转（列表点进详情页、返回列表、切换市场等）走的都是真实的
@@ -209,7 +218,7 @@ try {
 } catch(e2) {}
 })();
 </script>
-""".replace("__FA_LOADER_NONCE__", datetime.now().isoformat()), height=0)
+""".replace("__FA_LOADER_NONCE__", datetime.now().isoformat()).replace("#e02020", UP_COLOR), height=0)
 
 
 def _show_login_page():
@@ -507,6 +516,13 @@ def _news_title_color(title: str, hot_names: set) -> str:
     return "var(--fa-text)"
 
 
+def _esc(s) -> str:
+    """新闻标题/URL 等外部抓取内容拼进 HTML 前统一转义，防 XSS。"""
+    if s is None:
+        return ""
+    return html.escape(str(s), quote=True)
+
+
 def _news_to_summary(news) -> str:
     """喂给AI的新闻摘要——带上日期和分类，不只是光秃秃的标题，不然AI只能看着
     一行标题瞎总结，写不出具体内容，只能说"整体偏利好"这种空话。"""
@@ -541,7 +557,7 @@ def _render_overall_summary(raw_text: str):
             + f"<span style='font-size:0.85rem;color:var(--fa-muted)'>/ 100 "
             + f"<span style='color:{color};font-weight:600'>{zone}</span></span>"
             + "</div>"
-            + f"<div style='position:relative;height:6px;border-radius:3px;background:linear-gradient(to right,#22a06b,#d8d8d8,#e02020)'>"
+            + f"<div style='position:relative;height:6px;border-radius:3px;background:linear-gradient(to right,{DOWN_COLOR},#d8d8d8,{UP_COLOR})'>"
             + f"<div style='position:absolute;left:{score}%;top:-4px;width:14px;height:14px;"
             + f"border-radius:50%;background:#fff;border:3px solid {color};transform:translateX(-50%)'></div>"
             + "</div>"
@@ -554,18 +570,37 @@ def _render_overall_summary(raw_text: str):
     st.markdown(display_text)
 
 
-def _stream_overall_summary(gen) -> str:
-    """总结性分析首次生成时的流式处理——先在一个占位区域里打字机效果播放AI
-    的原始输出（这时候末尾的[综合评分: N]标签会跟着文字一起可见地闪过去，
-    这是流式效果本身带来的、可以接受的小瑕疵），生成完之后清空占位区域，
-    换成_render_overall_summary画的最终版本（评分标签从正文里摘出来，
-    做成上面的可视化打分条，不再在正文里裸露出现）。
+def _display_name(symbol: str, market: str, spot: dict) -> str:
+    """给个股详情页AI模块用的展示名（拿去做新闻搜索关键词）——A股优先用
+    get_stock_name(symbol)（BaoStock查到的规范公司名），因为这个名字要
+    拿去搜新闻，spot实时快照（Tencent/Futu）里的名称字段有时跟新闻源
+    用的公司全称对不上，会影响新闻关键词命中率；港股/美股没有BaoStock
+    覆盖，退回spot快照里的名称字段。
 
-    手动逐块迭代而不是直接把生成器丢给st.write_stream()——之前那样写，
-    生成过程中一旦出错（比如API瞬时抖动），实测st.write_stream()会把异常
-    悄悄吞掉、返回空字符串，页面上就变成"总结性分析"标题下面空空如也，
-    连报错都看不到。手动迭代能兜住异常，出错时给一句明确的错误提示，
-    不会把空字符串存进缓存。
+    注意：tracker.log_analysis 存的"name"字段跟这个不是同一个口径——那边
+    只是历史记录里的展示标签，不需要为了新闻命中率特地查BaoStock规范名，
+    直接用spot快照里的名称即可，两处刻意保留了不同的计算，不是遗漏。
+    """
+    return get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
+
+
+def _stream_ai_text(gen, raise_on_error: bool = True) -> str:
+    """AI流式输出的统一处理——不直接把生成器丢给st.write_stream(gen)，实测
+    生成过程中一旦出错（API瞬时抖动之类），st.write_stream()会把异常悄悄
+    吞掉、返回空字符串，缓存进session_state后页面上就是标题下面空空如也，
+    连报错都看不见（"总结性分析"最早踩过这个坑）。手动逐块迭代、显式捕获
+    异常，绝不会把空字符串当成正常结果存住。
+
+    这里原来是两份几乎一样的代码（_write_stream_safe 给普通AI模块用，
+    _stream_overall_summary 给"总结性分析"用），唯一实质区别是失败时怎么
+    处理，现在用 raise_on_error 这一个参数统一表达：
+    - raise_on_error=True（默认，给资讯解读/财务摘要/交叉验证这些普通模块
+      用）：异常/空结果直接往外抛，让调用方自己的try/except接住去展示
+      "分析失败"；成功时占位区保留完整文本（调用方不会再另外渲染一遍）。
+    - raise_on_error=False（给"总结性分析"用）：异常/空结果不抛出，转成一句
+      "汇总失败：..."的文本原样返回；占位区在结束时清空——因为调用方
+      _render_overall_summary 会把返回的文本重新渲染成带评分条的样式，
+      占位区留着原始文字会跟最终版本重复显示。
     """
     placeholder = st.empty()
     full_text = ""
@@ -574,29 +609,21 @@ def _stream_overall_summary(gen) -> str:
             full_text += chunk
             placeholder.markdown(full_text + "▌")
     except Exception as e:
+        if raise_on_error:
+            raise
         placeholder.empty()
         return f"汇总失败：{e}"
-    placeholder.empty()
+
     if not full_text.strip():
+        if raise_on_error:
+            raise RuntimeError("AI 没有返回任何内容")
+        placeholder.empty()
         return "汇总失败：AI 没有返回任何内容，请点「重新分析」再试一次。"
-    return full_text
 
-
-def _write_stream_safe(gen) -> str:
-    """给AI模块用的流式显示——不直接调st.write_stream(gen)，实测生成过程中
-    一旦出错（API瞬时抖动之类），st.write_stream()会把异常悄悄吞掉、返回
-    空字符串，缓存进session_state后页面上就是标题下面空空如也，连报错都
-    看不见（"总结性分析"那块就踩过这个坑）。手动逐块迭代、显式捕获异常，
-    出错时抛出去让调用方的try/except接住，绝不会把空字符串当成正常结果存住。
-    """
-    placeholder = st.empty()
-    full_text = ""
-    for chunk in gen:
-        full_text += chunk
-        placeholder.markdown(full_text + "▌")
-    placeholder.markdown(full_text)
-    if not full_text.strip():
-        raise RuntimeError("AI 没有返回任何内容")
+    if raise_on_error:
+        placeholder.markdown(full_text)
+    else:
+        placeholder.empty()
     return full_text
 
 
@@ -632,14 +659,14 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
             _title = r["新闻标题"]
             _title_color = _news_title_color(_title, _hot_names)
             _title_html = (
-                f"<a href='{r.get('url', '')}' target='_blank' style='color:{_title_color};text-decoration:none'>{_title}</a>"
-                if idx_clickable else f"<span style='color:{_title_color}'>{_title}</span>"
+                f"<a href='{_esc(r.get('url', ''))}' target='_blank' style='color:{_title_color};text-decoration:none'>{_esc(_title)}</a>"
+                if idx_clickable else f"<span style='color:{_title_color}'>{_esc(_title)}</span>"
             )
             st.markdown(
                 f"<div style='margin:6px 0;font-size:0.9rem'>"
-                f"<span style='color:var(--fa-muted);font-size:0.78rem'>{r.get('日期', '') or ''}</span>　"
+                f"<span style='color:var(--fa-muted);font-size:0.78rem'>{_esc(r.get('日期', '') or '')}</span>　"
                 f"{_title_html}　"
-                f"<span style='color:var(--fa-muted);font-size:0.75rem'>{r.get('分类', '')}</span>"
+                f"<span style='color:var(--fa-muted);font-size:0.75rem'>{_esc(r.get('分类', ''))}</span>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -665,14 +692,14 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
         tag = r.get("分类", "")
         _title_color = _news_title_color(title, _hot_names)
         title_html = (
-            f"<a href='{r.get('url', '')}' target='_blank' style='color:{_title_color};text-decoration:none'>{title}</a>"
-            if clickable else f"<span style='color:{_title_color}'>{title}</span>"
+            f"<a href='{_esc(r.get('url', ''))}' target='_blank' style='color:{_title_color};text-decoration:none'>{_esc(title)}</a>"
+            if clickable else f"<span style='color:{_title_color}'>{_esc(title)}</span>"
         )
         st.markdown(
             f"<div style='margin:6px 0;font-size:0.9rem'>"
-            f"<span style='color:var(--fa-muted);font-size:0.78rem'>{date}</span>　"
+            f"<span style='color:var(--fa-muted);font-size:0.78rem'>{_esc(date)}</span>　"
             f"{title_html}　"
-            f"<span style='color:var(--fa-muted);font-size:0.75rem'>{tag}</span>"
+            f"<span style='color:var(--fa-muted);font-size:0.75rem'>{_esc(tag)}</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -692,14 +719,14 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
     is_fresh = mod_key not in st.session_state
 
     if module == "news":
-        stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
+        stock_name = _display_name(symbol, market, spot)
         # 原始新闻列表已经在页面上方单独一块展示了（_render_news_section），
         # 这里不重复摆一次，只放AI解读，避免同一份数据在页面上出现两遍。
         if is_fresh:
             news, _ = _fetch_news_items(stock_name, symbol, market)
             news_summary = _news_to_summary(news)
             try:
-                ai_text = _write_stream_safe(summarize_news(symbol, news_summary))
+                ai_text = _stream_ai_text(summarize_news(symbol, news_summary))
             except Exception as e:
                 st.error(f"分析失败：{e}")
                 return
@@ -715,7 +742,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                 financial_summary = fin.head(10).to_string(index=False)
                 st.caption("AI 解读")
                 try:
-                    ai_text = _write_stream_safe(summarize_financials(symbol, financial_summary))
+                    ai_text = _stream_ai_text(summarize_financials(symbol, financial_summary))
                 except Exception as e:
                     st.error(f"分析失败：{e}")
                     return
@@ -740,7 +767,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                 bm_pct = (float(benchmark.iloc[-1]["收盘"]) / float(benchmark.iloc[0]["收盘"]) - 1) * 100
                 st.caption("AI 解读")
                 try:
-                    ai_text = _write_stream_safe(summarize_benchmark(symbol, stock_pct, bm_name, bm_pct))
+                    ai_text = _stream_ai_text(summarize_benchmark(symbol, stock_pct, bm_name, bm_pct))
                 except Exception as e:
                     st.error(f"分析失败：{e}")
                     return
@@ -787,12 +814,12 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
             financial_summary = (
                 fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
             )
-            stock_name = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
+            stock_name = _display_name(symbol, market, spot)
             news, _ = _fetch_news_items(stock_name, symbol, market)
             news_summary = _news_to_summary(news)
 
             try:
-                ai_text = _write_stream_safe(
+                ai_text = _stream_ai_text(
                     cross_validate(symbol, history_summary, financial_summary, news_summary, technical_summary)
                 )
             except Exception as e:
@@ -800,10 +827,13 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                 return
             current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
             verdict = extract_verdict(ai_text)
-            stock_name = spot.get("名称", symbol) if spot else symbol
+            # log_analysis存的"name"只是历史记录里的展示标签，口径跟上面
+            # _display_name（专门为了新闻搜索命中率查BaoStock规范名）刻意
+            # 不同——这里不需要那么讲究，直接用spot快照里的名称即可。
+            log_name = spot.get("名称", symbol) if spot else symbol
             log_analysis(
                 st.session_state["user_email"], symbol, float(current_price), ai_text,
-                verdict=verdict, market=market, name=stock_name,
+                verdict=verdict, market=market, name=log_name,
             )
             st.session_state[mod_key] = {"ai_text": ai_text}
         else:
@@ -1018,17 +1048,22 @@ def _render_index_top_movers(market: str, index_name: str = ""):
     else:
         st.caption("覆盖美股主要板块龙头股，按涨跌幅排序，不是这个指数的官方成分股名单。")
 
-    expand_key = f"_movers_expand_{market}"
+    # 之前是 f"_movers_expand_{market}"，只带市场不带指数名——同一市场下
+    # 切换不同指数（比如A股的上证指数/深证成指/创业板指）会共享同一个展开
+    # 状态，在一个指数里点过"展开"，切到同市场另一个指数也变成展开状态。
+    # 恒生科技分支（上面）已经正确带了 "_hstech" 后缀，这里补上指数名区分。
+    _movers_qualifier = index_name or "default"
+    expand_key = f"_movers_expand_{market}_{_movers_qualifier}"
     show_n = 30 if st.session_state.get(expand_key) else 10
     _render_stock_movers_cards(movers.head(show_n), market)
 
     if len(movers) > 10:
         if not st.session_state.get(expand_key):
-            if st.button("展开（前30）", key=f"_movers_expand_btn_{market}"):
+            if st.button("展开（前30）", key=f"_movers_expand_btn_{market}_{_movers_qualifier}"):
                 st.session_state[expand_key] = True
                 st.rerun()
         else:
-            if st.button("收起", key=f"_movers_collapse_btn_{market}"):
+            if st.button("收起", key=f"_movers_collapse_btn_{market}_{_movers_qualifier}"):
                 st.session_state[expand_key] = False
                 st.rerun()
 
@@ -1267,7 +1302,7 @@ _HOME_MAP_MARKERS = [
     ("纳斯达克100", "US", 48.0, -122.0),
     ("日经225", "GLOBAL", 36.0, 142.0),
     ("富时100", "GLOBAL", 54.0, -3.0),
-    ("德国DAX", "GLOBAL", 50.0, 30.0),
+    ("德国DAX", "GLOBAL", 51.0, 10.0),        # 真实德国大约在(47-55,6-15)；原来的(50,30)纬度经度写反着搭配，精确落在了乌克兰基辅，改成德国中部大致位置，跟富时100(54,-3)错开
     ("印度SENSEX", "GLOBAL", 19.0, 73.0),
     ("巴西IBOVESPA", "GLOBAL", -15.0, -55.0),
     ("澳大利亚ASX200", "GLOBAL", -30.0, 145.0),
@@ -1292,14 +1327,15 @@ def _render_home_map():
     在几个指数所在交易所城市的真实经纬度上放小图标，图标里显示指数名+当前点数+
     涨跌幅（红涨绿跌）。
 
-    恒生指数/上证指数/标普500/纳斯达克100/道琼斯这5个走浏览器JS直接每3秒
+    恒生指数/上证指数/标普500/纳斯达克100这4个走浏览器JS直接每3秒
     fetch腾讯行情接口（见_HOME_MAP_TENCENT_CODE的说明），原地更新图标，
     不牵扯Streamlit的rerun——这样既有实时跳动效果，又不会重蹈"行情"tab
     那几个卡片加run_every=3导致切页残留的覆辙（那次是Python侧的fragment
     定时器在背后继续触发；这次刷新完全在iframe内部的JS里自己完成，跟
     Streamlit的脚本重跑机制没有任何关系，理论上不会有同类残留风险）。
-    其余5个国际指数（东财源，CORS不开放）保持页面加载时的服务端快照，
-    不会跳动。
+    其余7个国际指数（Yahoo Finance源，CORS不开放）保持页面加载时的
+    服务端快照，不会跳动。道琼斯没有单独放在地图标记里（见
+    _HOME_MAP_MARKERS 的说明，美股只保留标普+纳斯达克两个）。
     """
     snaps: dict[str, list[dict]] = {}
     for _, mkt, _, _ in _HOME_MAP_MARKERS:
@@ -1322,7 +1358,7 @@ def _render_home_map():
             idx = next((i for i in snaps.get(mkt, []) if i["名称"] == name), None)
         if not idx:
             continue
-        color = "#e02020" if idx["涨跌"] >= 0 else "#22a06b"
+        color = UP_COLOR if idx["涨跌"] >= 0 else DOWN_COLOR
         # 标签尺寸缩小过一版——用户反馈"标签能小点的话就不会挤一起了"，
         # 从 padding 4px 8px/font-size 0.75rem 缩到 2px 5px/0.6rem，
         # iconSize 从 [90,50] 缩到 [68,38]，但没有缩到看不清的程度
@@ -1394,7 +1430,7 @@ def _render_home_map():
                     var changeAmt = parseFloat(fields[31]);
                     var changePct = parseFloat(fields[32]);
                     if (isNaN(last) || isNaN(changePct)) return;
-                    var color = changeAmt >= 0 ? '#e02020' : '#22a06b';
+                    var color = changeAmt >= 0 ? '{UP_COLOR}' : '{DOWN_COLOR}';
                     var html = "<div style='background:#fff;border:1px solid #ddd;border-radius:5px;"
                         + "padding:2px 5px;font-size:0.6rem;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)'>"
                         + "<div style='font-weight:600;color:#0f172a'>" + name + "</div>"
@@ -1443,8 +1479,8 @@ def _render_home_page():
         _title_color = _news_title_color(row["summary"], _hot_names)
         with st.container(border=True):
             st.markdown(
-                f"<a href='{row['url']}' target='_blank' style='color:{_title_color};text-decoration:none;font-weight:600'>{row['summary']}</a>"
-                f"<div style='font-size:0.75rem;color:var(--fa-muted);margin-top:2px'>{row.get('tag','')} · {row.get('日期') or '-'}</div>",
+                f"<a href='{_esc(row['url'])}' target='_blank' style='color:{_title_color};text-decoration:none;font-weight:600'>{_esc(row['summary'])}</a>"
+                f"<div style='font-size:0.75rem;color:var(--fa-muted);margin-top:2px'>{_esc(row.get('tag',''))} · {_esc(row.get('日期') or '-')}</div>",
                 unsafe_allow_html=True,
             )
     if len(news) > 10:
@@ -1480,7 +1516,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
 
     st.markdown(
         f"""
-        <div style='background:#e02020;margin:-1rem -1rem 0 -1rem;padding:14px 24px'>
+        <div style='background:{UP_COLOR};margin:-1rem -1rem 0 -1rem;padding:14px 24px'>
             <div style='color:#fff;font-size:1.2rem;font-weight:700'>{name}</div>
             <div style='color:#fff;font-size:0.85rem;opacity:0.85'>{symbol} · {market}</div>
         </div>
@@ -1581,7 +1617,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     st.caption(
         "打开详情页自动生成，多个独立 AI 调用分别交叉验证新闻、财务、大盘对比、"
         "技术面与消息面是否一致——只呈现数据和依据，不给买卖建议，请自行判断。"
-        "价格是每 15 秒跳动的实时数据，但AI文字分析生成一次就缓存住，不会跟着"
+        "价格是每 3 秒跳动的实时数据，但AI文字分析生成一次就缓存住，不会跟着"
         "价格自动重新生成（每次都调用AI要花钱），盘中变化大的话可以点右上角"
         "「重新分析」手动刷新。"
     )
@@ -1607,7 +1643,9 @@ def _render_stock_detail(symbol: str, market: str, name: str):
                     mod_label: st.session_state.get(f"_detail_mod_{symbol}_{market}_{mod_key}", {}).get("ai_text", "")
                     for mod_key, mod_label in module_defs
                 }
-                st.session_state[summary_key] = _stream_overall_summary(summarize_overall(symbol, section_texts))
+                st.session_state[summary_key] = _stream_ai_text(
+                    summarize_overall(symbol, section_texts), raise_on_error=False,
+                )
             except Exception as e:
                 st.session_state[summary_key] = f"汇总失败：{e}"
         _render_overall_summary(st.session_state[summary_key])
@@ -1629,7 +1667,7 @@ def _render_index_detail(name: str, code: str, market: str):
 
     st.markdown(
         f"""
-        <div style='background:#e02020;margin:-1rem -1rem 0 -1rem;padding:14px 24px'>
+        <div style='background:{UP_COLOR};margin:-1rem -1rem 0 -1rem;padding:14px 24px'>
             <div style='color:#fff;font-size:1.2rem;font-weight:700'>{name}</div>
             <div style='color:#fff;font-size:0.85rem;opacity:0.85'>{code} · {market}指数</div>
         </div>
@@ -1711,7 +1749,7 @@ def _render_index_detail(name: str, code: str, market: str):
             try:
                 news, _ = get_index_news(name, limit=8)
                 news_summary = _news_to_summary(news)
-                ai_text = _write_stream_safe(summarize_index_news(name, news_summary))
+                ai_text = _stream_ai_text(summarize_index_news(name, news_summary))
                 st.session_state[f"{idx_ai_key}_news"] = {"ai_text": ai_text, "summary": news_summary}
             except Exception as e:
                 st.session_state[f"{idx_ai_key}_news"] = {"ai_text": f"获取失败：{e}", "summary": "无相关新闻"}
@@ -1757,13 +1795,19 @@ def _render_index_detail(name: str, code: str, market: str):
         st.caption("AI 解读")
         if _idx_cross_fresh:
             news_summary = st.session_state.get(f"{idx_ai_key}_news", {}).get("summary", "无相关新闻")
+            # 这里之前失败时会 `return`——是函数级别的return，会直接跳出整个
+            # _render_index_detail，导致下面的"总结性分析"区块整个不渲染
+            # （跟个股详情页 _render_module 不一样：那边每个模块是独立函数
+            # 调用，一个模块内部return只影响它自己，不影响后续模块）。这里
+            # 改成跟上面"资讯解读"模块一样的写法——异常时把错误信息当成
+            # 这次的展示文本存进缓存，不再 return，让后面的区块正常渲染。
             try:
-                ai_text = _write_stream_safe(analyze_index(name, technical_summary, news_summary))
+                ai_text = _stream_ai_text(analyze_index(name, technical_summary, news_summary))
+                st.session_state[f"{idx_ai_key}_cross"] = {"ai_text": ai_text}
             except Exception as e:
-                st.session_state[f"{idx_ai_key}_cross"] = {"ai_text": f"分析失败：{e}"}
-                st.error(f"分析失败：{e}")
-                return
-            st.session_state[f"{idx_ai_key}_cross"] = {"ai_text": ai_text}
+                ai_text = f"分析失败：{e}"
+                st.session_state[f"{idx_ai_key}_cross"] = {"ai_text": ai_text}
+                st.error(ai_text)
         else:
             st.markdown(st.session_state[f"{idx_ai_key}_cross"]["ai_text"])
 
@@ -1776,7 +1820,9 @@ def _render_index_detail(name: str, code: str, market: str):
                     "资讯解读": st.session_state.get(f"{idx_ai_key}_news", {}).get("ai_text", ""),
                     "综合数据分析": st.session_state.get(f"{idx_ai_key}_cross", {}).get("ai_text", ""),
                 }
-                st.session_state[idx_summary_key] = _stream_overall_summary(summarize_overall(name, section_texts))
+                st.session_state[idx_summary_key] = _stream_ai_text(
+                    summarize_overall(name, section_texts), raise_on_error=False,
+                )
             except Exception as e:
                 st.session_state[idx_summary_key] = f"汇总失败：{e}"
         _render_overall_summary(st.session_state[idx_summary_key])
@@ -2069,6 +2115,72 @@ def _show_add_watchlist_dialog(email: str):
                     st.error(f"没查到「{h['query']}」的行情。")
 
 
+@st.dialog("自选股对比")
+def _show_compare_dialog(watched: list):
+    """build_multi_comparison（charts.py）之前写好了但一直没接界面——这里补上
+    唯一缺的入口：勾选几只自选股，起点归一化到100画在一张图上，直接看
+    "这段时间谁涨得多"，跟单只详情页里的"对比大盘"是同一套归一化思路，
+    只是不限定跟大盘比，自选股互相之间也能比。
+
+    生成结果存进 session_state 并记下当时的选股+区间参数——多选框/区间单选
+    在 st.dialog 里改动都会触发这个函数重新整个跑一遍，如果不记参数直接显示
+    上次的图，选项已经变了图却没跟着变，会让人以为点了什么但没生效；比对
+    参数不一致就不显示旧图，逼用户重新点一次"生成对比图"。
+    """
+    if len(watched) < 2:
+        st.caption("自选股至少要有2只才能对比，先去加几只吧。")
+        return
+
+    st.caption("勾选2-6只自选股，起点统一归一化到100，直接对比这段时间谁涨得多。")
+    options = {f"{w['name']}（{w['symbol']}）": w for w in watched}
+    labels = list(options.keys())
+    picked_labels = st.multiselect(
+        "对比标的", labels, default=labels[: min(3, len(labels))], key="_wl_compare_pick",
+    )
+    period_label = st.radio(
+        "区间", ["近1月", "近3月", "近6月", "近1年"], index=1, horizontal=True, key="_wl_compare_period",
+    )
+    period_days = {"近1月": 30, "近3月": 90, "近6月": 180, "近1年": 365}[period_label]
+
+    if len(picked_labels) < 2:
+        st.caption("至少选2只才能对比。")
+        return
+    if len(picked_labels) > 6:
+        st.caption("最多选6只，太多线挤在一起反而看不清。")
+        return
+
+    if st.button("生成对比图", type="primary", use_container_width=True, key="_wl_compare_go"):
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=period_days + 10)).strftime("%Y%m%d")
+
+        def _fetch(label):
+            item = options[label]
+            try:
+                hist = get_stock_history(item["symbol"], start, end, market=item.get("market", "A"))
+            except Exception:
+                hist = None
+            return label, hist
+
+        with st.spinner("加载行情..."):
+            # 每只标的都是一次独立的网络请求，并发起来跟自选股列表
+            # (_render_watchlist_rows) 是同一个道理，不用互相等。
+            with ThreadPoolExecutor(max_workers=min(8, len(picked_labels))) as ex:
+                results = list(ex.map(_fetch, picked_labels))
+
+        hist_by_name = {label: hist for label, hist in results if hist is not None and not hist.empty}
+        if len(hist_by_name) < 2:
+            st.error("至少要有2只成功取到行情才能对比，换一批试试，或者稍后重试。")
+        else:
+            st.session_state["_wl_compare_result"] = {
+                "params": (tuple(picked_labels), period_label),
+                "hist_by_name": hist_by_name,
+            }
+
+    cached = st.session_state.get("_wl_compare_result")
+    if cached and cached["params"] == (tuple(picked_labels), period_label):
+        st.plotly_chart(build_multi_comparison(cached["hist_by_name"]), use_container_width=True)
+
+
 _page_slot = st.empty()
 
 if st.session_state.get("_detail_symbol"):
@@ -2112,14 +2224,46 @@ else:
                 st.caption("每次点开个股「数据分析」时会记录当时价格和方向倾向，"
                            "满7天后自动补上现在的价格做对照。仅供参考，不是投资建议，"
                            "过去的方向一致率不代表未来表现。")
-                due = get_due_for_review(_uemail, min_age_days=7)
-                for item in due:
-                    try:
-                        spot = get_stock_realtime(item["symbol"], market=item.get("market", "A"))
-                        if spot and spot.get("最新价"):
-                            record_review(item["id"], float(spot["最新价"]))
-                    except Exception:
-                        continue
+                # get_due_for_review 带了 limit（默认20条），避免这个列表越攒越多；
+                # st.expander 内部代码不论展没展开每次渲染都会跑，之前是for循环
+                # 串行发请求，跟自选股列表(_render_watchlist_rows)遇到过同样的
+                # "越用越慢"问题，这里改成同样用线程池并发取价。
+                #
+                # 排查页面切换卡顿时实测到的真实数据：这一段本身不在任何
+                # @st.fragment里，是主脚本的一部分——意味着"首页/行情/自选股"
+                # 之间随便切一次分区（st.radio触发的是整页rerun，不是fragment
+                # 局部rerun）都会完整重新跑一遍这段代码。用脚本直接测过
+                # get_due_for_review+并发get_stock_realtime这一整套（3条到期
+                # 记录，其中1条港股）：Futu连接需要重连时单批次实测耗时接近
+                # 10秒，即使不需要重连、单纯是行情源本身（腾讯行情接口）的
+                # 网络往返也有1-2秒量级。而这个"到期补录"操作本质是天级颗粒度
+                # 的需求（min_age_days=7），没有必要在用户每次点一下分区切换
+                # 按钮时都重新触发一遍网络请求——这里加一个基于session_state的
+                # 时间节流，同一个会话内最多每 _REVIEW_RECHECK_INTERVAL 秒
+                # 真正跑一次这段逻辑，中间的重新渲染直接跳过、不发请求，
+                # 不影响"7天后自动补录"的功能本身（真正到期的记录不会因为
+                # 跳过几次检查就再也补不上，下一次节流窗口打开时照样会补）。
+                _REVIEW_RECHECK_INTERVAL = 60
+                _review_checked_at = st.session_state.get("_review_checked_at", 0.0)
+                if time.time() - _review_checked_at > _REVIEW_RECHECK_INTERVAL:
+                    due = get_due_for_review(_uemail, min_age_days=7)
+
+                    def _fetch_review_price(item):
+                        try:
+                            spot = get_stock_realtime(item["symbol"], market=item.get("market", "A"))
+                            return item, spot
+                        except Exception:
+                            return item, None
+
+                    if due:
+                        with ThreadPoolExecutor(max_workers=min(8, len(due))) as ex:
+                            for item, spot in ex.map(_fetch_review_price, due):
+                                if spot and spot.get("最新价"):
+                                    try:
+                                        record_review(item["id"], float(spot["最新价"]))
+                                    except Exception:
+                                        continue
+                    st.session_state["_review_checked_at"] = time.time()
 
                 stats = get_accuracy_stats(_uemail)
                 if stats["总数"] > 0:
@@ -2146,6 +2290,17 @@ else:
                                 st.markdown(f"{_market_label.get(_m, _m)}：{_s['一致率']:.0f}%（{_s['总数']}次）")
                             elif _s["总数"] > 0:
                                 st.markdown(f"{_market_label.get(_m, _m)}：样本太少（{_s['总数']}次），暂不统计")
+
+                    # 之前这里只有上面那一个孤零零的st.metric——一个总体百分比
+                    # 看不出"这个数字最近是在变好还是变差"。get_accuracy_trend
+                    # 按时间顺序用滑动窗口（默认最近5次）算出一串区间一致率，
+                    # 拼成一条趋势线；样本不够时（不到window+1条）trend是空的，
+                    # 直接不画图，不硬凑一两个点出来意义不大。
+                    _trend = get_accuracy_trend(_uemail, window=5)
+                    if _trend:
+                        st.caption("最近5次一滑动窗口的一致率趋势")
+                        _trend_df = pd.DataFrame(_trend).set_index("日期")[["一致率"]]
+                        st.line_chart(_trend_df, height=160)
                 else:
                     st.caption("还没有满7天可回看的记录。")
 
@@ -2190,9 +2345,45 @@ else:
                     "不构成任何投资建议，不保证数据的完整性和及时性，据此操作的风险自负。"
                 )
 
+            with st.expander("数据源状态"):
+                st.caption("只读当前进程已知的连接/熔断状态，不是实时探测——打开这个面板本身不会额外发请求。")
+                _health = get_data_source_health()
+                _futu = _health["futu"]
+                if not _futu["已安装SDK"]:
+                    st.markdown("**Futu OpenD**：未安装 SDK，港股/美股实时数据全部走兜底源（腾讯行情）。")
+                elif _futu["已连接"]:
+                    st.markdown(f"**Futu OpenD**：<span style='color:{UP_COLOR}'>已连接</span>", unsafe_allow_html=True)
+                else:
+                    _last_try = _futu["上次尝试连接"]
+                    _last_try_txt = (
+                        datetime.fromtimestamp(_last_try).strftime("%H:%M:%S") if _last_try else "尚未尝试"
+                    )
+                    _next_interval = _futu["下次重连间隔秒"]
+                    _next_interval_txt = f"，下次重连间隔约{_next_interval:.0f}秒（连续失败会指数退避，最长5分钟）" if _next_interval else ""
+                    st.markdown(
+                        f"**Futu OpenD**：<span style='color:{DOWN_COLOR}'>未连接</span>"
+                        f"（上次尝试 {_last_try_txt}{_next_interval_txt}；"
+                        "港股/美股行情会自动退回腾讯行情兜底，不影响使用）",
+                        unsafe_allow_html=True,
+                    )
+
+                _breakers = _health["熔断记录"]
+                if _breakers:
+                    st.caption("兜底数据源熔断记录（只记录触发过失败的，没列出不代表已验证成功，只是还没失败过）")
+                    for _b in _breakers:
+                        _ts = datetime.fromtimestamp(_b["最近一次失败"]).strftime("%m-%d %H:%M:%S")
+                        _state, _color = ("冷却中", DOWN_COLOR) if _b["冷却中"] else ("已恢复", NEUTRAL_COLOR)
+                        st.markdown(
+                            f"<span style='font-size:0.8rem'>{_b['名称']}："
+                            f"<span style='color:{_color}'>{_state}</span>（最近一次失败 {_ts}）</span>",
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.caption("暂无兜底数据源失败记录。")
+
         st.markdown(
-            """
-            <div class='fa-flex-row' style='background:#e02020;margin:-1rem -1rem 0 -1rem;padding:14px 24px;
+            f"""
+            <div class='fa-flex-row' style='background:{UP_COLOR};margin:-1rem -1rem 0 -1rem;padding:14px 24px;
                         display:flex;align-items:center;justify-content:space-between'>
                 <span style='color:#fff;font-size:1.3rem;font-weight:700;letter-spacing:.02em'>Invest Agent</span>
                 <span style='color:#fff;font-size:0.8rem;opacity:0.85'>行情 · 财务 · 新闻交叉验证</span>
@@ -2248,18 +2439,26 @@ else:
 
             st.markdown(
                 "<style>"
-                "[class*='st-key-wl_search_icon'] button {"
+                "[class*='st-key-wl_search_icon'] button, [class*='st-key-wl_compare_icon'] button {"
                 "  display: flex; align-items: center; justify-content: center;"
                 "  height: 100%; min-height: 44px;"
                 "}"
-                "[class*='st-key-wl_search_icon'] span[data-testid='stIconMaterial'] {"
+                "[class*='st-key-wl_search_icon'] span[data-testid='stIconMaterial'],"
+                "[class*='st-key-wl_compare_icon'] span[data-testid='stIconMaterial'] {"
                 "  font-size: 1.6rem !important;"
                 "}"
                 "</style>",
                 unsafe_allow_html=True,
             )
-            title_col, search_col = st.columns([11, 1], vertical_alignment="center")
-            if search_col.button("", icon=":material/search:", key="wl_search_icon", type="tertiary"):
+            # build_multi_comparison（charts.py）之前写好了没接界面，这里补上入口：
+            # 自选股至少2只时才显示"对比"图标，跟搜索图标并排。
+            if len(watched) >= 2:
+                title_col, compare_col, search_col = st.columns([10, 1, 1], vertical_alignment="center")
+                if compare_col.button("", icon=":material/show_chart:", key="wl_compare_icon", type="tertiary", help="对比自选股走势"):
+                    _show_compare_dialog(watched)
+            else:
+                title_col, search_col = st.columns([11, 1], vertical_alignment="center")
+            if search_col.button("", icon=":material/search:", key="wl_search_icon", type="tertiary", help="添加自选股"):
                 _show_add_watchlist_dialog(_email)
 
             if not watched:

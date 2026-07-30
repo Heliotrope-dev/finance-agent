@@ -34,6 +34,7 @@ requests.Session.request = _session_request_with_timeout
 
 _MIN_INTERVAL_SEC = 3  # 东财接口对高频请求会临时封IP，两次请求之间留够间隔
 _last_call_ts = 0.0
+_throttle_lock = threading.Lock()  # _throttle()是"读-判断-睡眠-写"，非原子，多线程并发时要加锁
 
 _baostock_lock = threading.Lock()  # BaoStock的login/logout是全局会话，并发调用要加锁
 
@@ -48,11 +49,20 @@ _akshare_js_lock = threading.Lock()
 
 
 def _throttle():
+    """全局节流：两次（东财相关）请求之间强制留够_MIN_INTERVAL_SEC秒。
+
+    "读_last_call_ts、判断要不要睡眠、睡眠、写_last_call_ts"这几步不是原子
+    操作——多线程并发调用时，两个线程可能同时读到同一个旧的_last_call_ts、
+    都判断"还没到间隔"直接放行，等于间隔完全没生效。跟同文件里
+    _baostock_lock/_akshare_js_lock/_futu_worker_lock 一样的加锁风格，
+    把整个"读-判断-睡眠-写"过程串行化。
+    """
     global _last_call_ts
-    elapsed = time.time() - _last_call_ts
-    if elapsed < _MIN_INTERVAL_SEC:
-        time.sleep(_MIN_INTERVAL_SEC - elapsed)
-    _last_call_ts = time.time()
+    with _throttle_lock:
+        elapsed = time.time() - _last_call_ts
+        if elapsed < _MIN_INTERVAL_SEC:
+            time.sleep(_MIN_INTERVAL_SEC - elapsed)
+        _last_call_ts = time.time()
 
 
 def _with_retry(fn, retries=2, backoff=5, throttle=True):
@@ -75,6 +85,24 @@ def _with_retry(fn, retries=2, backoff=5, throttle=True):
             if attempt < retries:
                 time.sleep(backoff * (attempt + 1))
     raise last_err
+
+
+# 共享熔断器：几个慢/不稳定的兜底数据源（涨停池、港股全市场兜底、指数快照的
+# EOD兜底）之前各自手写一份"失败就记一个冷却解除时间戳，冷却期内直接跳过"
+# 的逻辑，写法重复了三遍。统一抽成这一套，key 按用途区分
+# （如 "limit_pool_up"/"hk_movers_fallback"/"index_snapshot_A"），
+# 各处只需要在失败分支调用 _breaker_trip(key)、在入口调用 _breaker_open(key)。
+_breaker_state: dict[str, float] = {}
+
+
+def _breaker_open(key: str) -> bool:
+    """熔断是否处于冷却期内（True=还在冷却，应该跳过慢路径直接返回空）。"""
+    return time.time() < _breaker_state.get(key, 0.0)
+
+
+def _breaker_trip(key: str, cooldown: float = 60):
+    """记一次失败，进入cooldown秒的冷却期。"""
+    _breaker_state[key] = time.time() + cooldown
 
 
 def _sina_symbol(symbol: str) -> str:
@@ -260,45 +288,74 @@ _MULTI_INDICES = {
 
 
 def _one_index_snapshot(market: str, name: str, code: str) -> dict | None:
-    """单个指数的快照，给 get_multi_index_snapshot 并发调用用（3个指数不再串行等）。"""
+    """单个指数的快照，给 get_multi_index_snapshot 并发调用用（3个指数不再串行等）。
+
+    EOD兜底分支（BaoStock/新浪指数日线）没有超时/重试包装，外层3秒缓存
+    (get_multi_index_snapshot, ttl=3) 会导致这条慢路径被反复触发——跟
+    get_limit_pool/_get_hk_movers_by_change是同一个问题，这里用同一套
+    共享熔断（_breaker_open/_breaker_trip），按 (market) 维度冷却，
+    一次失败后60秒内直接跳过兜底、返回None，不再反复卡住。
+    """
+    breaker_key = f"index_snapshot_{market}"
     try:
         if market == "A":
             tc_snap = _a_index_snapshot_tencent(code)
             if tc_snap:
                 return {"名称": name, **tc_snap}
+            if _breaker_open(breaker_key):
+                return None
             # 腾讯实时快照失败时的兜底——BaoStock日线是EOD数据，交易时段内会滞后一天。
             # BaoStock 的 login/logout 是全局会话，不是线程安全的，不只这里3个指数
             # 并发跑会撞车——Streamlit给每个用户会话开独立线程，任何两个不同用户
             # 同时触发本文件里任意两处BaoStock调用都可能互相踢掉对方的登录状态，
             # 所以全文件所有 bs.login()/bs.logout() 都统一加了 _baostock_lock。
-            start = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
-            end = datetime.now().strftime("%Y-%m-%d")
-            with _baostock_lock, contextlib.redirect_stdout(io.StringIO()):
-                bs.login()
-                try:
-                    rs = bs.query_history_k_data_plus(code, "date,close", start_date=start, end_date=end, frequency="d")
-                    rows = []
-                    while rs.next():
-                        rows.append(rs.get_row_data())
-                finally:
-                    bs.logout()
+            try:
+                start = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+                end = datetime.now().strftime("%Y-%m-%d")
+                with _baostock_lock, contextlib.redirect_stdout(io.StringIO()):
+                    bs.login()
+                    try:
+                        rs = bs.query_history_k_data_plus(code, "date,close", start_date=start, end_date=end, frequency="d")
+                        rows = []
+                        while rs.next():
+                            rows.append(rs.get_row_data())
+                    finally:
+                        bs.logout()
+            except Exception:
+                _breaker_trip(breaker_key)
+                raise
             if len(rows) < 2:
+                _breaker_trip(breaker_key)
                 return None
             last, prev = float(rows[-1][1]), float(rows[-2][1])
         elif market == "HK":
             futu_snap = _hk_index_snapshot_futu(name)
             if futu_snap:
                 return {"名称": name, **futu_snap}
+            if _breaker_open(breaker_key):
+                return None
             # Futu不可用时的兜底——新浪的指数日线接口是EOD数据，交易时段内会滞后一天。
-            with _akshare_js_lock:
-                df = ak.stock_hk_index_daily_sina(symbol=code)
+            try:
+                with _akshare_js_lock:
+                    df = ak.stock_hk_index_daily_sina(symbol=code)
+            except Exception:
+                _breaker_trip(breaker_key)
+                raise
             if len(df) < 2:
+                _breaker_trip(breaker_key)
                 return None
             last, prev = float(df.iloc[-1]["close"]), float(df.iloc[-2]["close"])
         else:
-            with _akshare_js_lock:
-                df = ak.index_us_stock_sina(symbol=code)
+            if _breaker_open(breaker_key):
+                return None
+            try:
+                with _akshare_js_lock:
+                    df = ak.index_us_stock_sina(symbol=code)
+            except Exception:
+                _breaker_trip(breaker_key)
+                raise
             if len(df) < 2:
+                _breaker_trip(breaker_key)
                 return None
             prev = float(df.iloc[-2]["close"])
             futu_snap = _us_index_snapshot_futu(name, prev)
@@ -414,9 +471,6 @@ def get_southbound_flow() -> dict | None:
     return {"净买额": net_buy, "交易日": south["交易日"].iloc[0] if "交易日" in south.columns else ""}
 
 
-_limit_pool_down_until: dict[str, float] = {}  # kind -> 熔断解除时间戳，见下面用法
-
-
 @st.cache_data(ttl=60, show_spinner=False)
 def get_limit_pool(kind: str = "up", limit: int = 10) -> pd.DataFrame:
     """涨停股池(kind='up')/跌停股池(kind='down')，按涨跌幅排序取前 limit 条。只有A股有这个概念。
@@ -428,16 +482,18 @@ def get_limit_pool(kind: str = "up", limit: int = 10) -> pd.DataFrame:
     到30多秒——3秒缓存下用户随便一次点击触发的rerun都可能命中这个慢
     路径，这正是"网页又卡了"的真正原因。改回60秒（配合下面的熔断逻辑，
     足够安全），只有真正手动切换市场/展开才会偶尔等一下，不会每次交互
-    都可能撞上这个慢接口。
+    都可能撞上这个慢接口。熔断用共享的 _breaker_open/_breaker_trip
+    （见文件靠前的定义），key 是 "limit_pool_{kind}"。
     """
-    if time.time() < _limit_pool_down_until.get(kind, 0.0):
+    breaker_key = f"limit_pool_{kind}"
+    if _breaker_open(breaker_key):
         return pd.DataFrame()
     date_str = datetime.now().strftime("%Y%m%d")
     fn = ak.stock_zt_pool_em if kind == "up" else ak.stock_zt_pool_dtgc_em
     try:
         df = _with_retry(lambda: fn(date=date_str))
     except Exception:
-        _limit_pool_down_until[kind] = time.time() + 60
+        _breaker_trip(breaker_key)
         return pd.DataFrame()
     if df is None or df.empty:
         return pd.DataFrame()
@@ -510,9 +566,6 @@ def _get_hk_hot_rank_raw():
     return df.rename(columns={"股票名称": "名称"})
 
 
-_hk_movers_fallback_down_until = 0.0  # akshare全市场兜底的熔断，见下面用法
-
-
 def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
     """知名港股名单按涨跌幅排序，给"行情"页港股核心股用。
 
@@ -529,7 +582,8 @@ def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
     效果，缓存TTL缩短了（get_hk_famous_movers）。如果不加熔断，一旦Futu
     真的掉线，每次缓存过期都会重新触发这个近30-40秒的慢兜底，而这个函数
     自己跑一次的时间比缓存TTL还长，等于缓存刚写完、下一次读取又发现"过期"
-    了，陷入几乎不间断连续触发慢路径的死循环。加上60秒冷却：兜底刚失败过
+    了，陷入几乎不间断连续触发慢路径的死循环。加上60秒冷却（用共享的
+    _breaker_open/_breaker_trip，key="hk_movers_fallback"）：兜底刚失败过
     就在冷却期内直接返回空，不再反复尝试，让页面至少能正常展示"暂时获取
     不到"而不是一直卡着。
     """
@@ -545,8 +599,8 @@ def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
             snap = snap.sort_values("涨跌幅", ascending=False).head(limit)
             return snap[["代码", "名称", "最新价", "涨跌幅", "涨跌额"]].reset_index(drop=True)
 
-    global _hk_movers_fallback_down_until
-    if time.time() < _hk_movers_fallback_down_until:
+    breaker_key = "hk_movers_fallback"
+    if _breaker_open(breaker_key):
         return pd.DataFrame()
 
     # Futu没连上时的兜底：老的全市场快照方案，慢但能用
@@ -554,10 +608,10 @@ def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
         with _akshare_js_lock:
             df = _with_retry(ak.stock_hk_spot, retries=1, throttle=False)  # 新浪，不是东财
     except Exception:
-        _hk_movers_fallback_down_until = time.time() + 60
+        _breaker_trip(breaker_key)
         return pd.DataFrame()
     if df is None or df.empty or "涨跌幅" not in df.columns:
-        _hk_movers_fallback_down_until = time.time() + 60
+        _breaker_trip(breaker_key)
         return pd.DataFrame()
     df = df[df["代码"].isin(_HK_FAMOUS_CODES)]
     df = df.sort_values("涨跌幅", ascending=False).head(limit)
@@ -1077,6 +1131,11 @@ _futu_queue = None
 _futu_worker_lock = threading.Lock()
 _futu_worker_started = False
 _futu_last_connect_attempt = 0.0
+_futu_fail_count = 0  # 连续失败计数——健康检查用，见 _futu_worker_loop 里的说明
+_FUTU_MAX_CONSEC_FAILS = 3  # 连续失败达到这个数就判定连接已失效，主动断开重连
+_futu_reconnect_fail_streak = 0  # 连续"重连尝试本身"失败的次数（不是连接建立后的调用失败），见下面退避说明
+_FUTU_RECONNECT_BASE_COOLDOWN = 30  # 重连间隔起点（秒）
+_FUTU_RECONNECT_MAX_COOLDOWN = 300  # 重连间隔封顶（秒）——指数退避不能无限拉长
 
 
 def _futu_worker_loop():
@@ -1089,26 +1148,68 @@ def _futu_worker_loop():
     _run_with_timeout 再包一层去调用 ctx 的方法，等于线程还换了不止一次）。
     现在改成一个进程只有这一个线程碰 ctx：所有请求排队交给它做，调用方
     通过独立的 Queue 拿超时保护的结果，超时不影响这个线程继续处理后面的请求。
+
+    健康检查：之前只有 _futu_ctx is None 时才会尝试重连——一旦连接建立后
+    在某个时刻失效（OpenD重启/网络抖动），fn(_futu_ctx) 会持续抛异常，但
+    异常被下面的 try/except 吞掉后 _futu_ctx 从不会被置回 None，坏连接就
+    会被无限复用、永远不会触发重连。现在加一个连续失败计数：ctx 存在的
+    情况下，fn(_futu_ctx) 连续失败达到 _FUTU_MAX_CONSEC_FAILS 次，就主动
+    close 掉这个 ctx 并置为 None，让下一次请求走重连分支；只要有一次成功
+    就把计数器清零。
+
+    排查页面卡顿时额外发现的问题（在没有真实OpenD的环境里实测到的）：
+    futu-api 这个SDK自己的 OpenQuoteContext 一旦被构造出来，内部会起一个
+    自己的后台线程去做连接维护——即使这次 get_global_state() 判定失败、
+    我们这边把 candidate.close() 掉，SDK内部那个线程实测并不会跟着停，
+    会以自己的节奏（实测约6秒一次）持续尝试连接，一直到进程退出。也就是说
+    "固定30秒重连一次"这个节流只控制了"我们这边多久创建一次新的
+    OpenQuoteContext"，每创建一次失败的candidate就会留下一个SDK自己的
+    僵尸重连线程——OpenD长时间断连的情况下，这些僵尸线程会越攒越多，
+    每个都在后台悄悄发真实的socket连接尝试，长期运行的服务器进程上这是
+    一个会越滚越大的开销来源。这里没法从我们的代码里去"关掉"SDK内部那个
+    线程（那是第三方库内部实现，关闭candidate并不能保证连带关掉它），
+    唯一能做、也确实有把握做对的缓解手段：连续重连失败时拉长下一次重连
+    尝试的间隔（指数退避，30秒翻倍封顶到5分钟）——OpenD长时间没恢复时，
+    降低"我们这边又造出一个新candidate、又留下一个新僵尸线程"的频率，
+    但不能消除已经留下的僵尸线程，只能减缓新增速度。
     """
-    global _futu_ctx, _futu_last_connect_attempt
+    global _futu_ctx, _futu_last_connect_attempt, _futu_fail_count, _futu_reconnect_fail_streak
     while True:
         fn, out_q = _futu_queue.get()
         if _futu_ctx is None:
             now = time.time()
-            if now - _futu_last_connect_attempt >= 30:
+            _reconnect_cooldown = min(
+                _FUTU_RECONNECT_BASE_COOLDOWN * (2 ** _futu_reconnect_fail_streak), _FUTU_RECONNECT_MAX_COOLDOWN
+            )
+            if now - _futu_last_connect_attempt >= _reconnect_cooldown:
                 _futu_last_connect_attempt = now
                 try:
                     candidate = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
                     ret, _ = candidate.get_global_state()
                     if ret == ft.RET_OK:
                         _futu_ctx = candidate
+                        _futu_fail_count = 0
+                        _futu_reconnect_fail_streak = 0
                     else:
                         candidate.close()
+                        _futu_reconnect_fail_streak += 1
                 except Exception:
-                    pass
-        try:
-            result = fn(_futu_ctx) if _futu_ctx is not None else None
-        except Exception:
+                    _futu_reconnect_fail_streak += 1
+        if _futu_ctx is not None:
+            try:
+                result = fn(_futu_ctx)
+                _futu_fail_count = 0
+            except Exception:
+                result = None
+                _futu_fail_count += 1
+                if _futu_fail_count >= _FUTU_MAX_CONSEC_FAILS:
+                    try:
+                        _futu_ctx.close()
+                    except Exception:
+                        pass
+                    _futu_ctx = None
+                    _futu_fail_count = 0
+        else:
             result = None
         out_q.put(result)
 
@@ -1141,6 +1242,55 @@ def _futu_call(fn, timeout: float = 8, default=None):
     except _queue.Empty:
         result = None
     return default if result is None else result
+
+
+_BREAKER_DISPLAY_NAMES = {
+    "index_snapshot_A": "A股指数快照兜底",
+    "index_snapshot_HK": "港股指数快照兜底",
+    "index_snapshot_US": "美股指数快照兜底",
+    "limit_pool_up": "涨停池",
+    "limit_pool_down": "跌停池",
+    "hk_movers_fallback": "港股行情兜底",
+}
+
+
+def get_data_source_health() -> dict:
+    """给侧边栏"数据源健康状态"小面板用的轻量快照——只读现有的连接/熔断状态，
+    不主动发起任何新的探测请求（看一眼状态面板不应该反而多打一次网络请求）。
+
+    - Futu：读 _futu_worker_loop 本来就在维护的几个全局变量（_futu_ctx 是否
+      为 None、连续失败次数、上次尝试连接的时间戳），这是唯一权威的连接状态，
+      不重新连一次去"验证"。
+    - 兜底数据源熔断情况：读共享熔断器 _breaker_state。这个字典只在真正触发过
+      兜底失败时才会写入（走通正常路径根本不会碰它），能查到记录只能读作
+      "曾经失败过、可能还在冷却"，查不到不代表"已确认成功过"——这里如实
+      按这个口径展示，不虚构一个"成功时间"出来。
+    """
+    futu_status = {
+        "已安装SDK": _FUTU_SDK_AVAILABLE,
+        "已连接": _futu_ctx is not None,
+        "连续失败次数": _futu_fail_count,
+        "上次尝试连接": _futu_last_connect_attempt or None,
+        # 重连退避：连续重连失败次数越多，下次重连间隔越长（30秒翻倍封顶
+        # 5分钟），见_futu_worker_loop里的说明——这里如实展示当前的等待间隔，
+        # 而不是让用户以为"没连上"就该立刻重试。
+        "下次重连间隔秒": (
+            min(_FUTU_RECONNECT_BASE_COOLDOWN * (2 ** _futu_reconnect_fail_streak), _FUTU_RECONNECT_MAX_COOLDOWN)
+            if _futu_ctx is None else None
+        ),
+    }
+
+    now = time.time()
+    breakers = []
+    for key, trip_until in sorted(_breaker_state.items()):
+        cooling = now < trip_until
+        breakers.append({
+            "key": key,
+            "名称": _BREAKER_DISPLAY_NAMES.get(key, key),
+            "冷却中": cooling,
+            "最近一次失败": trip_until - 60,  # 目前所有调用点的cooldown都是默认60秒
+        })
+    return {"futu": futu_status, "熔断记录": breakers}
 
 
 def get_stock_realtime_futu(symbol: str, market: str) -> dict:
