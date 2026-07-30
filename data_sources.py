@@ -6,6 +6,7 @@ import queue as _queue
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 import akshare as ak
@@ -1643,51 +1644,53 @@ def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
     return result[["日期", "新闻标题", "分类", "url"]]
 
 
-_GLOBAL_INDEX_CODES = {
-    "日经225": "N225", "富时100": "FTSE", "德国DAX": "GDAXI",
-    "韩国KOSPI": "KS11", "印度SENSEX": "SENSEX",
+_GLOBAL_INDEX_YAHOO_SYMBOLS = {
+    "日经225": "%5EN225", "富时100": "%5EFTSE", "德国DAX": "%5EGDAXI",
+    "韩国KOSPI": "%5EKS11", "印度SENSEX": "%5EBSESN",
 }
-_global_indices_down_until = 0.0  # 熔断解除时间戳，见下面用法
+
+
+def _yahoo_index_snapshot(symbol: str) -> dict | None:
+    try:
+        r = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d",
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+            timeout=8,
+        )
+        meta = r.json()["chart"]["result"][0]["meta"]
+        last = float(meta["regularMarketPrice"])
+        prev = float(meta.get("previousClose") or meta.get("chartPreviousClose"))
+    except Exception:
+        return None
+    if not prev:
+        return None
+    change = last - prev
+    return {"最新": last, "涨跌": change, "涨跌幅": change / prev * 100}
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_global_indices() -> dict[str, dict]:
     """首页世界地图用的几个国际指数（日经225/富时100/德国DAX/韩国KOSPI/
-    印度SENSEX）——东财"全球指数"接口(index_global_spot_em)一次性覆盖，
-    不用逐个指数单独找数据源。返回 {指数名: {"最新":.., "涨跌":.., "涨跌幅":..}}，
-    查不到的指数不出现在返回的dict里（调用方按key存在与否判断，不拿假数据凑数）。
+    印度SENSEX）——查过东财"全球指数"接口(index_global_spot_em)，实测这次
+    开发时连续多次失败（JSONDecodeError，大概率被限流跳过去了一个不是
+    JSON的响应体，跟涨跌停股池同一个push2.eastmoney.com域名下的问题）；
+    也试过Twelve Data的免费API key，这5个国际指数在免费层直接返回"index
+    unavailable"（付费套餐才能用）。改用Yahoo Finance的公开chart接口
+    （不需要key/信用卡，只要带一个像样的User-Agent），实测这5个指数
+    数据都能查到、数值跟东财那次能查到时的结果一致，目前看比东财这条
+    线稳定得多。
 
-    这个接口走的也是push2.eastmoney.com（跟涨跌停股池同一个域名下的东财
-    接口，之前那次踩过它偶尔卡住15秒超时的坑），实测这次开发时也遇到过
-    连续多次JSONDecodeError（拿到的不是合法JSON，大概率是被限流跳过去了
-    一个不是JSON的响应体）——所以这里跟涨跌停股池一样加熔断：失败一次后
-    60秒内不再重试，直接返回空dict，调用方（地图）对应的图标就不显示，
-    不会因为反复重试拖慢首页。
+    这个接口不支持一次查多个symbol（只能一个个查），5个指数用线程池并发
+    查，避免顺序查5次网络请求的延迟叠加。单个查询失败不影响其它——返回
+    {指数名: {...}}，查不到的指数不出现在dict里，调用方按key存在与否
+    判断，不拿假数据凑数。
     """
-    global _global_indices_down_until
-    if time.time() < _global_indices_down_until:
-        return {}
-    try:
-        df = _with_retry(ak.index_global_spot_em)
-    except Exception:
-        _global_indices_down_until = time.time() + 60
-        return {}
-    if df is None or df.empty:
-        _global_indices_down_until = time.time() + 60
-        return {}
-    result = {}
-    for name, code in _GLOBAL_INDEX_CODES.items():
-        row = df[df["代码"] == code]
-        if row.empty:
-            continue
-        r = row.iloc[0]
-        try:
-            result[name] = {
-                "最新": float(r["最新价"]), "涨跌": float(r["涨跌额"]), "涨跌幅": float(r["涨跌幅"]),
-            }
-        except (ValueError, TypeError):
-            continue
-    return result
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        results = list(ex.map(
+            lambda kv: (kv[0], _yahoo_index_snapshot(kv[1])),
+            _GLOBAL_INDEX_YAHOO_SYMBOLS.items(),
+        ))
+    return {name: snap for name, snap in results if snap is not None}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
