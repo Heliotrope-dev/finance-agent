@@ -1508,26 +1508,35 @@ def _us_index_snapshot_futu(name: str, index_prev_close: float) -> dict | None:
     return {"最新": last, "涨跌": last - index_prev_close, "涨跌幅": pct}
 
 
+_sina_realtime_down_until = 0.0  # 新浪实时行情熔断——见get_stock_realtime里的用法
+
+
 @st.cache_data(ttl=3, show_spinner=False)
 def get_stock_realtime(symbol: str, market: str = "A") -> dict:
-    """真正的实时行情，港股/美股优先走本地 Futu OpenD 网关，没有就退回新浪。
+    """真正的实时行情，港股/美股优先走本地 Futu OpenD 网关，没有就退回新浪，
+    新浪也不行再退腾讯（qt.gtimg.cn）。
 
     之前这里是从日线历史数据里取最后一行——那是"最近收盘价"，交易时段内
-    跟用户自己在别的地方看到的实时价格对不上。这个接口是新浪的轻量单股查询，
+    跟用户自己在别的地方看到的实时价格对不上。这个接口是轻量单股查询，
     只查一只股票、不拉全市场。缓存 TTL 跟详情页/自选股的实时价格区块
     （st.fragment 每 3 秒自动刷新）对齐——TTL 比刷新周期长的话，fragment
     每次"刷新"其实只是重画同一份缓存值，数字并不会真的跳动，用户反馈过
     "跳动周期"要缩短到 3 秒，这里就必须让缓存跟着一起缩短，否则前端刷新
     快了、数据源却还是老的，等于白刷。
 
-    A股/港股/美股三个市场 hq.sinajs.cn 返回的字段顺序完全不一样，各写各的解析。
+    加腾讯兜底的原因：把刷新周期从15秒缩到3秒后，新浪/东财这两个免费接口的
+    请求量直接翻了5倍，实测被限流/拒绝了（hq.sinajs.cn 连不上，Errno 101
+    Network unreachable，东财push2接口也一样超时）——用户反馈"invest agent
+    加载变慢"，排查发现是这个。新浪超时不再重试（timeout缩到5秒、retries=0，
+    失败就立刻掉腾讯，不在一个已经不通的源上反复等），腾讯这条线实测当前
+    稳定可用。两边字段格式完全不同，各写各的解析。
     """
 
     futu_data = get_stock_realtime_futu(symbol, market)
     if futu_data:
         return futu_data
 
-    def _fetch():
+    def _sina_fetch():
         if market == "HK":
             code = f"rt_hk{symbol}"
         elif market == "US":
@@ -1538,7 +1547,7 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
         r = requests.get(
             f"https://hq.sinajs.cn/list={code}",
             headers={"Referer": "https://finance.sina.com.cn"},
-            timeout=10,
+            timeout=5,
         )
         text = r.content.decode("gbk", errors="ignore")
         raw = text.split('"')[1]
@@ -1584,7 +1593,47 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
             "更新时间": f"{fields[30]} {fields[31]}",
         }
 
-    return _with_retry(_fetch, retries=1, backoff=2, throttle=False)  # 新浪，不是东财
+    def _tencent_fetch():
+        if market == "HK":
+            code = f"hk{symbol}"
+        elif market == "US":
+            code = f"us{symbol.upper()}"
+        else:
+            code = f"{_sina_symbol(symbol)}{symbol}"
+
+        r = requests.get(f"https://qt.gtimg.cn/q={code}", timeout=8)
+        text = r.content.decode("gbk", errors="ignore")
+        raw = text.split('"')[1]
+        fields = raw.split("~")
+        if len(fields) < 35 or not fields[3]:
+            return {}
+        # 成交额单位A股是"万元"，港股/美股这个字段本身就是原始货币单位，
+        # 只有A股需要乘10000（跟field[35]里拼进去的精确成交额反推验证过）。
+        turnover = float(fields[37]) if fields[37] else None
+        if turnover is not None and market == "A":
+            turnover *= 10000
+        return {
+            "代码": symbol, "名称": fields[1],
+            "最新价": float(fields[3]), "今开": float(fields[5]),
+            "昨收": float(fields[4]), "最高": float(fields[33]), "最低": float(fields[34]),
+            "成交额": turnover,
+            "更新时间": fields[30],
+        }
+
+    global _sina_realtime_down_until
+    # 熔断：新浪刚失败过（60秒内）就不再浪费时间重试它，直接走腾讯——3秒
+    # 刷新周期下，每次都先等新浪超时再掉腾讯，等于一直在给已经拒绝咱们的
+    # 新浪加请求量，可能越限流越严重；跳过它反而给它一个恢复的机会。
+    if time.time() < _sina_realtime_down_until:
+        return _with_retry(_tencent_fetch, retries=1, backoff=2, throttle=False)
+
+    try:
+        result = _with_retry(_sina_fetch, retries=0, throttle=False)
+        if result:
+            return result
+    except Exception:
+        _sina_realtime_down_until = time.time() + 60
+    return _with_retry(_tencent_fetch, retries=1, backoff=2, throttle=False)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
