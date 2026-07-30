@@ -980,14 +980,17 @@ def _render_index_top_movers(market: str, index_name: str = ""):
                 st.rerun()
 
 
-@st.fragment(run_every=3)
+@st.fragment
 def _render_index_snapshot(mkt_code: str):
     """"行情"tab顶部的指数快照卡片。做成fragment的原因见_render_a_share_overview
     开头的注释——本质是同一个问题：这几个区块以前全挤在同一段代码里，点其中
     任何一个的交互按钮都会连带其余区块一起重新拉一遍数据。
 
-    run_every=3 + 涨跌闪烁，跟涨跌停股池/核心股列表统一（get_multi_index_
-    snapshot的缓存TTL已经是3秒，数据本身能跟上）。
+    之前试过给这个fragment加run_every=3做涨跌闪烁，结果导致"从行情切到
+    自选股"出现页面残留——猜测是这个fragment自己的自动刷新定时器切换页面
+    后仍在后台继续触发，把已经不该存在的旧内容重新塞回DOM里。残留问题
+    优先级更高，撤回run_every，闪烁效果的代码保留（不会触发，也无副作用），
+    等找到不会导致残留的方案再说。
     """
     try:
         idx_list = get_multi_index_snapshot(mkt_code)
@@ -1045,7 +1048,7 @@ def _render_index_snapshot(mkt_code: str):
             )
 
 
-@st.fragment(run_every=3)
+@st.fragment
 def _render_a_share_overview():
     """A股大盘统计+涨停/跌停股池。之前这几块和指数快照、热门板块全部挤在
     "行情"tab同一段代码里——点"显示更多（前30）"这一个按钮，会触发整个
@@ -1054,10 +1057,10 @@ def _render_a_share_overview():
     这是页面交互感觉卡顿的主要原因。拆成独立fragment后，点这个按钮只会
     重新跑这一个区块。
 
-    加run_every=3是为了让_render_stock_movers_cards里价格变化的红绿闪烁
-    效果在这里也能跟自选股一样跳动起来——底下的get_limit_pool等都是批量
-    接口带自己的缓存TTL，3秒轮询大部分时候直接命中缓存，不会因此加重
-    请求负担，只有缓存真正过期、数据真的变了才会触发闪烁。
+    之前试过加run_every=3做涨跌闪烁，结果导致"从行情切到自选股"出现页面
+    残留（这几个fragment自己的定时器猜测在切页后仍在后台触发，把旧内容
+    重新塞回DOM）。残留问题优先级更高，撤回run_every，闪烁效果的代码
+    保留（不会触发，也无副作用）。
     """
     try:
         breadth = get_market_breadth()
@@ -1098,10 +1101,10 @@ def _render_a_share_overview():
             st.rerun()
 
 
-@st.fragment(run_every=3)
+@st.fragment
 def _render_hk_overview():
     """港股南向资金+核心股，独立fragment，原因同_render_a_share_overview
-    （含run_every=3的原因）。"""
+    （包括撤回run_every=3的原因——切到自选股页面残留）。"""
     try:
         south = get_southbound_flow()
     except Exception:
@@ -1125,10 +1128,10 @@ def _render_hk_overview():
         st.caption(f"获取失败：{e}")
 
 
-@st.fragment(run_every=3)
+@st.fragment
 def _render_us_overview():
     """美股核心股，独立fragment，原因同_render_a_share_overview
-    （含run_every=3的原因）。"""
+    （包括撤回run_every=3的原因——切到自选股页面残留）。"""
     st.markdown("**美股核心股**")
     try:
         us_movers = get_us_famous_movers(15)

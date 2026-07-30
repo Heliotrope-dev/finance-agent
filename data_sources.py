@@ -413,19 +413,29 @@ def get_southbound_flow() -> dict | None:
     return {"净买额": net_buy, "交易日": south["交易日"].iloc[0] if "交易日" in south.columns else ""}
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+_limit_pool_down_until: dict[str, float] = {}  # kind -> 熔断解除时间戳，见下面用法
+
+
+@st.cache_data(ttl=3, show_spinner=False)
 def get_limit_pool(kind: str = "up", limit: int = 10) -> pd.DataFrame:
     """涨停股池(kind='up')/跌停股池(kind='down')，按涨跌幅排序取前 limit 条。只有A股有这个概念。
 
-    TTL从300秒降到20秒——涨跌停股池所在的_render_a_share_overview现在是
-    run_every=3自动刷新，配合价格闪烁效果需要数据能实际更新，但这里走的是
-    东财接口（_with_retry默认throttle=True，走全局限流），不敢跟港股/美股
-    那两个Futu/腾讯接口一样直接对齐到3秒——20秒是"闪烁能看出来"和"不给
-    东财那条本来就敏感的限流线加太多压力"之间的折中。
+    跟港股核心股(get_hk_famous_movers)同一套思路：TTL对齐到3秒配合闪烁
+    效果，但东财接口本身不稳定，_with_retry默认retries=2/backoff=5，失败
+    一次最多要扛大约15秒（2次重试+5/10秒退避）。3秒缓存下如果东财恰好在
+    抽风，几乎每次缓存过期都会重新扛这15秒，等于连续不断地重试——所以
+    跟港股那边一样加60秒熔断：失败一次后60秒内直接返回空，不再反复重试，
+    避免加重本来就敏感的东财限流线的压力。
     """
+    if time.time() < _limit_pool_down_until.get(kind, 0.0):
+        return pd.DataFrame()
     date_str = datetime.now().strftime("%Y%m%d")
     fn = ak.stock_zt_pool_em if kind == "up" else ak.stock_zt_pool_dtgc_em
-    df = _with_retry(lambda: fn(date=date_str))
+    try:
+        df = _with_retry(lambda: fn(date=date_str))
+    except Exception:
+        _limit_pool_down_until[kind] = time.time() + 60
+        return pd.DataFrame()
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.sort_values("涨跌幅", ascending=(kind != "up")).head(limit)
