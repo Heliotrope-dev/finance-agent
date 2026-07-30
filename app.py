@@ -41,6 +41,7 @@ from data_sources import (
     get_southbound_flow,
     get_us_famous_movers,
     get_hot_sectors,
+    get_sector_constituents,
     get_hstech_constituents,
     resolve_symbol_by_name,
     detect_symbol_candidates,
@@ -352,6 +353,11 @@ if st.query_params.get("open_index_code"):
     st.session_state["_index_detail_code"] = st.query_params["open_index_code"]
     st.session_state["_index_detail_market"] = st.query_params.get("open_index_market", "A")
     st.session_state["_index_detail_name"] = st.query_params.get("open_index_name", "")
+    st.query_params.clear()
+    st.rerun()
+if st.query_params.get("open_sector"):
+    st.session_state["_sector_detail_name"] = st.query_params["open_sector"]
+    st.session_state["_sector_detail_market"] = st.query_params.get("open_sector_market", "A")
     st.query_params.clear()
     st.rerun()
 
@@ -1234,8 +1240,10 @@ def _render_us_overview():
 @st.fragment
 def _render_hot_sectors(market: str):
     """"热门板块"——按热度（成交额代理）排序的行业板块，3×3宫格展示前9名，
-    "更多板块"展开到前30。板块在这个app里不是可跳转详情的实体，纯展示卡片，
-    不带链接，跟涨跌停池/核心股那种可点击卡片是两回事。
+    "更多板块"展开到前30。点击板块卡片会跳到该板块的成分股列表（复用
+    get_sector_constituents + _render_stock_movers_cards），成分股本身
+    再点进去就是已有的个股详情页（走势+AI分析）——板块这一层不需要单独
+    造一套K线/AI分析，成分股列表是已有能力的自然延伸。
 
     做成fragment：点"更多板块/收起"之前会带动整个"行情"tab（指数快照、
     涨停跌停池等）一起重新拉一遍数据，明明只是想展开这一个板块列表。
@@ -1268,12 +1276,22 @@ def _render_hot_sectors(market: str):
                 continue
             row = shown.iloc[idx]
             s_color = UP_COLOR if row["涨跌幅"] >= 0 else DOWN_COLOR
+            href = (
+                f"?open_sector={urllib.parse.quote(str(row['板块']))}"
+                f"&open_sector_market={urllib.parse.quote(market)}"
+                f"{_auth_qs()}"
+            )
             with col:
                 with st.container(border=True):
                     st.markdown(
-                        f"<div style='font-weight:600;color:var(--fa-text)'>{row['板块']}</div>"
+                        "<style>a.sector-card-link, a.sector-card-link:link, a.sector-card-link:visited {"
+                        "text-decoration:none !important; color:inherit !important; display:block; cursor:pointer;"
+                        "}</style>"
+                        f"<a class='sector-card-link' href='{href}' target='_self'>"
+                        f"<div style='font-weight:600;color:var(--fa-text)'>{_esc(str(row['板块']))}</div>"
                         f"<div style='color:{s_color};font-weight:700;font-size:1.1rem'>{row['涨跌幅']:+.2f}%</div>"
-                        f"<div style='color:var(--fa-muted);font-size:0.78rem'>热度第{idx + 1}名</div>",
+                        f"<div style='color:var(--fa-muted);font-size:0.78rem'>热度第{idx + 1}名</div>"
+                        f"</a>",
                         unsafe_allow_html=True,
                     )
 
@@ -1286,6 +1304,46 @@ def _render_hot_sectors(market: str):
             if st.button("收起", key=f"_sectors_collapse_btn_{market}"):
                 st.session_state[expand_key] = False
                 st.rerun()
+
+
+def _render_sector_detail(name: str, market: str):
+    """板块详情页——只展示成分股列表，复用_render_stock_movers_cards，每只
+    成分股点进去就是已有的个股详情页（走势+AI分析）。板块本身不需要单独的
+    K线/AI分析，这里不重新造轮子。
+    """
+    st.markdown(
+        "<style>[class*='st-key-sector_back_'] button p { font-size: 1.5rem !important; font-weight: 700; }</style>",
+        unsafe_allow_html=True,
+    )
+    if st.button("←", key=f"sector_back_{name}_{market}", type="tertiary", help="返回行情"):
+        for k in ("_sector_detail_name", "_sector_detail_market"):
+            st.session_state.pop(k, None)
+        st.session_state["_active_section"] = "行情"
+        st.rerun()
+
+    st.markdown(
+        f"""
+        <div style='background:{UP_COLOR};margin:-1rem -1rem 0 -1rem;padding:14px 24px'>
+            <div style='color:#fff;font-size:1.2rem;font-weight:700'>{_esc(name)}</div>
+            <div style='color:#fff;font-size:0.85rem;opacity:0.85'>{market}股 · 行业板块</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.divider()
+    st.caption("成分股按涨跌幅排序，点击可查看该股票的走势图和 AI 分析。")
+
+    try:
+        cons = get_sector_constituents(market, name, limit=30)
+    except Exception:
+        cons = pd.DataFrame()
+    if cons.empty:
+        if market == "A":
+            st.caption("暂时获取不到这个板块的成分股——东财的板块成分股接口偶尔不稳定，或者这个板块名称跟东财自己的分类对不上，稍后再试。")
+        else:
+            st.caption("暂时获取不到这个板块的成分股，可能是 Futu 连接暂时不可用，稍后再试。")
+        return
+    _render_stock_movers_cards(cons, market)
 
 
 _HOME_MAP_MARKERS = [
@@ -1891,11 +1949,16 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         + "  display: block; cursor: pointer;"
         + "}"
         + "a.wl-card-link:hover { opacity: 0.85; }"
-        # 删除键用type="tertiary"去掉了方框，但图标本身默认偏小，用户反馈要
-        # 大一点、位置要跟卡片内容对齐。垂直对齐交给st.columns自己的
-        # vertical_alignment="center"处理（原生机制，比猜CSS高度靠谱），
-        # 这里只负责放大字号，用 key 生成的 st-key-* class精确定位。
+        # 删除键用type="tertiary"，图标本身默认偏小，用户反馈要大一点、位置要
+        # 跟卡片内容对齐。垂直对齐交给st.columns自己的vertical_alignment="center"
+        # 处理（原生机制，比猜CSS高度靠谱）。默认按钮是圆角矩形/胶囊形，用户
+        # 反馈这个和"对比/搜索"图标按钮一样改成正圆——固定等宽高+50%圆角。
         + "[class*='st-key-wl_del_'] button p { font-size: 1.5rem !important; font-weight: 700; margin: 0; }"
+        + "[class*='st-key-wl_del_'] button {"
+        + "  height: 36px; min-height: 36px; width: 36px; min-width: 36px;"
+        + "  padding: 0; border-radius: 50% !important;"
+        + "  display: flex; align-items: center; justify-content: center;"
+        + "}"
         + "</style>",
         unsafe_allow_html=True,
     )
@@ -2254,6 +2317,12 @@ elif st.session_state.get("_index_detail_code"):
             st.session_state["_index_detail_code"],
             st.session_state.get("_index_detail_market", "A"),
         )
+elif st.session_state.get("_sector_detail_name"):
+    with _page_slot.container():
+        _render_sector_detail(
+            st.session_state["_sector_detail_name"],
+            st.session_state.get("_sector_detail_market", "A"),
+        )
 else:
     with _page_slot.container():
         with st.sidebar:
@@ -2519,7 +2588,8 @@ else:
                 "<style>"
                 "[class*='st-key-wl_search_icon'] button, [class*='st-key-wl_compare_icon'] button {"
                 "  display: flex; align-items: center; justify-content: center;"
-                "  height: 100%; min-height: 44px;"
+                "  height: 44px; min-height: 44px; width: 44px; min-width: 44px;"
+                "  padding: 0; border-radius: 50% !important;"
                 "}"
                 "[class*='st-key-wl_search_icon'] span[data-testid='stIconMaterial'],"
                 "[class*='st-key-wl_compare_icon'] span[data-testid='stIconMaterial'] {"

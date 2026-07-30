@@ -919,6 +919,76 @@ def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
     return snap[["板块", "涨跌幅", "热度"]].reset_index(drop=True)
 
 
+@st.cache_data(ttl=180, show_spinner=False)
+def get_sector_constituents(market: str, sector_name: str, limit: int = 30) -> pd.DataFrame:
+    """"热门板块"点进去的成分股列表——返回列固定为[代码,名称,最新价,涨跌幅]，
+    跟_render_stock_movers_cards期望的格式一致，成分股本身直接复用已有的
+    个股详情页（走势+AI分析），不用给"板块"这个概念单独再造一套。
+
+    A股：get_hot_sectors用的是同花顺板块名(stock_board_industry_summary_ths)，
+    但同花顺没有对应的"成分股"接口(akshare里只有_em版本)，这里改用东财的
+    stock_board_industry_cons_em——实测过东财的板块类接口这几天连续失败过
+    (见get_hot_sectors的说明)，且东财自己的板块命名和同花顺不是同一套分类，
+    传同花顺的板块名过去有一定概率查不到(接口内部按名称精确匹配东财自己的
+    板块列表，查不到会抛KeyError/IndexError，不是网络异常)。两种失败都用
+    try/except统一按“获取不到”处理，加熔断避免频繁重试拖慢页面，不假装
+    这条路径和港股/美股一样可靠。
+
+    港股/美股：Futu的板块体系是自洽的一整套(get_plate_list查到的板块名
+    就是get_hot_sectors展示给用户看的那个名字)，plate_name精确匹配后
+    用get_plate_stock拿成分股代码/名称，再用get_market_snapshot批量查价格，
+    三步都在Futu内部，不存在跨数据源的分类口径不一致问题，可靠性明显更高。
+    """
+    if market == "A":
+        breaker_key = "sector_cons_A"
+        if _breaker_open(breaker_key):
+            return pd.DataFrame()
+        try:
+            with _akshare_js_lock:
+                df = _with_retry(
+                    lambda: ak.stock_board_industry_cons_em(symbol=sector_name), retries=1, backoff=2, throttle=True,
+                )
+        except Exception:
+            _breaker_trip(breaker_key)
+            return pd.DataFrame()
+        if df is None or df.empty or "代码" not in df.columns:
+            _breaker_trip(breaker_key)
+            return pd.DataFrame()
+        if "成交额" in df.columns:
+            df = df.sort_values("成交额", ascending=False)
+        df = df.head(limit)
+        keep = [c for c in ("代码", "名称", "最新价", "涨跌幅") if c in df.columns]
+        return df[keep].reset_index(drop=True)
+
+    # HK/US：板块列表 -> 成分股代码 -> 价格快照，三步都走Futu
+    ret, plates = _futu_call(lambda ctx: ctx.get_plate_list(market, ft.Plate.INDUSTRY), default=(None, None))
+    if ret != ft.RET_OK or plates is None or plates.empty:
+        return pd.DataFrame()
+    match = plates[plates["plate_name"] == sector_name]
+    if match.empty:
+        return pd.DataFrame()
+    plate_code = match["code"].iloc[0]
+
+    ret2, cons = _futu_call(lambda ctx: ctx.get_plate_stock(plate_code), default=(None, None))
+    if ret2 != ft.RET_OK or cons is None or cons.empty:
+        return pd.DataFrame()
+    codes = cons["code"].tolist()
+
+    ret3, snap = _futu_call(lambda ctx: ctx.get_market_snapshot(codes), default=(None, None))
+    if ret3 != ft.RET_OK or snap is None or snap.empty:
+        return pd.DataFrame()
+    snap = snap[snap["prev_close_price"] > 0].copy()
+    if snap.empty:
+        return pd.DataFrame()
+    snap["涨跌幅"] = (snap["last_price"] - snap["prev_close_price"]) / snap["prev_close_price"] * 100
+    snap["代码"] = snap["code"].str.replace(f"{market}.", "", regex=False)
+    name_map = dict(zip(cons["code"], cons["stock_name"]))
+    snap["名称"] = snap["code"].map(name_map)
+    snap = snap.rename(columns={"last_price": "最新价"})
+    snap = snap.sort_values("涨跌幅", ascending=False).head(limit)
+    return snap[["代码", "名称", "最新价", "涨跌幅"]].reset_index(drop=True)
+
+
 # A股三大宽基指数各自覆盖的交易所/板块代码前缀。用来在"涨停股池"（覆盖
 # 全市场）结果里筛掉根本不属于这个指数所在交易所/板块的股票——之前没做
 # 这层过滤，"创业板指"的成分股板块会混进60/68开头（上交所主板/科创板）
