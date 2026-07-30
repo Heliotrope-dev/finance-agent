@@ -416,16 +416,18 @@ def get_southbound_flow() -> dict | None:
 _limit_pool_down_until: dict[str, float] = {}  # kind -> 熔断解除时间戳，见下面用法
 
 
-@st.cache_data(ttl=3, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_limit_pool(kind: str = "up", limit: int = 10) -> pd.DataFrame:
     """涨停股池(kind='up')/跌停股池(kind='down')，按涨跌幅排序取前 limit 条。只有A股有这个概念。
 
-    跟港股核心股(get_hk_famous_movers)同一套思路：TTL对齐到3秒配合闪烁
-    效果，但东财接口本身不稳定，_with_retry默认retries=2/backoff=5，失败
-    一次最多要扛大约15秒（2次重试+5/10秒退避）。3秒缓存下如果东财恰好在
-    抽风，几乎每次缓存过期都会重新扛这15秒，等于连续不断地重试——所以
-    跟港股那边一样加60秒熔断：失败一次后60秒内直接返回空，不再反复重试，
-    避免加重本来就敏感的东财限流线的压力。
+    TTL之前跟着"涨跌闪烁"需求缩到过3秒，但那个功能所在的_render_a_share_
+    overview后来因为导致页面残留问题被撤回了（改回手动刷新），3秒的缓存
+    没了对应的自动刷新场景，只留下风险：实测东财这个push2ex接口本身会
+    偶尔卡住触发15秒的read timeout，_with_retry的重试+退避加起来最坏能
+    到30多秒——3秒缓存下用户随便一次点击触发的rerun都可能命中这个慢
+    路径，这正是"网页又卡了"的真正原因。改回60秒（配合下面的熔断逻辑，
+    足够安全），只有真正手动切换市场/展开才会偶尔等一下，不会每次交互
+    都可能撞上这个慢接口。
     """
     if time.time() < _limit_pool_down_until.get(kind, 0.0):
         return pd.DataFrame()
