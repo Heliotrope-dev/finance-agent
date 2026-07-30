@@ -1220,17 +1220,31 @@ _HOME_MAP_MARKERS = [
     ("印度SENSEX", "GLOBAL", 19.08, 72.88),    # 孟买
 ]
 
+# 恒生指数/上证指数/标普500/纳斯达克100/道琼斯这5个能查到腾讯行情接口
+# (qt.gtimg.cn) 对应的代码——实测这个接口带 access-control-allow-origin: *
+# 响应头，浏览器JS可以直接跨域fetch，不用经过我们自己的Streamlit后端。
+# 东财"全球指数"接口(日经/富时/DAX/KOSPI/SENSEX那5个)没有这个响应头，
+# 浏览器直接fetch会被CORS拦下来，只能停留在"页面加载时的服务端快照"，
+# 做不到这5个的秒级实时刷新——这是浏览器安全机制的硬限制，不是不想做。
+_HOME_MAP_TENCENT_CODE = {
+    "恒生指数": "r_hkHSI", "上证指数": "r_sh000001",
+    "标普500": "usINX", "纳斯达克100": "usNDX", "道琼斯": "usDJI",
+}
+
 
 def _render_home_map():
     """首页世界地图——Leaflet.js + OpenStreetMap 免费瓦片（不需要API key/信用卡），
     在几个指数所在交易所城市的真实经纬度上放小图标，图标里显示指数名+当前点数+
     涨跌幅（红涨绿跌）。
 
-    这里不做自动刷新（没有run_every）——今天刚踩过"行情"tab那几个卡片加了
-    run_every=3做涨跌闪烁，结果导致从行情切到自选股出现页面残留的坑（大概率
-    是fragment自己的定时器在切走后仍在后台触发）。地图是通过components.v1.html
-    渲染在独立iframe里的，比普通markdown卡片更"重"，贸然加自动刷新踩到同一个
-    坑的风险更高，所以这一版先只在首页加载/手动刷新时更新一次，不追求秒级跳动。
+    恒生指数/上证指数/标普500/纳斯达克100/道琼斯这5个走浏览器JS直接每3秒
+    fetch腾讯行情接口（见_HOME_MAP_TENCENT_CODE的说明），原地更新图标，
+    不牵扯Streamlit的rerun——这样既有实时跳动效果，又不会重蹈"行情"tab
+    那几个卡片加run_every=3导致切页残留的覆辙（那次是Python侧的fragment
+    定时器在背后继续触发；这次刷新完全在iframe内部的JS里自己完成，跟
+    Streamlit的脚本重跑机制没有任何关系，理论上不会有同类残留风险）。
+    其余5个国际指数（东财源，CORS不开放）保持页面加载时的服务端快照，
+    不会跳动。
     """
     snaps: dict[str, list[dict]] = {}
     for _, mkt, _, _ in _HOME_MAP_MARKERS:
@@ -1262,25 +1276,74 @@ def _render_home_map():
             f"<div style='color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
             f"</div>"
         )
-        markers_js.append(
-            "L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [90, 50], iconAnchor: [45, 50]})}).addTo(map);"
-            % (lat, lon, json.dumps(label))
-        )
+        if name in _HOME_MAP_TENCENT_CODE:
+            # 存进tcMarkers，供后面的JS轮询按名字找到这个marker原地更新图标。
+            markers_js.append(
+                "tcMarkers[%s] = L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [90, 50], iconAnchor: [45, 50]})}).addTo(map);"
+                % (json.dumps(name), lat, lon, json.dumps(label))
+            )
+        else:
+            markers_js.append(
+                "L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [90, 50], iconAnchor: [45, 50]})}).addTo(map);"
+                % (lat, lon, json.dumps(label))
+            )
 
     if not markers_js:
         st.caption("指数数据暂时获取不到，地图先不展示。")
         return
+
+    tencent_codes = list(_HOME_MAP_TENCENT_CODE.values())
+    code_to_name = {v: k for k, v in _HOME_MAP_TENCENT_CODE.items()}
 
     map_html = f"""
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <div id="home-map" style="height:420px;border-radius:8px;overflow:hidden"></div>
     <script>
-    var map = L.map('home-map', {{scrollWheelZoom: false}}).setView([28, 40], 2);
+    // 缩放级别从2提到3——之前用户反馈上证/恒生离得太近，世界视角下两个图标
+    // 几乎完全重叠点不开，放大一档能明显拉开像素距离，代价是极地区域被裁掉
+    // 一些，但对"看指数"这个用途影响不大。
+    var map = L.map('home-map', {{scrollWheelZoom: false}}).setView([25, 40], 3);
     L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
         attribution: '&copy; OpenStreetMap contributors', maxZoom: 8
     }}).addTo(map);
+    var tcMarkers = {{}};
     {' '.join(markers_js)}
+
+    var codeToName = {json.dumps(code_to_name)};
+    function fmtNum(n) {{ return n.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}); }}
+    function updateTcMarkers() {{
+        fetch('https://qt.gtimg.cn/q={",".join(tencent_codes)}')
+            .then(function(r) {{ return r.text(); }})
+            .then(function(text) {{
+                text.split(';').forEach(function(line) {{
+                    line = line.trim();
+                    if (!line) return;
+                    var eq = line.indexOf('=');
+                    if (eq < 0) return;
+                    var code = line.substring(0, eq).replace('v_', '');
+                    var name = codeToName[code];
+                    if (!name || !tcMarkers[name]) return;
+                    var val = line.substring(eq + 1).replace(/^"|"$/g, '');
+                    var fields = val.split('~');
+                    if (fields.length < 35) return;
+                    var last = parseFloat(fields[3]);
+                    var changeAmt = parseFloat(fields[31]);
+                    var changePct = parseFloat(fields[32]);
+                    if (isNaN(last) || isNaN(changePct)) return;
+                    var color = changeAmt >= 0 ? '#e02020' : '#22a06b';
+                    var html = "<div style='background:#fff;border:1px solid #ddd;border-radius:6px;"
+                        + "padding:4px 8px;font-size:0.75rem;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)'>"
+                        + "<div style='font-weight:600;color:#0f172a'>" + name + "</div>"
+                        + "<div style='color:" + color + ";font-weight:700'>" + fmtNum(last) + "</div>"
+                        + "<div style='color:" + color + "'>" + (changePct >= 0 ? '+' : '') + changePct.toFixed(2) + "%</div>"
+                        + "</div>";
+                    tcMarkers[name].setIcon(L.divIcon({{html: html, className: '', iconSize: [90, 50], iconAnchor: [45, 50]}}));
+                }});
+            }})
+            .catch(function(e) {{}});
+    }}
+    setInterval(updateTcMarkers, 3000);
     </script>
     """
     _cv1.html(map_html, height=440)
