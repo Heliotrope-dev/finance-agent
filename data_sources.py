@@ -1067,8 +1067,16 @@ def _append_today_bar(df: pd.DataFrame, symbol: str, market: str) -> pd.DataFram
     return pd.concat([df, pd.DataFrame([today_row])], ignore_index=True)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_stock_history(symbol: str, start_date: str, end_date: str, frequency: str = "d", market: str = "A") -> pd.DataFrame:
+    # ttl从300秒调到1800秒——实测过：自选股迷你走势图和详情页K线共用这个函数，
+    # 5分钟缓存一过期，港股/美股这条走新浪源，单只股票冷取一次实测最慢能到
+    # 6秒多(AAPL)，7只自选股并发时被最慢的那个拖累，整批加载能到6-7秒，
+    # 这正是"自选股加载慢"复现出来的真实瓶颈。这里存的是"日线颗粒度"的历史
+    # 收盘价，真正当天还在变化的"今天"这根K线是靠get_stock_realtime另外
+    # 实时拼接进去的(_append_today_bar)，不依赖这份缓存的新鲜度——所以底层
+    # 历史数据缓存30分钟不新鲜完全没问题，换来的是把这个慢路径的触发频率
+    # 从"每5分钟一次"降到"每30分钟一次"，6倍地减少用户撞见这个坑的概率。
     """历史行情。symbol：A股例如'600519'，港股例如'00700'，美股例如'AAPL'。
 
     market: A=沪深A股（默认）, HK=港股, US=美股。

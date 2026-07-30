@@ -6,7 +6,7 @@ import os
 import re
 import time
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait as _futures_wait
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as _cv1
@@ -1943,9 +1943,33 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         # 本身只要零点几秒，并发提交多只互不阻塞。用线程池把每只股票的取数
         # 并发起来，A股之间该排队还是排队，但A股和港股/美股之间、以及港股/
         # 美股彼此之间不用再互相等，混合市场的自选股整体加载时间能明显缩短。
-        # ex.map保序，不会打乱原来的展示顺序。
-        with ThreadPoolExecutor(max_workers=min(8, len(watched_filtered))) as ex:
-            return list(ex.map(_fetch_one, watched_filtered))
+        #
+        # 实测过真实瓶颈：_fetch_sparkline_closes里的get_stock_history缓存
+        # 一过期(30分钟)，港股/美股这条走新浪源，单只冷取一次能到6秒多——
+        # 用 with ThreadPoolExecutor() + ex.map() 会等这个最慢的取完才返回，
+        # 拖累整批。第一版改成逐个 future.result(timeout=4)——实测发现这样
+        # 不对：每个future的4秒窗口是从"轮到检查它"那一刻重新计时，排在
+        # 后面的future会绕过预期上限（前面几个如果很快返回，轮到最后一个时
+        # 它已经跑了好几秒、检查时又给它新的4秒，总耗时照样能到6秒多，
+        # 没起到限制作用）。改用 concurrent.futures.wait() 对整批futures
+        # 设一个统一的4秒截止时间（从submit那一刻算起，不是从检查它那一刻），
+        # 时间到了还没完成的直接跳过用空数据占位，真正把整批的总耗时上限
+        # 卡在4秒左右，不会因为顺序问题被绕过。executor用shutdown(wait=False)
+        # 不等慢线程收尾。
+        ex = ThreadPoolExecutor(max_workers=min(8, len(watched_filtered)))
+        futures = [ex.submit(_fetch_one, item) for item in watched_filtered]
+        done, _not_done = _futures_wait(futures, timeout=4)
+        rows = []
+        for item, fut in zip(watched_filtered, futures):
+            if fut in done:
+                try:
+                    rows.append(fut.result())
+                    continue
+                except Exception:
+                    pass
+            rows.append((item, item.get("market", "A"), item["symbol"], {}, []))
+        ex.shutdown(wait=False)
+        return rows
 
     # 这个fragment每3秒自动刷新一次——只有真正第一次加载（session里还没有
     # 任何一次成功渲染过）才显示"加载中"，之后的静默自动刷新不再包一层
@@ -2294,16 +2318,21 @@ else:
                         # 记录里有1条港股要等Futu，单这一条就能吃掉10秒左右
                         # （Futu没连上/需要重连时）。用 with ThreadPoolExecutor()
                         # 配 ex.map() 会在退出 with 块时等所有线程跑完，慢的那个
-                        # 依然会拖住整页——改成 ex.submit + 单个 future.result(timeout=3)
-                        # 逐个设上限，某一条查太久就跳过（不影响它下一个60秒窗口
-                        # 重试），executor 用 shutdown(wait=False) 不等慢线程收尾，
-                        # 让整个"到期补录"批次总耗时上限在几秒量级，不会因为其中
-                        # 一条卡住拖累其它分区的正常打开速度。
+                        # 依然会拖住整页。第一版改成逐个future.result(timeout=3)——
+                        # 后来发现这样不对：每个future的超时窗口是从"轮到检查它"
+                        # 那一刻才开始计时，排在后面检查的future会绕过预期上限
+                        # （前面的很快返回时，轮到最后一个又重新给3秒，总耗时照样
+                        # 压不住）。改用 concurrent.futures.wait() 给整批futures
+                        # 一个从submit那刻算起的统一3秒截止时间，到点还没完成的
+                        # 直接跳过（不影响它下一个60秒窗口重试），这样才是真正把
+                        # 整个"到期补录"批次的总耗时卡在3秒左右。executor用
+                        # shutdown(wait=False)不等慢线程收尾。
                         ex = ThreadPoolExecutor(max_workers=min(8, len(due)))
-                        futures = {ex.submit(_fetch_review_price, item): item for item in due}
-                        for fut in list(futures):
+                        futures = [ex.submit(_fetch_review_price, item) for item in due]
+                        done, _not_done = _futures_wait(futures, timeout=3)
+                        for fut in done:
                             try:
-                                item, spot = fut.result(timeout=3)
+                                item, spot = fut.result()
                             except Exception:
                                 continue
                             if spot and spot.get("最新价"):
@@ -2523,17 +2552,8 @@ else:
                     )
 
             if watched:
-                # 市场筛选固定显示"全部/A股/港股/美股"四个选项——不管当前自选股
-                # 里有没有对应市场的股票，选项本身应该是稳定的，不随内容忽隐忽现。
-                wl_market_tab = st.radio(
-                    "市场筛选", ["全部", "A股", "港股", "美股"],
-                    key="_wl_market_tab", horizontal=True, label_visibility="collapsed",
-                )
-                _wl_code_to_label = {"A": "A股", "HK": "港股", "US": "美股"}
-                watched_filtered = (
-                    watched if wl_market_tab == "全部"
-                    else [i for i in watched if _wl_code_to_label.get(i.get("market", "A")) == wl_market_tab]
-                )
-                _render_watchlist_rows(watched_filtered, _email)
+                # 用户反馈自选股一般也就几只，市场筛选(全部/A股/港股/美股)没有实际
+                # 必要，反而多一层点击——去掉筛选，统一直接展示全部自选股。
+                _render_watchlist_rows(watched, _email)
 
 
