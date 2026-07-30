@@ -2289,13 +2289,29 @@ else:
                             return item, None
 
                     if due:
-                        with ThreadPoolExecutor(max_workers=min(8, len(due))) as ex:
-                            for item, spot in ex.map(_fetch_review_price, due):
-                                if spot and spot.get("最新价"):
-                                    try:
-                                        record_review(item["id"], float(spot["最新价"]))
-                                    except Exception:
-                                        continue
+                        # 实测过：即使节流到每60秒最多跑一次，会话里"第一次"渲染
+                        # 这个分区时还是要真跑一遍——用真实账号数据测过，5条到期
+                        # 记录里有1条港股要等Futu，单这一条就能吃掉10秒左右
+                        # （Futu没连上/需要重连时）。用 with ThreadPoolExecutor()
+                        # 配 ex.map() 会在退出 with 块时等所有线程跑完，慢的那个
+                        # 依然会拖住整页——改成 ex.submit + 单个 future.result(timeout=3)
+                        # 逐个设上限，某一条查太久就跳过（不影响它下一个60秒窗口
+                        # 重试），executor 用 shutdown(wait=False) 不等慢线程收尾，
+                        # 让整个"到期补录"批次总耗时上限在几秒量级，不会因为其中
+                        # 一条卡住拖累其它分区的正常打开速度。
+                        ex = ThreadPoolExecutor(max_workers=min(8, len(due)))
+                        futures = {ex.submit(_fetch_review_price, item): item for item in due}
+                        for fut in list(futures):
+                            try:
+                                item, spot = fut.result(timeout=3)
+                            except Exception:
+                                continue
+                            if spot and spot.get("最新价"):
+                                try:
+                                    record_review(item["id"], float(spot["最新价"]))
+                                except Exception:
+                                    continue
+                        ex.shutdown(wait=False)
                     st.session_state["_review_checked_at"] = time.time()
 
                 stats = get_accuracy_stats(_uemail)
