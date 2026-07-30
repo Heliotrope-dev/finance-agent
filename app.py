@@ -872,8 +872,14 @@ def _render_stock_movers_cards(df, market: str):
     点击跳去那只股票详情页）——涨跌停池、港股/美股核心股榜、指数成分股都是
     这个形态，抽成公共函数不用每处各写一遍。df为空时调用方自己处理提示语，
     这里不管。
+
+    价格变了背景闪一下红/绿：跟自选股列表(_render_watchlist_rows)、详情页
+    价格区块(_render_price_header)同一套_PRICE_FLASH_CSS机制，用户反馈"行情
+    里的股票也要有这个效果"——调用方（涨跌停池/港股核心股/美股核心股这几个
+    fragment）都已经是run_every=3自动刷新，数据变了这里自然就能跟着闪。
     """
     _inject_wl_card_css()
+    st.markdown(_PRICE_FLASH_CSS, unsafe_allow_html=True)
     for _, row in df.iterrows():
         mv_symbol = str(row["代码"])
         mv_color = UP_COLOR if row["涨跌幅"] >= 0 else DOWN_COLOR
@@ -883,10 +889,16 @@ def _render_stock_movers_cards(df, market: str):
             f"&open_name={urllib.parse.quote(str(row['名称']))}"
             f"{_auth_qs()}"
         )
+        flash_key = f"_mv_last_price_{mv_symbol}_{market}"
+        prev = st.session_state.get(flash_key)
+        st.session_state[flash_key] = row["最新价"]
+        flash_class = ""
+        if prev is not None and prev != row["最新价"]:
+            flash_class = "price-flash-up" if row["最新价"] > prev else "price-flash-down"
         with st.container(border=True):
             st.markdown(
                 f"<a class='wl-card-link' href='{href}' target='_self'>"
-                f"<div class='fa-flex-row' style='display:flex;align-items:center'>"
+                f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:4px'>"
                 f"<div style='flex:2;font-weight:600;color:var(--fa-text);text-decoration:none'>"
                 f"{row['名称']}（{mv_symbol}）</div>"
                 f"<div style='flex:1;text-align:right;font-weight:600;color:{mv_color}'>{row['最新价']:.2f}</div>"
@@ -1023,7 +1035,7 @@ def _render_index_snapshot(mkt_code: str):
             )
 
 
-@st.fragment
+@st.fragment(run_every=3)
 def _render_a_share_overview():
     """A股大盘统计+涨停/跌停股池。之前这几块和指数快照、热门板块全部挤在
     "行情"tab同一段代码里——点"显示更多（前30）"这一个按钮，会触发整个
@@ -1031,6 +1043,11 @@ def _render_a_share_overview():
     重新拉一遍数据（其中指数快照缓存只有25秒，涨停跌停池等未必命中缓存），
     这是页面交互感觉卡顿的主要原因。拆成独立fragment后，点这个按钮只会
     重新跑这一个区块。
+
+    加run_every=3是为了让_render_stock_movers_cards里价格变化的红绿闪烁
+    效果在这里也能跟自选股一样跳动起来——底下的get_limit_pool等都是批量
+    接口带自己的缓存TTL，3秒轮询大部分时候直接命中缓存，不会因此加重
+    请求负担，只有缓存真正过期、数据真的变了才会触发闪烁。
     """
     try:
         breadth = get_market_breadth()
@@ -1071,9 +1088,10 @@ def _render_a_share_overview():
             st.rerun()
 
 
-@st.fragment
+@st.fragment(run_every=3)
 def _render_hk_overview():
-    """港股南向资金+核心股，独立fragment，原因同_render_a_share_overview。"""
+    """港股南向资金+核心股，独立fragment，原因同_render_a_share_overview
+    （含run_every=3的原因）。"""
     try:
         south = get_southbound_flow()
     except Exception:
@@ -1097,9 +1115,10 @@ def _render_hk_overview():
         st.caption(f"获取失败：{e}")
 
 
-@st.fragment
+@st.fragment(run_every=3)
 def _render_us_overview():
-    """美股核心股，独立fragment，原因同_render_a_share_overview。"""
+    """美股核心股，独立fragment，原因同_render_a_share_overview
+    （含run_every=3的原因）。"""
     st.markdown("**美股核心股**")
     try:
         us_movers = get_us_famous_movers(15)
