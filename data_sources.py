@@ -497,6 +497,9 @@ def _get_hk_hot_rank_raw():
     return df.rename(columns={"股票名称": "名称"})
 
 
+_hk_movers_fallback_down_until = 0.0  # akshare全市场兜底的熔断，见下面用法
+
+
 def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
     """知名港股名单按涨跌幅排序，给"行情"页港股核心股用。
 
@@ -508,6 +511,14 @@ def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
     股票的快照，完全没必要。Futu本来就已经连着、给指数快照用（那边0.5秒内
     返回），这里改成直接查这份知名股清单，不用再绕全市场快照这条慢路径。
     只有Futu没连上时才退回旧的akshare全市场快照兜底（慢，但至少能用）。
+
+    熔断这条兜底路径的原因：这个函数现在配合"港股核心股"卡片的涨跌闪烁
+    效果，缓存TTL缩短了（get_hk_famous_movers）。如果不加熔断，一旦Futu
+    真的掉线，每次缓存过期都会重新触发这个近30-40秒的慢兜底，而这个函数
+    自己跑一次的时间比缓存TTL还长，等于缓存刚写完、下一次读取又发现"过期"
+    了，陷入几乎不间断连续触发慢路径的死循环。加上60秒冷却：兜底刚失败过
+    就在冷却期内直接返回空，不再反复尝试，让页面至少能正常展示"暂时获取
+    不到"而不是一直卡着。
     """
     codes = [f"HK.{c}" for c in _HK_FAMOUS_CODES]
     ret, snap = _futu_call(lambda ctx: ctx.get_market_snapshot(codes), default=(None, None))
@@ -521,10 +532,19 @@ def _get_hk_movers_by_change(limit: int) -> pd.DataFrame:
             snap = snap.sort_values("涨跌幅", ascending=False).head(limit)
             return snap[["代码", "名称", "最新价", "涨跌幅", "涨跌额"]].reset_index(drop=True)
 
+    global _hk_movers_fallback_down_until
+    if time.time() < _hk_movers_fallback_down_until:
+        return pd.DataFrame()
+
     # Futu没连上时的兜底：老的全市场快照方案，慢但能用
-    with _akshare_js_lock:
-        df = _with_retry(ak.stock_hk_spot, retries=1, throttle=False)  # 新浪，不是东财
+    try:
+        with _akshare_js_lock:
+            df = _with_retry(ak.stock_hk_spot, retries=1, throttle=False)  # 新浪，不是东财
+    except Exception:
+        _hk_movers_fallback_down_until = time.time() + 60
+        return pd.DataFrame()
     if df is None or df.empty or "涨跌幅" not in df.columns:
+        _hk_movers_fallback_down_until = time.time() + 60
         return pd.DataFrame()
     df = df[df["代码"].isin(_HK_FAMOUS_CODES)]
     df = df.sort_values("涨跌幅", ascending=False).head(limit)
@@ -599,7 +619,7 @@ def get_hstech_constituents(limit: int = 30) -> pd.DataFrame:
     return snap[["代码", "名称", "最新价", "涨跌幅", "涨跌额"]].reset_index(drop=True)
 
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=3, show_spinner=False)
 def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
     """港股核心股列表——直接走涨跌幅榜（新浪快照+知名股名单），不走东财人气榜。
     东财人气榜数据是更真实的"热度"，但接口本身不稳定，_with_retry重试+全局限流
@@ -612,11 +632,11 @@ def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
     分页/逐条拉全市场快照），去掉热度榜那条路径之后它就是唯一数据源了，不缓存
     的话每次进港股行情都要扛这近30秒，比之前更慢，跟这次改动的初衷完全相反。
 
-    TTL定在15秒而不是跟涨跌闪烁其它地方一样的3秒——_get_hk_movers_by_change
-    优先走Futu批量快照（秒级），但Futu偶尔连不上时会退回这个近30秒的akshare
-    全市场扫描兜底；真跟到3秒会导致Futu一旦短暂不可用，这个兜底就要每3秒被
-    触发一次，等于几乎一直在跑这个慢查询。15秒是"闪烁效果能看出来"和"Futu
-    掉线时不至于被兜底路径拖死"之间取的折中。
+    TTL跟涨跌闪烁其它地方一样对齐到3秒——之前担心_get_hk_movers_by_change
+    在Futu掉线时会退回近30秒的akshare全市场慢兜底，3秒缓存下会陷入几乎
+    不间断触发慢路径的死循环；现在那条兜底路径本身加了60秒熔断（见
+    _get_hk_movers_by_change），触发一次慢查询后不管成败都会有60秒不再
+    重试，缓存TTL可以放心跟其它地方一样缩到3秒，用户能看到实时闪烁效果。
     """
     return _get_hk_movers_by_change(limit)
 
