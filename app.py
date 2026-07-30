@@ -461,6 +461,52 @@ def _resolve_add_symbol(q: str, market_code: str) -> str | None:
     return q.zfill(5) if market_code == "HK" else q.upper()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _get_hot_stock_names() -> set:
+    """"新闻标红"用的交叉比对集合——不是新闻本身的热度分数（免费数据源里
+    没有真实的新闻热度数据，实测过NewsAPI的totalResults当代理指标也不可靠：
+    中文公司名基本查不到，英文名又被无关内容严重干扰，"Apple"两天内2000多条
+    大多是无关内容，不是真的"苹果公司今天很火"），改用我们自己已有的、真实
+    可靠的当日异动数据做交叉验证：新闻提到的公司如果今天正好在涨停/跌停
+    股池、或者港股/美股核心股里涨跌幅超过一定幅度，就认为是"今天值得关注"，
+    标题标红；不是新闻热度，是"新闻提到的标的今天股价表现是否异常"，如实
+    是这个语义，不是编一个假热度。
+    """
+    names = set()
+    try:
+        up = get_limit_pool("up", limit=30)
+        if up is not None and not up.empty:
+            names.update(up["名称"].dropna().tolist())
+    except Exception:
+        pass
+    try:
+        down = get_limit_pool("down", limit=30)
+        if down is not None and not down.empty:
+            names.update(down["名称"].dropna().tolist())
+    except Exception:
+        pass
+    try:
+        hk = get_hk_famous_movers(15)
+        if hk is not None and not hk.empty:
+            names.update(hk[hk["涨跌幅"].abs() > 3]["名称"].dropna().tolist())
+    except Exception:
+        pass
+    try:
+        us = get_us_famous_movers(15)
+        if us is not None and not us.empty:
+            names.update(us[us["涨跌幅"].abs() > 3]["名称"].dropna().tolist())
+    except Exception:
+        pass
+    return names
+
+
+def _news_title_color(title: str, hot_names: set) -> str:
+    """标题里提到了今天有异动的公司名就标红，否则跟随默认文字色。"""
+    if any(name and name in title for name in hot_names):
+        return UP_COLOR
+    return "var(--fa-text)"
+
+
 def _news_to_summary(news) -> str:
     """喂给AI的新闻摘要——带上日期和分类，不只是光秃秃的标题，不然AI只能看着
     一行标题瞎总结，写不出具体内容，只能说"整体偏利好"这种空话。"""
@@ -581,11 +627,13 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
         else:
             st.caption("来自财新的关键词匹配资讯，原文链接需要财新会员订阅才能打开全文，这里只展示摘要。")
         idx_clickable = idx_source == "futu"
+        _hot_names = _get_hot_stock_names()
         for _, r in news.iterrows():
             _title = r["新闻标题"]
+            _title_color = _news_title_color(_title, _hot_names)
             _title_html = (
-                f"<a href='{r.get('url', '')}' target='_blank' style='color:var(--fa-text);text-decoration:none'>{_title}</a>"
-                if idx_clickable else f"<span style='color:var(--fa-text)'>{_title}</span>"
+                f"<a href='{r.get('url', '')}' target='_blank' style='color:{_title_color};text-decoration:none'>{_title}</a>"
+                if idx_clickable else f"<span style='color:{_title_color}'>{_title}</span>"
             )
             st.markdown(
                 f"<div style='margin:6px 0;font-size:0.9rem'>"
@@ -610,13 +658,15 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
         st.caption("摘要来自财新，原文链接需要财新会员订阅才能打开全文，这里只展示摘要本身。")
 
     clickable = source in ("notices", "futu")
+    _hot_names = _get_hot_stock_names()
     for _, r in news.iterrows():
         date = r.get("日期") or ""
         title = r["新闻标题"]
         tag = r.get("分类", "")
+        _title_color = _news_title_color(title, _hot_names)
         title_html = (
-            f"<a href='{r.get('url', '')}' target='_blank' style='color:var(--fa-text);text-decoration:none'>{title}</a>"
-            if clickable else f"<span style='color:var(--fa-text)'>{title}</span>"
+            f"<a href='{r.get('url', '')}' target='_blank' style='color:{_title_color};text-decoration:none'>{title}</a>"
+            if clickable else f"<span style='color:{_title_color}'>{title}</span>"
         )
         st.markdown(
             f"<div style='margin:6px 0;font-size:0.9rem'>"
@@ -1388,10 +1438,12 @@ def _render_home_page():
     news = news.sort_values("日期", ascending=False, na_position="last")
 
     show_n = 30 if st.session_state.get("_home_news_expand") else 10
+    _hot_names = _get_hot_stock_names()
     for _, row in news.head(show_n).iterrows():
+        _title_color = _news_title_color(row["summary"], _hot_names)
         with st.container(border=True):
             st.markdown(
-                f"<a href='{row['url']}' target='_blank' style='color:var(--fa-text);text-decoration:none;font-weight:600'>{row['summary']}</a>"
+                f"<a href='{row['url']}' target='_blank' style='color:{_title_color};text-decoration:none;font-weight:600'>{row['summary']}</a>"
                 f"<div style='font-size:0.75rem;color:var(--fa-muted);margin-top:2px'>{row.get('tag','')} · {row.get('日期') or '-'}</div>",
                 unsafe_allow_html=True,
             )
