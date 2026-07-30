@@ -980,11 +980,14 @@ def _render_index_top_movers(market: str, index_name: str = ""):
                 st.rerun()
 
 
-@st.fragment
+@st.fragment(run_every=3)
 def _render_index_snapshot(mkt_code: str):
     """"行情"tab顶部的指数快照卡片。做成fragment的原因见_render_a_share_overview
     开头的注释——本质是同一个问题：这几个区块以前全挤在同一段代码里，点其中
     任何一个的交互按钮都会连带其余区块一起重新拉一遍数据。
+
+    run_every=3 + 涨跌闪烁，跟涨跌停股池/核心股列表统一（get_multi_index_
+    snapshot的缓存TTL已经是3秒，数据本身能跟上）。
     """
     try:
         idx_list = get_multi_index_snapshot(mkt_code)
@@ -998,7 +1001,8 @@ def _render_index_snapshot(mkt_code: str):
         return
 
     st.markdown(
-        "<style>"
+        _PRICE_FLASH_CSS
+        + "<style>"
         "a.idx-card-link, a.idx-card-link:link, a.idx-card-link:visited {"
         "  text-decoration: none !important; color: inherit !important;"
         "  display: block; cursor: pointer;"
@@ -1022,10 +1026,16 @@ def _render_index_snapshot(mkt_code: str):
             f"&open_index_name={urllib.parse.quote(idx['名称'])}"
             f"{_auth_qs()}"
         )
+        flash_key = f"_idx_snap_last_{idx['名称']}_{mkt_code}"
+        prev = st.session_state.get(flash_key)
+        st.session_state[flash_key] = idx["最新"]
+        flash_class = ""
+        if prev is not None and prev != idx["最新"]:
+            flash_class = "price-flash-up" if idx["最新"] > prev else "price-flash-down"
         with st.container(border=True):
             st.markdown(
                 f"<a class='idx-card-link' href='{href}' target='_self'>"
-                f"<div class='fa-flex-row' style='display:flex;align-items:center'>"
+                f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:4px'>"
                 f"<div style='flex:2.4;font-weight:600;color:var(--fa-text);text-decoration:none'>{idx['名称']}</div>"
                 f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{idx['最新']:,.2f}</div>"
                 f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌幅']:+.2f}%</div>"

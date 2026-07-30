@@ -413,9 +413,16 @@ def get_southbound_flow() -> dict | None:
     return {"净买额": net_buy, "交易日": south["交易日"].iloc[0] if "交易日" in south.columns else ""}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=20, show_spinner=False)
 def get_limit_pool(kind: str = "up", limit: int = 10) -> pd.DataFrame:
-    """涨停股池(kind='up')/跌停股池(kind='down')，按涨跌幅排序取前 limit 条。只有A股有这个概念。"""
+    """涨停股池(kind='up')/跌停股池(kind='down')，按涨跌幅排序取前 limit 条。只有A股有这个概念。
+
+    TTL从300秒降到20秒——涨跌停股池所在的_render_a_share_overview现在是
+    run_every=3自动刷新，配合价格闪烁效果需要数据能实际更新，但这里走的是
+    东财接口（_with_retry默认throttle=True，走全局限流），不敢跟港股/美股
+    那两个Futu/腾讯接口一样直接对齐到3秒——20秒是"闪烁能看出来"和"不给
+    东财那条本来就敏感的限流线加太多压力"之间的折中。
+    """
     date_str = datetime.now().strftime("%Y%m%d")
     fn = ak.stock_zt_pool_em if kind == "up" else ak.stock_zt_pool_dtgc_em
     df = _with_retry(lambda: fn(date=date_str))
@@ -592,7 +599,7 @@ def get_hstech_constituents(limit: int = 30) -> pd.DataFrame:
     return snap[["代码", "名称", "最新价", "涨跌幅", "涨跌额"]].reset_index(drop=True)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
     """港股核心股列表——直接走涨跌幅榜（新浪快照+知名股名单），不走东财人气榜。
     东财人气榜数据是更真实的"热度"，但接口本身不稳定，_with_retry重试+全局限流
@@ -604,6 +611,12 @@ def get_hk_famous_movers(limit: int = 15) -> pd.DataFrame:
     这里必须加缓存——实测ak.stock_hk_spot()本身单次调用就要接近30秒（内部是
     分页/逐条拉全市场快照），去掉热度榜那条路径之后它就是唯一数据源了，不缓存
     的话每次进港股行情都要扛这近30秒，比之前更慢，跟这次改动的初衷完全相反。
+
+    TTL定在15秒而不是跟涨跌闪烁其它地方一样的3秒——_get_hk_movers_by_change
+    优先走Futu批量快照（秒级），但Futu偶尔连不上时会退回这个近30秒的akshare
+    全市场扫描兜底；真跟到3秒会导致Futu一旦短暂不可用，这个兜底就要每3秒被
+    触发一次，等于几乎一直在跑这个慢查询。15秒是"闪烁效果能看出来"和"Futu
+    掉线时不至于被兜底路径拖死"之间取的折中。
     """
     return _get_hk_movers_by_change(limit)
 
@@ -736,7 +749,7 @@ def detect_symbol_candidates(query: str) -> list[dict]:
     return results
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3, show_spinner=False)
 def get_us_famous_movers(limit: int = 15) -> pd.DataFrame:
     """美股核心股列表，按固定的核心股顺序展示，不按涨跌幅排。
 
