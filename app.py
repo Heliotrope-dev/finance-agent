@@ -802,7 +802,7 @@ def _render_price_header(symbol: str, market: str):
         unsafe_allow_html=True,
     )
     _src = "Futu 实时" if spot.get("数据源") == "Futu实时" else "延迟行情"
-    st.caption(f"{_src} · {spot.get('更新时间', '-')} · 每 15 秒自动刷新")
+    st.caption(f"{_src} · {spot.get('更新时间', '-')} · 每 3 秒自动刷新")
     hcol1, hcol2, hcol3 = st.columns(3)
     hcol1.metric("最高", f"{spot.get('最高', 0):.2f}")
     hcol2.metric("最低", f"{spot.get('最低', 0):.2f}")
@@ -846,7 +846,7 @@ def _render_index_price_header(name: str, market: str):
         + "</div>",
         unsafe_allow_html=True,
     )
-    st.caption("每 15 秒自动刷新")
+    st.caption("每 3 秒自动刷新")
 
 
 def _inject_wl_card_css():
@@ -1510,6 +1510,8 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         st.caption("这个分类下暂时没有自选股。")
         return
 
+    st.caption("每 3 秒自动刷新")
+
     st.markdown(
         _PRICE_FLASH_CSS
         + "<style>"
@@ -1533,11 +1535,16 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
     # 另外拿flex div模仿列宽——之前拿固定36px去凑删除键那一列的宽度，
     # 在不同屏幕宽度下跟实际的 st.columns([9,1]) 比例对不上，表头和数据
     # 看着就没对齐。
-    _head_content_col, _head_del_col = st.columns([9, 1])
-    _head_content_col.markdown(
+    _head_static_col, _head_dynamic_col, _head_del_col = st.columns([5.24, 3.76, 1])
+    _head_static_col.markdown(
         "<div class='fa-flex-row' style='display:flex;align-items:center;padding:4px 8px;font-size:0.75rem;color:var(--fa-muted)'>"
         "<div style='flex:2.1'>名称/代码</div>"
         "<div style='flex:1.1;text-align:center'>走势</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    _head_dynamic_col.markdown(
+        "<div class='fa-flex-row' style='display:flex;align-items:center;padding:4px 8px;font-size:0.75rem;color:var(--fa-muted)'>"
         "<div style='flex:1.3;text-align:right'>最新/成交额</div>"
         "<div style='flex:1;text-align:right'>涨跌幅</div>"
         "</div>",
@@ -1588,7 +1595,20 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         spark_color = "#999"
         if wspot and wspot.get("最新价") and wspot.get("昨收"):
             spark_color = UP_COLOR if wspot["最新价"] >= wspot["昨收"] else DOWN_COLOR
-        spark_svg = _build_sparkline_svg(closes, spark_color)
+
+        # 名称+走势图这部分每3秒刷新时几乎不变（迷你图数据本身缓存了好几分钟，
+        # 涨跌方向短期内也很少翻转），但之前跟价格/涨跌幅拼进同一个markdown
+        # 字符串——价格每次都变，导致这一整块（含SVG）每3秒都要重新生成、
+        # 重新发给前端重绘，是watchlist"感觉卡顿"的一部分原因。缓存住SVG
+        # 字符串，输入不变就直接复用，减少每次刷新真正要重绘的内容量。
+        spark_key = f"_wl_spark_{symbol}_{item_market}"
+        spark_cache = st.session_state.get(spark_key)
+        closes_tuple = tuple(closes)
+        if spark_cache is not None and spark_cache[0] == closes_tuple and spark_cache[1] == spark_color:
+            spark_svg = spark_cache[2]
+        else:
+            spark_svg = _build_sparkline_svg(closes, spark_color)
+            st.session_state[spark_key] = (closes_tuple, spark_color, spark_svg)
 
         if wspot and wspot.get("最新价"):
             wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
@@ -1619,7 +1639,11 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
             badge_html = ""
 
         with st.container(border=True):
-            link_col, del_col = st.columns([9, 1], vertical_alignment="center")
+            # 比例是把原来单列里 名称2.1:走势1.1:价格1.3:涨跌幅1 这四段按
+            # "静态(名称+走势)/动态(价格+涨跌幅)"拆成两组，再按原比例
+            # 换算回外层st.columns([9,1])的尺度（9*3.2/5.5≈5.24，9*2.3/5.5≈3.76），
+            # 保证拆分前后每一段的实际宽度不变，不会因为拆列导致布局跳动。
+            static_col, dynamic_col, del_col = st.columns([5.24, 3.76, 1], vertical_alignment="center")
             href = (
                 f"?open_symbol={urllib.parse.quote(symbol)}"
                 f"&open_market={urllib.parse.quote(item_market)}"
@@ -1627,7 +1651,11 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
                 f"&open_from=wl"
                 f"{_auth_qs()}"
             )
-            link_col.markdown(
+            # 名称+走势图（静态部分）和价格+涨跌幅（动态部分）拆成两个独立的
+            # st.markdown调用——同一个href两边都能点，视觉上还是整行可点，
+            # 但静态部分的HTML字符串在数据没变时保持不变，Streamlit的diff能
+            # 跳过它不用每3秒都重绘，只有动态部分真正需要每次刷新。
+            static_col.markdown(
                 f"<a class='wl-card-link' href='{href}' target='_self'>"
                 f"<div class='fa-flex-row' style='display:flex;align-items:center'>"
                 # 颜色直接写在这个div自己身上，不靠继承父级<a>的color——之前靠
@@ -1636,6 +1664,12 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
                 # 再跟CSS特异性较劲。
                 f"<div style='flex:2.1;font-weight:600;color:var(--fa-text);text-decoration:none'>{item['name']}（{symbol}）</div>"
                 f"<div style='flex:1.1;display:flex;justify-content:center'>{spark_svg}</div>"
+                f"</div></a>",
+                unsafe_allow_html=True,
+            )
+            dynamic_col.markdown(
+                f"<a class='wl-card-link' href='{href}' target='_self'>"
+                f"<div class='fa-flex-row' style='display:flex;align-items:center'>"
                 f"<div style='flex:1.3'>{price_html}</div>"
                 f"<div style='flex:1'>{badge_html}</div>"
                 f"</div></a>",
@@ -1847,7 +1881,7 @@ else:
                     "**行情**\n\n"
                     "首页按市场切换查看核心指数（A股按涨跌幅列示，港股按东财人气榜排热度，"
                     "美股展示固定核心股名单），A股另有涨停/跌停池和南向资金；"
-                    "价格每 15 秒自动刷新一次。\n\n"
+                    "价格每 3 秒自动刷新一次。\n\n"
                     "**个股/指数详情页**\n\n"
                     "点开任意标的先看K线或分时图，再看一手资讯（A股优先展示官方公告，"
                     "港股/美股优先富途资讯，都查不到才退回财新摘要），最后是 AI 深度分析——"
