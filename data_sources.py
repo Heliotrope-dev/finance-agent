@@ -262,10 +262,10 @@ def _one_index_snapshot(market: str, name: str, code: str) -> dict | None:
     """单个指数的快照，给 get_multi_index_snapshot 并发调用用（3个指数不再串行等）。"""
     try:
         if market == "A":
-            sina_snap = _a_index_snapshot_sina(code)
-            if sina_snap:
-                return {"名称": name, **sina_snap}
-            # 新浪实时快照失败时的兜底——BaoStock日线是EOD数据，交易时段内会滞后一天。
+            tc_snap = _a_index_snapshot_tencent(code)
+            if tc_snap:
+                return {"名称": name, **tc_snap}
+            # 腾讯实时快照失败时的兜底——BaoStock日线是EOD数据，交易时段内会滞后一天。
             # BaoStock 的 login/logout 是全局会话，不是线程安全的，不只这里3个指数
             # 并发跑会撞车——Streamlit给每个用户会话开独立线程，任何两个不同用户
             # 同时触发本文件里任意两处BaoStock调用都可能互相踢掉对方的登录状态，
@@ -746,31 +746,25 @@ def get_us_famous_movers(limit: int = 15) -> pd.DataFrame:
     这种英文法人名）没法可靠地映射回代码，硬猜容易猜错，不如老实展示固定
     核心股名单，不排序也不装作是热度榜。
 
-    stock_us_famous_spot_em（东财）今晚忽好忽坏，重试也救不回来。改用新浪，
-    而且新浪这个接口支持一次请求批量查多只股票（逗号分隔），不用像单股实时
-    行情那样一只只查、每次还要等全局限流的3秒间隔——一次请求20只，几乎瞬间。
-    这里不走 get_stock_realtime/_with_retry 那条路，就是因为不想被那个为
-    东财设计的全局限流拖慢，新浪这个接口从没在今晚测出过需要限流的迹象。
+    stock_us_famous_spot_em（东财）今晚忽好忽坏，重试也救不回来。改用腾讯
+    行情接口，而且这个接口支持一次请求批量查多只股票（逗号分隔），不用像
+    单股实时行情那样一只只查——一次请求近50只，几乎瞬间。这里不走
+    get_stock_realtime/_with_retry 那条路，就是因为不想被那个为东财设计的
+    全局限流拖慢。（原来走新浪，把跳动周期缩到3秒后新浪被限流连不上了，
+    索性全部换成腾讯，见get_stock_realtime的说明。）
     """
-    codes = ",".join(f"gb_{c.lower()}" for c in _US_FAMOUS_CODES)
-    r = requests.get(
-        f"https://hq.sinajs.cn/list={codes}",
-        headers={"Referer": "https://finance.sina.com.cn"},
-        timeout=10,
-    )
+    codes = ",".join(f"us{c}" for c in _US_FAMOUS_CODES)
+    r = requests.get(f"https://qt.gtimg.cn/q={codes}", timeout=10)
     text = r.content.decode("gbk", errors="ignore")
 
     rows = []
     for code, line in zip(_US_FAMOUS_CODES, text.strip().split("\n")):
-        if '"' not in line:
-            continue
-        raw = line.split('"')[1]
-        fields = raw.split(",")
-        if len(fields) < 27 or not fields[1]:
+        fields = _tencent_quote_fields(line)
+        if fields is None:
             continue
         rows.append({
-            "代码": code, "名称": fields[0], "最新价": float(fields[1]),
-            "涨跌幅": float(fields[2]), "涨跌额": float(fields[4]),
+            "代码": code, "名称": fields[1], "最新价": float(fields[3]),
+            "涨跌幅": float(fields[32]), "涨跌额": float(fields[31]),
         })
     if not rows:
         return pd.DataFrame()
@@ -888,24 +882,17 @@ def get_index_top_movers(market: str, limit: int = 30, index_name: str = "") -> 
 
     # US
     try:
-        codes = ",".join(f"gb_{c.lower()}" for c in _US_FAMOUS_CODES)
-        r = requests.get(
-            f"https://hq.sinajs.cn/list={codes}",
-            headers={"Referer": "https://finance.sina.com.cn"},
-            timeout=10,
-        )
+        codes = ",".join(f"us{c}" for c in _US_FAMOUS_CODES)
+        r = requests.get(f"https://qt.gtimg.cn/q={codes}", timeout=10)
     except Exception:
         return pd.DataFrame()
     text = r.content.decode("gbk", errors="ignore")
     rows = []
     for code, line in zip(_US_FAMOUS_CODES, text.strip().split("\n")):
-        if '"' not in line:
+        fields = _tencent_quote_fields(line)
+        if fields is None:
             continue
-        raw = line.split('"')[1]
-        fields = raw.split(",")
-        if len(fields) < 27 or not fields[1]:
-            continue
-        rows.append({"代码": code, "名称": fields[0], "最新价": float(fields[1]), "涨跌幅": float(fields[2])})
+        rows.append({"代码": code, "名称": fields[1], "最新价": float(fields[3]), "涨跌幅": float(fields[32])})
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values("涨跌幅", ascending=False).head(limit).reset_index(drop=True)
@@ -1437,26 +1424,20 @@ def get_index_intraday_futu(name: str, market: str, index_prev_close: float | No
     return pd.DataFrame()
 
 
-def _a_index_snapshot_sina(code: str) -> dict | None:
-    """A股指数的实时快照，走新浪单股快照接口，跟个股实时价（get_stock_realtime）
-    是同一套字段格式——指数代码在新浪那边跟个股一样能查，不是独立的一套接口。
-    code 是 BaoStock 格式（如 sh.000001），转成新浪格式（sh000001）。
+def _a_index_snapshot_tencent(code: str) -> dict | None:
+    """A股指数的实时快照，走腾讯行情接口，跟个股实时价（get_stock_realtime）
+    是同一套字段格式——指数代码在腾讯那边跟个股一样能查，不是独立的一套接口。
+    code 是 BaoStock 格式（如 sh.000001），转成腾讯格式（sh000001）。
     """
-    sina_code = code.replace(".", "")
+    tc_code = code.replace(".", "")
     try:
-        r = requests.get(
-            f"https://hq.sinajs.cn/list={sina_code}",
-            headers={"Referer": "https://finance.sina.com.cn"},
-            timeout=10,
-        )
-        text = r.content.decode("gbk", errors="ignore")
-        raw = text.split('"')[1]
-        fields = raw.split(",")
+        r = requests.get(f"https://qt.gtimg.cn/q={tc_code}", timeout=8)
+        fields = _tencent_quote_fields(r.content.decode("gbk", errors="ignore"))
     except Exception:
         return None
-    if len(fields) < 4 or not fields[3]:
+    if fields is None:
         return None
-    last, prev = float(fields[3]), float(fields[2])
+    last, prev = float(fields[3]), float(fields[4])
     if not prev:
         return None
     change = last - prev
@@ -1508,104 +1489,54 @@ def _us_index_snapshot_futu(name: str, index_prev_close: float) -> dict | None:
     return {"最新": last, "涨跌": last - index_prev_close, "涨跌幅": pct}
 
 
-_sina_realtime_down_until = 0.0  # 新浪实时行情熔断——见get_stock_realtime里的用法
+def _tencent_symbol(symbol: str, market: str) -> str:
+    """把股票代码转成腾讯行情接口(qt.gtimg.cn)要的前缀格式。"""
+    if market == "HK":
+        return f"hk{symbol}"
+    if market == "US":
+        return f"us{symbol.upper()}"
+    return f"{_sina_symbol(symbol)}{symbol}"
+
+
+def _tencent_quote_fields(text: str) -> list[str] | None:
+    """腾讯行情接口单条返回解析成字段列表，格式不对/没数据返回None。"""
+    if '"' not in text:
+        return None
+    raw = text.split('"')[1]
+    fields = raw.split("~")
+    if len(fields) < 35 or not fields[3]:
+        return None
+    return fields
 
 
 @st.cache_data(ttl=3, show_spinner=False)
 def get_stock_realtime(symbol: str, market: str = "A") -> dict:
-    """真正的实时行情，港股/美股优先走本地 Futu OpenD 网关，没有就退回新浪，
-    新浪也不行再退腾讯（qt.gtimg.cn）。
+    """真正的实时行情，港股/美股优先走本地 Futu OpenD 网关，A股 + Futu查不到时
+    走腾讯行情接口(qt.gtimg.cn)兜底——跟富途互补，一个管港美股实时+分时，
+    一个管A股 + 港美股在Futu掉线时的兜底。
+
+    之前这条兜底路径走的是新浪(hq.sinajs.cn)：把跳动周期从15秒缩到3秒后，
+    新浪/东财这两个免费接口的请求量直接翻了5倍，实测被限流/拒绝了
+    （hq.sinajs.cn直接Network unreachable），用户反馈"invest agent加载变慢"。
+    腾讯这条线批量查/单只查都测过，实测稳定，索性把新浪整个换掉，不再维护
+    "先试新浪、超时再退腾讯"这条更复杂也更容易被拖慢的双轨路径。
 
     之前这里是从日线历史数据里取最后一行——那是"最近收盘价"，交易时段内
     跟用户自己在别的地方看到的实时价格对不上。这个接口是轻量单股查询，
     只查一只股票、不拉全市场。缓存 TTL 跟详情页/自选股的实时价格区块
     （st.fragment 每 3 秒自动刷新）对齐——TTL 比刷新周期长的话，fragment
-    每次"刷新"其实只是重画同一份缓存值，数字并不会真的跳动，用户反馈过
-    "跳动周期"要缩短到 3 秒，这里就必须让缓存跟着一起缩短，否则前端刷新
-    快了、数据源却还是老的，等于白刷。
-
-    加腾讯兜底的原因：把刷新周期从15秒缩到3秒后，新浪/东财这两个免费接口的
-    请求量直接翻了5倍，实测被限流/拒绝了（hq.sinajs.cn 连不上，Errno 101
-    Network unreachable，东财push2接口也一样超时）——用户反馈"invest agent
-    加载变慢"，排查发现是这个。新浪超时不再重试（timeout缩到5秒、retries=0，
-    失败就立刻掉腾讯，不在一个已经不通的源上反复等），腾讯这条线实测当前
-    稳定可用。两边字段格式完全不同，各写各的解析。
+    每次"刷新"其实只是重画同一份缓存值，数字并不会真的跳动。
     """
 
     futu_data = get_stock_realtime_futu(symbol, market)
     if futu_data:
         return futu_data
 
-    def _sina_fetch():
-        if market == "HK":
-            code = f"rt_hk{symbol}"
-        elif market == "US":
-            code = f"gb_{symbol.lower()}"
-        else:
-            code = f"{_sina_symbol(symbol)}{symbol}"
-
-        r = requests.get(
-            f"https://hq.sinajs.cn/list={code}",
-            headers={"Referer": "https://finance.sina.com.cn"},
-            timeout=5,
-        )
-        text = r.content.decode("gbk", errors="ignore")
-        raw = text.split('"')[1]
-        fields = raw.split(",")
-
-        if market == "HK":
-            # 英文名,中文名,今开,昨收,最高,最低,现价,涨跌额,涨跌幅,买一,卖一,成交额,成交量,...,日期,时间
-            if len(fields) < 19 or not fields[6]:
-                return {}
-            return {
-                "代码": symbol, "名称": fields[1],
-                "最新价": float(fields[6]), "今开": float(fields[2]),
-                "昨收": float(fields[3]), "最高": float(fields[4]), "最低": float(fields[5]),
-                "成交额": float(fields[11]) if fields[11] else None,
-                "更新时间": f"{fields[17]} {fields[18]}",
-            }
-        if market == "US":
-            # 名称,现价,涨跌幅,时间戳,涨跌额,今开,最高,最低,...,昨收(第27个字段,index 26)
-            # 之前误用 fields[8] 当昨收，实测那个字段是别的东西（不是昨收），
-            # 算出来的涨跌幅离谱到几十个点。改成直接用新浪自己算好的涨跌幅/涨跌额
-            # （field[2]/field[4]），昨收改用真正对得上的 field[26]（用涨跌额反推验证过）。
-            if len(fields) < 27 or not fields[1]:
-                return {}
-            return {
-                "代码": symbol, "名称": fields[0],
-                "最新价": float(fields[1]), "今开": float(fields[5]),
-                "昨收": float(fields[26]), "最高": float(fields[6]), "最低": float(fields[7]),
-                "涨跌额": float(fields[4]), "涨跌幅": float(fields[2]),
-                "更新时间": fields[3],
-            }
-
-        if len(fields) < 32 or not fields[3]:
-            return {}
-        return {
-            "代码": symbol,
-            "名称": fields[0],
-            "最新价": float(fields[3]),
-            "今开": float(fields[1]),
-            "昨收": float(fields[2]),
-            "最高": float(fields[4]),
-            "最低": float(fields[5]),
-            "成交额": float(fields[9]) if fields[9] else None,
-            "更新时间": f"{fields[30]} {fields[31]}",
-        }
-
-    def _tencent_fetch():
-        if market == "HK":
-            code = f"hk{symbol}"
-        elif market == "US":
-            code = f"us{symbol.upper()}"
-        else:
-            code = f"{_sina_symbol(symbol)}{symbol}"
-
+    def _fetch():
+        code = _tencent_symbol(symbol, market)
         r = requests.get(f"https://qt.gtimg.cn/q={code}", timeout=8)
-        text = r.content.decode("gbk", errors="ignore")
-        raw = text.split('"')[1]
-        fields = raw.split("~")
-        if len(fields) < 35 or not fields[3]:
+        fields = _tencent_quote_fields(r.content.decode("gbk", errors="ignore"))
+        if fields is None:
             return {}
         # 成交额单位A股是"万元"，港股/美股这个字段本身就是原始货币单位，
         # 只有A股需要乘10000（跟field[35]里拼进去的精确成交额反推验证过）。
@@ -1620,20 +1551,7 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
             "更新时间": fields[30],
         }
 
-    global _sina_realtime_down_until
-    # 熔断：新浪刚失败过（60秒内）就不再浪费时间重试它，直接走腾讯——3秒
-    # 刷新周期下，每次都先等新浪超时再掉腾讯，等于一直在给已经拒绝咱们的
-    # 新浪加请求量，可能越限流越严重；跳过它反而给它一个恢复的机会。
-    if time.time() < _sina_realtime_down_until:
-        return _with_retry(_tencent_fetch, retries=1, backoff=2, throttle=False)
-
-    try:
-        result = _with_retry(_sina_fetch, retries=0, throttle=False)
-        if result:
-            return result
-    except Exception:
-        _sina_realtime_down_until = time.time() + 60
-    return _with_retry(_tencent_fetch, retries=1, backoff=2, throttle=False)
+    return _with_retry(_fetch, retries=1, backoff=2, throttle=False)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
