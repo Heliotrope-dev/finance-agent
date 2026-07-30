@@ -1205,24 +1205,24 @@ def _render_hot_sectors(market: str):
 
 _HOME_MAP_MARKERS = [
     # (指数名, 所在市场, 纬度, 经度) —— 用户反馈"上证/恒生离得太近重叠"，
-    # 而且明确说"地理位置可以适当牺牲，但两两都不要重合"。这里不再用真实
-    # 交易所坐标，改成手动挑的、彼此拉开足够距离的坐标——优先保证不重叠，
-    # 城市对不对得上退居第二位（比如"上证指数"标在了蒙古附近，不是真的
-    # 上海坐标，纯粹是为了跟恒生/日经/韩国这几个挤在东亚的图标拉开距离）。
+    # 明确说"地理位置可以适当牺牲，但两两都不要重合"；第一版把上证/韩国/
+    # 新加坡挪得太夸张（上证跑到蒙古附近、韩国跑到赤道、新加坡跑到印度洋），
+    # 用户又反馈"位置比较离谱"——现在配合下面缩小的标签尺寸，把这几个挪回
+    # 更接近真实地理位置、只做小幅度错开，不再是大幅乱跳。
     # 市场是"GLOBAL"的走get_global_indices()那条单独的数据源(Yahoo Finance)，
     # 不是get_multi_index_snapshot。
     ("恒生指数", "HK", 22.0, 114.0),
-    ("上证指数", "A", 55.0, 105.0),
+    ("上证指数", "A", 38.0, 110.0),          # 真实上海在(31,121)，往西北挪一点跟恒生/日经拉开
     ("标普500", "US", 40.0, -95.0),
     ("纳斯达克100", "US", 48.0, -122.0),
-    ("日经225", "GLOBAL", 36.0, 140.0),
+    ("日经225", "GLOBAL", 36.0, 142.0),
     ("富时100", "GLOBAL", 54.0, -3.0),
     ("德国DAX", "GLOBAL", 50.0, 30.0),
-    ("韩国KOSPI", "GLOBAL", 0.0, 120.0),
+    ("韩国KOSPI", "GLOBAL", 28.0, 128.0),     # 真实首尔在(37.5,127)，往南挪一点跟日本/中国拉开
     ("印度SENSEX", "GLOBAL", 19.0, 73.0),
     ("巴西IBOVESPA", "GLOBAL", -15.0, -55.0),
     ("澳大利亚ASX200", "GLOBAL", -30.0, 145.0),
-    ("新加坡STI", "GLOBAL", -25.0, 95.0),
+    ("新加坡STI", "GLOBAL", -5.0, 105.0),     # 真实新加坡在(1,104)，基本没挪，本来就够空
 ]
 
 # 恒生指数/上证指数/标普500/纳斯达克100这4个能查到腾讯行情接口
@@ -1274,9 +1274,13 @@ def _render_home_map():
         if not idx:
             continue
         color = "#e02020" if idx["涨跌"] >= 0 else "#22a06b"
+        # 标签尺寸缩小过一版——用户反馈"标签能小点的话就不会挤一起了"，
+        # 从 padding 4px 8px/font-size 0.75rem 缩到 2px 5px/0.6rem，
+        # iconSize 从 [90,50] 缩到 [68,38]，但没有缩到看不清的程度
+        # （名称+点数+涨跌幅三行还是各自独占一行，只是整体更紧凑）。
         label = (
-            f"<div style='background:#fff;border:1px solid #ddd;border-radius:6px;"
-            f"padding:4px 8px;font-size:0.75rem;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)'>"
+            f"<div style='background:#fff;border:1px solid #ddd;border-radius:5px;"
+            f"padding:2px 5px;font-size:0.6rem;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)'>"
             f"<div style='font-weight:600;color:#0f172a'>{name}</div>"
             f"<div style='color:{color};font-weight:700'>{idx['最新']:,.2f}</div>"
             f"<div style='color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
@@ -1285,12 +1289,12 @@ def _render_home_map():
         if name in _HOME_MAP_TENCENT_CODE:
             # 存进tcMarkers，供后面的JS轮询按名字找到这个marker原地更新图标。
             markers_js.append(
-                "tcMarkers[%s] = L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [90, 50], iconAnchor: [45, 50]})}).addTo(map);"
+                "tcMarkers[%s] = L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [68, 38], iconAnchor: [34, 38]})}).addTo(map);"
                 % (json.dumps(name), lat, lon, json.dumps(label))
             )
         else:
             markers_js.append(
-                "L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [90, 50], iconAnchor: [45, 50]})}).addTo(map);"
+                "L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [68, 38], iconAnchor: [34, 38]})}).addTo(map);"
                 % (lat, lon, json.dumps(label))
             )
 
@@ -1342,13 +1346,13 @@ def _render_home_map():
                     var changePct = parseFloat(fields[32]);
                     if (isNaN(last) || isNaN(changePct)) return;
                     var color = changeAmt >= 0 ? '#e02020' : '#22a06b';
-                    var html = "<div style='background:#fff;border:1px solid #ddd;border-radius:6px;"
-                        + "padding:4px 8px;font-size:0.75rem;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)'>"
+                    var html = "<div style='background:#fff;border:1px solid #ddd;border-radius:5px;"
+                        + "padding:2px 5px;font-size:0.6rem;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)'>"
                         + "<div style='font-weight:600;color:#0f172a'>" + name + "</div>"
                         + "<div style='color:" + color + ";font-weight:700'>" + fmtNum(last) + "</div>"
                         + "<div style='color:" + color + "'>" + (changePct >= 0 ? '+' : '') + changePct.toFixed(2) + "%</div>"
                         + "</div>";
-                    tcMarkers[name].setIcon(L.divIcon({{html: html, className: '', iconSize: [90, 50], iconAnchor: [45, 50]}}));
+                    tcMarkers[name].setIcon(L.divIcon({{html: html, className: '', iconSize: [68, 38], iconAnchor: [34, 38]}}));
                 }});
             }})
             .catch(function(e) {{}});
