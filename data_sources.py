@@ -1647,6 +1647,8 @@ def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
 _GLOBAL_INDEX_YAHOO_SYMBOLS = {
     "日经225": "%5EN225", "富时100": "%5EFTSE", "德国DAX": "%5EGDAXI",
     "韩国KOSPI": "%5EKS11", "印度SENSEX": "%5EBSESN",
+    # 首页地图之前太空，补的3个填空区域用的指数
+    "巴西IBOVESPA": "%5EBVSP", "澳大利亚ASX200": "%5EAXJO", "新加坡STI": "%5ESTI",
 }
 
 
@@ -1685,7 +1687,7 @@ def get_global_indices() -> dict[str, dict]:
     {指数名: {...}}，查不到的指数不出现在dict里，调用方按key存在与否
     判断，不拿假数据凑数。
     """
-    with ThreadPoolExecutor(max_workers=5) as ex:
+    with ThreadPoolExecutor(max_workers=len(_GLOBAL_INDEX_YAHOO_SYMBOLS)) as ex:
         results = list(ex.map(
             lambda kv: (kv[0], _yahoo_index_snapshot(kv[1])),
             _GLOBAL_INDEX_YAHOO_SYMBOLS.items(),

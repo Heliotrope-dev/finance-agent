@@ -1204,31 +1204,37 @@ def _render_hot_sectors(market: str):
 
 
 _HOME_MAP_MARKERS = [
-    # (指数名, 所在市场, 纬度, 经度) —— 纬经度是标的所在交易所城市的真实坐标，
-    # 不是"随手摆几个点"。美股三个指数物理上都在纽约，故意把经纬度稍微错开
-    # 一点，不然三个图标会完全重叠点不开。市场是"GLOBAL"的走get_global_indices()
-    # 那条单独的数据源（东财"全球指数"接口），不是get_multi_index_snapshot。
-    ("恒生指数", "HK", 22.32, 114.17),
-    ("上证指数", "A", 31.23, 121.47),
-    ("标普500", "US", 40.71, -74.01),
-    ("纳斯达克100", "US", 40.75, -73.98),
-    ("道琼斯", "US", 40.68, -74.04),
-    ("日经225", "GLOBAL", 35.68, 139.69),      # 东京
-    ("富时100", "GLOBAL", 51.51, -0.13),       # 伦敦
-    ("德国DAX", "GLOBAL", 50.11, 8.68),        # 法兰克福
-    ("韩国KOSPI", "GLOBAL", 37.57, 126.98),    # 首尔
-    ("印度SENSEX", "GLOBAL", 19.08, 72.88),    # 孟买
+    # (指数名, 所在市场, 纬度, 经度) —— 用户反馈"上证/恒生离得太近重叠"，
+    # 而且明确说"地理位置可以适当牺牲，但两两都不要重合"。这里不再用真实
+    # 交易所坐标，改成手动挑的、彼此拉开足够距离的坐标——优先保证不重叠，
+    # 城市对不对得上退居第二位（比如"上证指数"标在了蒙古附近，不是真的
+    # 上海坐标，纯粹是为了跟恒生/日经/韩国这几个挤在东亚的图标拉开距离）。
+    # 市场是"GLOBAL"的走get_global_indices()那条单独的数据源(Yahoo Finance)，
+    # 不是get_multi_index_snapshot。
+    ("恒生指数", "HK", 22.0, 114.0),
+    ("上证指数", "A", 55.0, 105.0),
+    ("标普500", "US", 40.0, -95.0),
+    ("纳斯达克100", "US", 48.0, -122.0),
+    ("日经225", "GLOBAL", 36.0, 140.0),
+    ("富时100", "GLOBAL", 54.0, -3.0),
+    ("德国DAX", "GLOBAL", 50.0, 30.0),
+    ("韩国KOSPI", "GLOBAL", 0.0, 120.0),
+    ("印度SENSEX", "GLOBAL", 19.0, 73.0),
+    ("巴西IBOVESPA", "GLOBAL", -15.0, -55.0),
+    ("澳大利亚ASX200", "GLOBAL", -30.0, 145.0),
+    ("新加坡STI", "GLOBAL", -25.0, 95.0),
 ]
 
-# 恒生指数/上证指数/标普500/纳斯达克100/道琼斯这5个能查到腾讯行情接口
+# 恒生指数/上证指数/标普500/纳斯达克100这4个能查到腾讯行情接口
 # (qt.gtimg.cn) 对应的代码——实测这个接口带 access-control-allow-origin: *
 # 响应头，浏览器JS可以直接跨域fetch，不用经过我们自己的Streamlit后端。
-# 东财"全球指数"接口(日经/富时/DAX/KOSPI/SENSEX那5个)没有这个响应头，
-# 浏览器直接fetch会被CORS拦下来，只能停留在"页面加载时的服务端快照"，
-# 做不到这5个的秒级实时刷新——这是浏览器安全机制的硬限制，不是不想做。
+# 东财/Yahoo那7个国际指数没有这个响应头，浏览器直接fetch会被CORS拦下来，
+# 只能停留在"页面加载时的服务端快照"，做不到这几个的秒级实时刷新——
+# 这是浏览器安全机制的硬限制，不是不想做。（道琼斯按用户要求去掉了，
+# 换成保留纳斯达克100，美股只留标普+纳斯达克两个。）
 _HOME_MAP_TENCENT_CODE = {
     "恒生指数": "r_hkHSI", "上证指数": "r_sh000001",
-    "标普500": "usINX", "纳斯达克100": "usNDX", "道琼斯": "usDJI",
+    "标普500": "usINX", "纳斯达克100": "usNDX",
 }
 
 
@@ -1300,10 +1306,14 @@ def _render_home_map():
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <div id="home-map" style="height:420px;border-radius:8px;overflow:hidden"></div>
     <script>
-    // 缩放级别从2提到3——之前用户反馈上证/恒生离得太近，世界视角下两个图标
-    // 几乎完全重叠点不开，放大一档能明显拉开像素距离，代价是极地区域被裁掉
-    // 一些，但对"看指数"这个用途影响不大。
-    var map = L.map('home-map', {{scrollWheelZoom: false}}).setView([25, 40], 3);
+    // 用户反馈缩放功能容易误触，干脆整个禁掉——不止滚轮缩放，双击/触摸
+    // 双指缩放/框选缩放/键盘+-缩放、缩放按钮全部关掉，固定在一个能看到
+    // 所有图标的世界视角，不会被不小心手滑放大/缩小。保留拖拽平移，
+    // 纯粹"缩放"这个动作不再存在。
+    var map = L.map('home-map', {{
+        scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false,
+        boxZoom: false, keyboard: false, zoomControl: false, dragging: true,
+    }}).setView([12, 25], 2);
     L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
         attribution: '&copy; OpenStreetMap contributors', maxZoom: 8
     }}).addTo(map);
