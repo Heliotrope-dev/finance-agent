@@ -1643,6 +1643,53 @@ def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
     return result[["日期", "新闻标题", "分类", "url"]]
 
 
+_GLOBAL_INDEX_CODES = {
+    "日经225": "N225", "富时100": "FTSE", "德国DAX": "GDAXI",
+    "韩国KOSPI": "KS11", "印度SENSEX": "SENSEX",
+}
+_global_indices_down_until = 0.0  # 熔断解除时间戳，见下面用法
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_global_indices() -> dict[str, dict]:
+    """首页世界地图用的几个国际指数（日经225/富时100/德国DAX/韩国KOSPI/
+    印度SENSEX）——东财"全球指数"接口(index_global_spot_em)一次性覆盖，
+    不用逐个指数单独找数据源。返回 {指数名: {"最新":.., "涨跌":.., "涨跌幅":..}}，
+    查不到的指数不出现在返回的dict里（调用方按key存在与否判断，不拿假数据凑数）。
+
+    这个接口走的也是push2.eastmoney.com（跟涨跌停股池同一个域名下的东财
+    接口，之前那次踩过它偶尔卡住15秒超时的坑），实测这次开发时也遇到过
+    连续多次JSONDecodeError（拿到的不是合法JSON，大概率是被限流跳过去了
+    一个不是JSON的响应体）——所以这里跟涨跌停股池一样加熔断：失败一次后
+    60秒内不再重试，直接返回空dict，调用方（地图）对应的图标就不显示，
+    不会因为反复重试拖慢首页。
+    """
+    global _global_indices_down_until
+    if time.time() < _global_indices_down_until:
+        return {}
+    try:
+        df = _with_retry(ak.index_global_spot_em)
+    except Exception:
+        _global_indices_down_until = time.time() + 60
+        return {}
+    if df is None or df.empty:
+        _global_indices_down_until = time.time() + 60
+        return {}
+    result = {}
+    for name, code in _GLOBAL_INDEX_CODES.items():
+        row = df[df["代码"] == code]
+        if row.empty:
+            continue
+        r = row.iloc[0]
+        try:
+            result[name] = {
+                "最新": float(r["最新价"]), "涨跌": float(r["涨跌额"]), "涨跌幅": float(r["涨跌幅"]),
+            }
+        except (ValueError, TypeError):
+            continue
+    return result
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_market_news() -> pd.DataFrame:
     """大盘/宏观资讯，补充个股新闻覆盖不到的面。"""

@@ -1,5 +1,6 @@
 """Invest Agent —— 行情+财务+新闻交叉验证，不做黑箱荐股。"""
 
+import json
 import os
 import re
 import urllib.parse
@@ -26,6 +27,8 @@ from data_sources import (
     get_stock_name,
     get_index_news,
     get_futu_news,
+    get_market_news,
+    get_global_indices,
     search_stock_by_name,
     get_multi_index_snapshot,
     get_market_breadth,
@@ -1200,6 +1203,133 @@ def _render_hot_sectors(market: str):
                 st.rerun()
 
 
+_HOME_MAP_MARKERS = [
+    # (指数名, 所在市场, 纬度, 经度) —— 纬经度是标的所在交易所城市的真实坐标，
+    # 不是"随手摆几个点"。美股三个指数物理上都在纽约，故意把经纬度稍微错开
+    # 一点，不然三个图标会完全重叠点不开。市场是"GLOBAL"的走get_global_indices()
+    # 那条单独的数据源（东财"全球指数"接口），不是get_multi_index_snapshot。
+    ("恒生指数", "HK", 22.32, 114.17),
+    ("上证指数", "A", 31.23, 121.47),
+    ("标普500", "US", 40.71, -74.01),
+    ("纳斯达克100", "US", 40.75, -73.98),
+    ("道琼斯", "US", 40.68, -74.04),
+    ("日经225", "GLOBAL", 35.68, 139.69),      # 东京
+    ("富时100", "GLOBAL", 51.51, -0.13),       # 伦敦
+    ("德国DAX", "GLOBAL", 50.11, 8.68),        # 法兰克福
+    ("韩国KOSPI", "GLOBAL", 37.57, 126.98),    # 首尔
+    ("印度SENSEX", "GLOBAL", 19.08, 72.88),    # 孟买
+]
+
+
+def _render_home_map():
+    """首页世界地图——Leaflet.js + OpenStreetMap 免费瓦片（不需要API key/信用卡），
+    在几个指数所在交易所城市的真实经纬度上放小图标，图标里显示指数名+当前点数+
+    涨跌幅（红涨绿跌）。
+
+    这里不做自动刷新（没有run_every）——今天刚踩过"行情"tab那几个卡片加了
+    run_every=3做涨跌闪烁，结果导致从行情切到自选股出现页面残留的坑（大概率
+    是fragment自己的定时器在切走后仍在后台触发）。地图是通过components.v1.html
+    渲染在独立iframe里的，比普通markdown卡片更"重"，贸然加自动刷新踩到同一个
+    坑的风险更高，所以这一版先只在首页加载/手动刷新时更新一次，不追求秒级跳动。
+    """
+    snaps: dict[str, list[dict]] = {}
+    for _, mkt, _, _ in _HOME_MAP_MARKERS:
+        if mkt == "GLOBAL" or mkt in snaps:
+            continue
+        try:
+            snaps[mkt] = get_multi_index_snapshot(mkt)
+        except Exception:
+            snaps[mkt] = []
+    try:
+        global_idx = get_global_indices()
+    except Exception:
+        global_idx = {}
+
+    markers_js = []
+    for name, mkt, lat, lon in _HOME_MAP_MARKERS:
+        if mkt == "GLOBAL":
+            idx = global_idx.get(name)
+        else:
+            idx = next((i for i in snaps.get(mkt, []) if i["名称"] == name), None)
+        if not idx:
+            continue
+        color = "#e02020" if idx["涨跌"] >= 0 else "#22a06b"
+        label = (
+            f"<div style='background:#fff;border:1px solid #ddd;border-radius:6px;"
+            f"padding:4px 8px;font-size:0.75rem;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)'>"
+            f"<div style='font-weight:600;color:#0f172a'>{name}</div>"
+            f"<div style='color:{color};font-weight:700'>{idx['最新']:,.2f}</div>"
+            f"<div style='color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
+            f"</div>"
+        )
+        markers_js.append(
+            "L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [90, 50], iconAnchor: [45, 50]})}).addTo(map);"
+            % (lat, lon, json.dumps(label))
+        )
+
+    if not markers_js:
+        st.caption("指数数据暂时获取不到，地图先不展示。")
+        return
+
+    map_html = f"""
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <div id="home-map" style="height:420px;border-radius:8px;overflow:hidden"></div>
+    <script>
+    var map = L.map('home-map', {{scrollWheelZoom: false}}).setView([28, 40], 2);
+    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+        attribution: '&copy; OpenStreetMap contributors', maxZoom: 8
+    }}).addTo(map);
+    {' '.join(markers_js)}
+    </script>
+    """
+    _cv1.html(map_html, height=440)
+
+
+def _render_home_page():
+    """首页——世界地图（几个常见指数的实时点位）+ 今日重磅资讯。
+
+    "今日重磅消息"走财新大盘资讯（get_market_news，跟指数详情页资讯兜底
+    用的是同一个数据源）——如实说明：这不是真正意义上的"热度排行"，免费
+    数据源里没找到带热度分数的全市场资讯榜，财新这份本身是按时间倒序的
+    编辑精选大盘资讯，这里按时间排序取前10，不是编造一个假的热度分数。
+    """
+    st.markdown("**全球指数一览**")
+    _render_home_map()
+
+    st.divider()
+    st.markdown("**今日重磅消息**")
+    try:
+        news = get_market_news()
+    except Exception:
+        news = None
+    if news is None or news.empty:
+        st.caption("暂时获取不到资讯。")
+        return
+
+    news = news.copy()
+    news["日期"] = news["url"].str.extract(r"/(\d{4}-\d{2}-\d{2})/")
+    news = news.sort_values("日期", ascending=False, na_position="last")
+
+    show_n = 30 if st.session_state.get("_home_news_expand") else 10
+    for _, row in news.head(show_n).iterrows():
+        with st.container(border=True):
+            st.markdown(
+                f"<a href='{row['url']}' target='_blank' style='color:var(--fa-text);text-decoration:none;font-weight:600'>{row['summary']}</a>"
+                f"<div style='font-size:0.75rem;color:var(--fa-muted);margin-top:2px'>{row.get('tag','')} · {row.get('日期') or '-'}</div>",
+                unsafe_allow_html=True,
+            )
+    if len(news) > 10:
+        if not st.session_state.get("_home_news_expand"):
+            if st.button("更多资讯", key="_home_news_more"):
+                st.session_state["_home_news_expand"] = True
+                st.rerun()
+        else:
+            if st.button("收起", key="_home_news_collapse"):
+                st.session_state["_home_news_expand"] = False
+                st.rerun()
+
+
 def _render_stock_detail(symbol: str, market: str, name: str):
     # 之前这里还挂着 _inject_auto_refresh(30,...) 强制整页每30秒rerun一次——
     # 是_render_price_header改成@st.fragment(run_every=3)独立刷新之前的老
@@ -1950,13 +2080,18 @@ else:
 
         # 用 radio 手动实现 tab 切换，不用 st.tabs()——st.tabs() 选中哪个是纯前端状态，
         # 代码控制不了；从自选股点进详情页再返回时，需要能把选中项强制拨回"自选股"。
-        st.session_state.setdefault("_active_section", "行情")
+        # "首页"放在最前面且是默认分区——打开网站先看首页（世界地图+今日资讯），
+        # 不是直接扔进"行情"这种数据密集页面。
+        st.session_state.setdefault("_active_section", "首页")
 
         active_section = st.radio(
-            "分区", ["行情", "自选股"], key="_active_section", horizontal=True, label_visibility="collapsed",
+            "分区", ["首页", "行情", "自选股"], key="_active_section", horizontal=True, label_visibility="collapsed",
         )
 
-        if active_section == "行情":
+        if active_section == "首页":
+            _render_home_page()
+
+        elif active_section == "行情":
             # 指数快照/大盘统计+涨停跌停池/南向资金+核心股/热门板块，这几块
             # 之前全挤在一段代码里顺序往下跑——点其中任何一个的交互按钮
             # （比如"显示更多"、"更多板块"）都会带动其余几块跟着重新拉一遍
