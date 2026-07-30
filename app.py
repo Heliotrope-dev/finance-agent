@@ -1350,6 +1350,25 @@ def _render_home_map():
     except Exception:
         global_idx = {}
 
+    # 地图图标点进对应指数详情页——只有恒生指数/上证指数/标普500/纳斯达克100这4个
+    # 有真正的详情页数据支撑（_MULTI_INDICES里的A/HK/US市场，K线/成分股/AI分析全套都有）。
+    # 其余7个国际指数走的是Yahoo Finance(get_global_indices)，现有详情页架构
+    # (_render_index_detail/get_multi_index_snapshot)只认A/HK/US这三个市场，
+    # 没有对应的K线/成分股数据源，硬点进去打不开一个能用的详情页，所以先只给
+    # 这4个能查到code的指数加跳转，其余7个先保持不可点击。
+    href_by_name: dict[str, str] = {}
+    for name, mkt, _, _ in _HOME_MAP_MARKERS:
+        if mkt == "GLOBAL":
+            continue
+        code = dict(_MULTI_INDICES.get(mkt, [])).get(name)
+        if code:
+            href_by_name[name] = (
+                f"?open_index_code={urllib.parse.quote(code)}"
+                f"&open_index_market={urllib.parse.quote(mkt)}"
+                f"&open_index_name={urllib.parse.quote(name)}"
+                f"{_auth_qs()}"
+            )
+
     markers_js = []
     for name, mkt, lat, lon in _HOME_MAP_MARKERS:
         if mkt == "GLOBAL":
@@ -1363,7 +1382,7 @@ def _render_home_map():
         # 从 padding 4px 8px/font-size 0.75rem 缩到 2px 5px/0.6rem，
         # iconSize 从 [90,50] 缩到 [68,38]，但没有缩到看不清的程度
         # （名称+点数+涨跌幅三行还是各自独占一行，只是整体更紧凑）。
-        label = (
+        inner = (
             f"<div style='background:#fff;border:1px solid #ddd;border-radius:5px;"
             f"padding:2px 5px;font-size:0.6rem;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)'>"
             f"<div style='font-weight:600;color:#0f172a'>{name}</div>"
@@ -1371,6 +1390,14 @@ def _render_home_map():
             f"<div style='color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
             f"</div>"
         )
+        href = href_by_name.get(name)
+        if href:
+            # target='_top'：这个地图本身渲染在st.components.v1.html的iframe里，
+            # 普通<a>点击只会在iframe内部跳转、看不到效果，_top让浏览器在最外层
+            # 文档导航，才能真正带动Streamlit主页面的query params跳转到详情页。
+            label = f"<a href='{href}' target='_top' style='cursor:pointer;text-decoration:none'>{inner}</a>"
+        else:
+            label = inner
         if name in _HOME_MAP_TENCENT_CODE:
             # 存进tcMarkers，供后面的JS轮询按名字找到这个marker原地更新图标。
             markers_js.append(
@@ -1410,6 +1437,7 @@ def _render_home_map():
     {' '.join(markers_js)}
 
     var codeToName = {json.dumps(code_to_name)};
+    var hrefByName = {json.dumps(href_by_name)};
     function fmtNum(n) {{ return n.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}); }}
     function updateTcMarkers() {{
         fetch('https://qt.gtimg.cn/q={",".join(tencent_codes)}')
@@ -1431,12 +1459,17 @@ def _render_home_map():
                     var changePct = parseFloat(fields[32]);
                     if (isNaN(last) || isNaN(changePct)) return;
                     var color = changeAmt >= 0 ? '{UP_COLOR}' : '{DOWN_COLOR}';
-                    var html = "<div style='background:#fff;border:1px solid #ddd;border-radius:5px;"
+                    var inner = "<div style='background:#fff;border:1px solid #ddd;border-radius:5px;"
                         + "padding:2px 5px;font-size:0.6rem;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)'>"
                         + "<div style='font-weight:600;color:#0f172a'>" + name + "</div>"
                         + "<div style='color:" + color + ";font-weight:700'>" + fmtNum(last) + "</div>"
                         + "<div style='color:" + color + "'>" + (changePct >= 0 ? '+' : '') + changePct.toFixed(2) + "%</div>"
                         + "</div>";
+                    // 3秒轮询刷新图标时也要重新套上跳转链接，不然刷新一次链接就消失了
+                    var href = hrefByName[name];
+                    var html = href
+                        ? "<a href='" + href + "' target='_top' style='cursor:pointer;text-decoration:none'>" + inner + "</a>"
+                        : inner;
                     tcMarkers[name].setIcon(L.divIcon({{html: html, className: '', iconSize: [68, 38], iconAnchor: [34, 38]}}));
                 }});
             }})
