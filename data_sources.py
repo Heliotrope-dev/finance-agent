@@ -1646,7 +1646,7 @@ def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
 
 _GLOBAL_INDEX_YAHOO_SYMBOLS = {
     "日经225": "%5EN225", "富时100": "%5EFTSE", "德国DAX": "%5EGDAXI",
-    "韩国KOSPI": "%5EKS11", "印度SENSEX": "%5EBSESN",
+    "印度SENSEX": "%5EBSESN",
     # 首页地图之前太空，补的3个填空区域用的指数
     "巴西IBOVESPA": "%5EBVSP", "澳大利亚ASX200": "%5EAXJO", "新加坡STI": "%5ESTI",
 }
@@ -1672,9 +1672,10 @@ def _yahoo_index_snapshot(symbol: str) -> dict | None:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_global_indices() -> dict[str, dict]:
-    """首页世界地图用的几个国际指数（日经225/富时100/德国DAX/韩国KOSPI/
-    印度SENSEX）——查过东财"全球指数"接口(index_global_spot_em)，实测这次
-    开发时连续多次失败（JSONDecodeError，大概率被限流跳过去了一个不是
+    """首页世界地图用的几个国际指数（日经225/富时100/德国DAX/印度SENSEX/
+    巴西IBOVESPA/澳大利亚ASX200/新加坡STI，韩国KOSPI用户反馈拿掉了）——
+    查过东财"全球指数"接口(index_global_spot_em)，实测这次开发时连续多次
+    失败（JSONDecodeError，大概率被限流跳过去了一个不是
     JSON的响应体，跟涨跌停股池同一个push2.eastmoney.com域名下的问题）；
     也试过Twelve Data的免费API key，这5个国际指数在免费层直接返回"index
     unavailable"（付费套餐才能用）。改用Yahoo Finance的公开chart接口
