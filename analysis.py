@@ -231,8 +231,16 @@ def summarize_overall(symbol: str, section_texts: dict):
     末尾带一个机器可解析的[综合评分: 数字]标签，用 extract_score 解析出来，
     展示层面转成一个可视化打分条，比纯文字更直观。流式生成器。
     """
+    # max_tokens从1200调到3000——这里是"AI分析概率性返回空内容"那个老坑
+    # (见README"踩过的坑")在summarize_overall这个调用点复现了：这个函数要把
+    # 前面4个模块(资讯/财务/对比大盘/交叉验证)的完整文本一起喂给模型再综合
+    # 一次，输入信息密度比其它单一模块的调用点(analyze_index等)高得多，
+    # 隐藏的思考过程(reasoning_content)需要的预算也相应更多，1200不够时
+    # 思考过程会把预算吃完，正式回答（其实只要求150字以内）一个字都不剩。
+    # 调大预算不影响正常情况下的耗时/成本——模型该多短就多短，这只是把
+    # "万一想得久一点"的安全余量留够，不是把回答故意拉长。
     sections = "\n\n".join(f"【{k}】\n{v}" for k, v in section_texts.items() if v)
-    yield from _stream_chat(_OVERALL_SUMMARY_PROMPT, f"标的：{symbol}\n\n{sections}", max_tokens=1200)
+    yield from _stream_chat(_OVERALL_SUMMARY_PROMPT, f"标的：{symbol}\n\n{sections}", max_tokens=3000)
 
 
 def extract_score(analysis_text: str) -> int | None:
