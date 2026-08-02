@@ -96,6 +96,15 @@ _FINANCIAL_SUMMARY_PROMPT = """你是财经数据分析助手。下面是一家�
 def cross_validate(symbol: str, history_summary: str, financial_summary: str, news_summary: str, technical_summary: str = ""):
     """把行情+财务+新闻+本地算好的技术面信号丢给 DeepSeek，产出带依据链的交叉验证分析。
     流式生成器，配合 st.write_stream() 使用。
+
+    max_tokens=4000——"AI分析概率性返回空内容"那个老坑（见README"踩过的坑"，
+    summarize_overall那个调用点也踩过一次）在这里复现了：这是所有AI模块里
+    唯一要求输出"新闻核实/数据信号/技术面对照(含盘中实时信号)/不确定点"四段
+    完整结构化分析、还要带方向倾向标签的调用点，正文本身就比其它模块长得多，
+    之前一直留在跟summarize_financials这种150字短总结一样的默认2000上，
+    隐藏的思考过程(reasoning_content)一旦吃得多，正文预算就不够写完四段，
+    出现"AI没有返回任何内容"。调大到4000（比summarize_overall的3000更多，
+    因为这里连正文目标长度本身也比它长，不只是思考余量）。
     """
     user_prompt = f"""股票代码：{symbol}
 
@@ -113,7 +122,7 @@ def cross_validate(symbol: str, history_summary: str, financial_summary: str, ne
 
 请按系统提示的结构做交叉验证分析，别忘了最后的方向倾向标签。"""
 
-    yield from _stream_chat(_SYSTEM_PROMPT, user_prompt)
+    yield from _stream_chat(_SYSTEM_PROMPT, user_prompt, max_tokens=4000)
 
 
 def extract_verdict(analysis_text: str) -> str:
