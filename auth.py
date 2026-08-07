@@ -127,7 +127,10 @@ def _check_user(email: str, pw: str) -> tuple:
         _sb_patch("users", {"failed_attempts": 0, "locked_until": locked_at}, {"email": f"eq.{email}"})
         return False, f"密码连续错误{_LOCKOUT_THRESHOLD}次，请等待{_LOCKOUT_SECONDS}秒后重试"
     _sb_patch("users", {"failed_attempts": attempts}, {"email": f"eq.{email}"})
-    return False, f"邮箱或密码不正确（还有 {_LOCKOUT_THRESHOLD - attempts} 次机会）"
+    # 剩余次数只在内部计数，不回显——之前"还有N次机会"只在邮箱存在时才会出现，
+    # 攻击者靠这条文案有没有就能试出邮箱是否注册过；跟邮箱不存在时的提示统一成
+    # 同一句，不泄露账号是否存在。
+    return False, "邮箱或密码不正确"
 
 
 def _register_user(email: str, pw_hash: str):
