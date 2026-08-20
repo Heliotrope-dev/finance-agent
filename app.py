@@ -315,9 +315,33 @@ if _stored_token and not st.session_state.get("logged_in"):
         # 跟这里token校验真正把logged_in置位的时机之间有代码距离，这次由
         # del触发的额外重跑会让那段JS在某些时序窗口下又判断成"还没登录"，
         # 重新触发"从localStorage读token→塞进URL→800ms后强制刷新"，造成
-        # 登录后网页陷入固定几秒一次的无限刷新循环。安全加固和"网站能正常
-        # 打开"冲突时选后者，这里不删，token继续留在URL里（7天有效期本身
-        # 不变）。
+        # 登录后网页陷入固定几秒一次的无限刷新循环。当时选择"不删"解决了
+        # 刷新循环，但代价是token明文常驻地址栏——浏览器历史里留得住，
+        # 也正是当初想避免的问题被绕了回来。
+        #
+        # 复查后改用另一条路：问题根源是"碰 st.query_params 会触发服务端
+        # 重跑"，不是"删掉token"这件事本身有问题。改成纯浏览器端的
+        # history.replaceState 把地址栏里的 _auth 摘掉——这是JS操作，
+        # 不经过Streamlit的状态管理/websocket，不会触发脚本重跑，用的是
+        # 跟上面"localStorage自动登录"那段JS同一类技术（那段是"塞进URL"，
+        # 这里反过来"摘掉"，机制相同、方向相反，都不touch st.query_params）。
+        # 注意这只解决"地址栏/浏览器历史里明文常驻"这一半——点击卡片触发
+        # 这次整页导航的那一次HTTP请求本身仍然带着token发到了服务器，如果
+        # Nginx对这条路径开着完整query string的access log，这一次请求还是
+        # 会被记下来一次；这一半只能在Nginx配置层面（对这个路径的access log
+        # 做query string脱敏）解决，应用代码这层做不到。
+        _cv1.html(
+            """<script>
+            try {
+                var url = new URL(window.parent.location.href);
+                if (url.searchParams.get('_auth')) {
+                    url.searchParams.delete('_auth');
+                    window.parent.history.replaceState(null, '', url.toString());
+                }
+            } catch(e) {}
+            </script>""",
+            height=1,
+        )
     else:
         try:
             del st.query_params["_auth"]
@@ -1616,8 +1640,8 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     st.markdown(
         f"""
         <div style='background:{UP_COLOR};margin:-1rem -1rem 0 -1rem;padding:14px 24px'>
-            <div style='color:#fff;font-size:1.2rem;font-weight:700'>{name}</div>
-            <div style='color:#fff;font-size:0.85rem;opacity:0.85'>{symbol} · {market}</div>
+            <div style='color:#fff;font-size:1.2rem;font-weight:700'>{_esc(name)}</div>
+            <div style='color:#fff;font-size:0.85rem;opacity:0.85'>{_esc(symbol)} · {_esc(market)}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1767,8 +1791,8 @@ def _render_index_detail(name: str, code: str, market: str):
     st.markdown(
         f"""
         <div style='background:{UP_COLOR};margin:-1rem -1rem 0 -1rem;padding:14px 24px'>
-            <div style='color:#fff;font-size:1.2rem;font-weight:700'>{name}</div>
-            <div style='color:#fff;font-size:0.85rem;opacity:0.85'>{code} · {market}指数</div>
+            <div style='color:#fff;font-size:1.2rem;font-weight:700'>{_esc(name)}</div>
+            <div style='color:#fff;font-size:0.85rem;opacity:0.85'>{_esc(code)} · {_esc(market)}指数</div>
         </div>
         """,
         unsafe_allow_html=True,

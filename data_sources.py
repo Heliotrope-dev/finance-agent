@@ -262,22 +262,33 @@ def _benchmark_history_a(start_date: str, end_date: str, index_code: str) -> pd.
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_benchmark_history(start_date: str, end_date: str, market: str = "A") -> pd.DataFrame:
-    """基准指数历史收盘价：A股用沪深300，港股用恒生指数，美股用标普500。"""
-    if market == "HK":
-        with _akshare_js_lock:
-            df = ak.stock_hk_index_daily_sina(symbol="HSI")
-        df = df.rename(columns={"date": "日期", "close": "收盘"})
-        df["日期"] = pd.to_datetime(df["日期"])
-        start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
-        return df[(df["日期"] >= start) & (df["日期"] <= end)][["日期", "收盘"]]
-    if market == "US":
-        with _akshare_js_lock:
-            df = ak.index_us_stock_sina(symbol=".INX")
-        df = df.rename(columns={"date": "日期", "close": "收盘"})
-        df["日期"] = pd.to_datetime(df["日期"])
-        start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
-        return df[(df["日期"] >= start) & (df["日期"] <= end)][["日期", "收盘"]]
-    return _benchmark_history_a(start_date, end_date, "sh.000300")
+    """基准指数历史收盘价：A股用沪深300，港股用恒生指数，美股用标普500。
+
+    三个分支原来都是裸调用（HK/US是没套_with_retry的新浪akshare接口，A股是
+    baostock，出错会raise RuntimeError）——调用方（app.py"对比大盘"模块）没有
+    try/except，接口一抖动就是整个详情页崩掉报错，而不是"对比大盘暂时不可用"
+    这种降级。这里统一包一层try/except，取数失败就返回空DataFrame，跟
+    app.py那边"if benchmark is not None and not benchmark.empty"的既有判断
+    正好对上，不需要再改调用方。
+    """
+    try:
+        if market == "HK":
+            with _akshare_js_lock:
+                df = ak.stock_hk_index_daily_sina(symbol="HSI")
+            df = df.rename(columns={"date": "日期", "close": "收盘"})
+            df["日期"] = pd.to_datetime(df["日期"])
+            start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
+            return df[(df["日期"] >= start) & (df["日期"] <= end)][["日期", "收盘"]]
+        if market == "US":
+            with _akshare_js_lock:
+                df = ak.index_us_stock_sina(symbol=".INX")
+            df = df.rename(columns={"date": "日期", "close": "收盘"})
+            df["日期"] = pd.to_datetime(df["日期"])
+            start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
+            return df[(df["日期"] >= start) & (df["日期"] <= end)][["日期", "收盘"]]
+        return _benchmark_history_a(start_date, end_date, "sh.000300")
+    except Exception:
+        return pd.DataFrame()
 
 
 _MULTI_INDICES = {
@@ -1611,9 +1622,19 @@ def _sina_minute_intraday(sina_code: str) -> pd.DataFrame:
 
     今天没有分时数据（周末/节假日/还没开盘）就退到接口返回的历史里最近一个
     交易日的分时——跟只剩日K比，好歹还是分时的形状，视觉上更一致。
+
+    这里原来是裸调用 ak.stock_zh_a_minute，没有 _with_retry 也没有 try/except——
+    调用方（get_stock_intraday_a/get_index_intraday_a）又是"分时K（今日）"这个
+    st.radio默认选中的第一个选项（app.py），意味着新浪分时接口一抖动，打开任意
+    A股个股/指数详情页的默认视图就直接整页报错，而不是设计文档里说好的"退化成
+    日K"。改成异常兜底返回空DataFrame——跟这个函数一贯"取不到就返回空表"的
+    约定一致，调用方原有的 `if intraday.empty` 判断不用改就能正确降级。
     """
-    with _akshare_js_lock:
-        df = ak.stock_zh_a_minute(symbol=sina_code, period="1")
+    try:
+        with _akshare_js_lock:
+            df = ak.stock_zh_a_minute(symbol=sina_code, period="1")
+    except Exception:
+        return pd.DataFrame()
     if df is None or df.empty:
         return pd.DataFrame()
     today = datetime.now().strftime("%Y-%m-%d")
@@ -1831,12 +1852,23 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
 @st.cache_data(ttl=600, show_spinner=False)
 def get_financial_abstract(symbol: str, market: str = "A") -> pd.DataFrame:
     """财务摘要指标。A股是东财"股票财务摘要"接口；港股/美股是东财对应的分析指标接口，
-    字段跟A股完全不是一回事（更细、列更多），直接原样返回给AI消化，不强行对齐格式。"""
-    if market == "HK":
-        return _with_retry(lambda: ak.stock_financial_hk_analysis_indicator_em(symbol=symbol, indicator="年度"))
-    if market == "US":
-        return _with_retry(lambda: ak.stock_financial_us_analysis_indicator_em(symbol=symbol, indicator="年报"))
-    return _with_retry(lambda: ak.stock_financial_abstract(symbol=symbol))
+    字段跟A股完全不是一回事（更细、列更多），直接原样返回给AI消化，不强行对齐格式。
+
+    _with_retry 重试耗尽后是 raise 而不是返回 None——调用方（app.py 的"财务摘要"模块）
+    原来直接拿这个函数的返回值，东财接口一抖动、重试也失败，异常会一路冒穿到Streamlit
+    渲染层，整个详情页直接崩掉报错，而不是页面本来设计好的"暂无财务数据"降级提示。
+    这里改成自己吞掉异常返回空DataFrame，跟其它"取数失败就给空表"的getter（比如
+    get_stock_intraday_a）保持同一个"不会raise、只会返回空"的调用约定，调用方原有的
+    `if fin is not None and not fin.empty` 判断不用改就能正确降级。
+    """
+    try:
+        if market == "HK":
+            return _with_retry(lambda: ak.stock_financial_hk_analysis_indicator_em(symbol=symbol, indicator="年度"))
+        if market == "US":
+            return _with_retry(lambda: ak.stock_financial_us_analysis_indicator_em(symbol=symbol, indicator="年报"))
+        return _with_retry(lambda: ak.stock_financial_abstract(symbol=symbol))
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=300, show_spinner=False)

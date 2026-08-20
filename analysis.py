@@ -181,11 +181,18 @@ def summarize_index_news(name: str, news_summary: str):
 
 
 def summarize_benchmark(symbol: str, stock_pct: float, benchmark_name: str, benchmark_pct: float):
-    """对比大盘模块的独立AI总结。流式生成器。"""
+    """对比大盘模块的独立AI总结。流式生成器。
+
+    max_tokens原来是800，比其它同类调用点（summarize_financials/analyze_index都是
+    1200，summarize_overall是3000）更紧张——"AI分析概率性返回空内容"这个坑（见
+    README"踩过的坑"）的本质是隐藏思考过程(reasoning_content)吃掉的预算跟正文
+    目标长度无关、纯看运气，这里正文虽然只要求80字以内，但一样可能被思考过程
+    吃满预算。调到跟其它短总结类调用点一致的1200，不再是全部调用点里最紧张的那个。
+    """
     yield from _stream_chat(
         _BENCHMARK_SUMMARY_PROMPT,
         f"股票 {symbol} 区间涨跌幅：{stock_pct:+.2f}%\n{benchmark_name} 同期涨跌幅：{benchmark_pct:+.2f}%",
-        max_tokens=800,
+        max_tokens=1200,
     )
 
 
