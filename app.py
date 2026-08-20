@@ -468,6 +468,46 @@ def _fmt_turnover(v) -> str:
     return f"{v:.0f}"
 
 
+def _run_concurrent_with_deadline(items: list, fn, timeout: float, max_workers: int = 8) -> dict:
+    """一批任务并发跑、给整批一个统一的deadline（从submit那一刻算起，不是从"轮到
+    检查它"那一刻）——自选股列表/组合对比/回看补录三处原来各自手写一份几乎一样的
+    "ThreadPoolExecutor + concurrent.futures.wait(timeout) + shutdown(wait=False)"，
+    抽成这一个共享helper，不用再维护三份重复代码。
+
+    统一deadline是刻意的：三处原来都各自踩过同一个坑——按"逐个future.result(timeout=N)"
+    实现时，每个future的超时窗口是从"轮到检查它"那一刻才开始计时，排在后面检查的
+    future会绕过预期上限（前面几个如果很快返回，轮到最后一个时它已经跑了好几秒、
+    检查时又给它一次全新的N秒，总耗时照样能远超预期，没起到限制作用）。改用
+    concurrent.futures.wait() 给整批futures一个从submit那一刻算起的统一截止时间，
+    时间到了还没完成的直接跳过，才是真正把整批总耗时卡在timeout附近。
+
+    cancel_futures=True：shutdown时把"提交了但线程池还没轮到开始跑"的future取消掉，
+    减少浪费。已经在执行中、卡在网络请求里的线程没法从Python这层强制中断——deadline
+    到了之后它们会在后台自己跑完/超时再自然退出，不阻塞这个函数返回。这不是"无限
+    堆积"的线程泄漏：各处传进来的fn目前都是走内部已有重试/超时保护的数据源接口
+    （get_stock_realtime/get_stock_history等），最终都会自己返回，只是可能比这里
+    的deadline稍晚，不是真正无界悬挂；如果以后有调用点传入没有自带超时的fn，这条
+    保证就不成立了，调用方要自己确认。
+
+    返回：{items里的位置索引 -> fn(item)的返回值}，deadline内没完成/抛异常的位置
+    不会出现在字典里，调用方按"i in results"判断这一项是不是被跳过了。用位置索引
+    而不是item本身做key，是因为item可能是dict这类不可hash的类型。
+    """
+    results: dict[int, object] = {}
+    if not items:
+        return results
+    ex = ThreadPoolExecutor(max_workers=min(max_workers, len(items)))
+    futures = {ex.submit(fn, item): i for i, item in enumerate(items)}
+    done, _not_done = _futures_wait(list(futures.keys()), timeout=timeout)
+    for fut in done:
+        try:
+            results[futures[fut]] = fut.result()
+        except Exception:
+            pass
+    ex.shutdown(wait=False, cancel_futures=True)
+    return results
+
+
 def _auth_qs() -> str:
     """卡片链接的<a href="?...">会触发真正的整页导航（不是Streamlit的软rerun），
     URL的query string会被整个替换掉——如果不把登录用的_auth token也带上，
@@ -551,6 +591,20 @@ def _esc(s) -> str:
     if s is None:
         return ""
     return html.escape(str(s), quote=True)
+
+
+def _safe_href(url) -> str:
+    """新闻链接专用——_esc() 只做HTML实体转义，不管URL的scheme是什么，理论上
+    如果新闻源（财新/富途资讯/东财公告）混进一条 url 字段是 "javascript:..."
+    开头，_esc()不会拦下来，<a href='javascript:...'>依然会在用户点击时执行。
+    这里只放行 http/https 两种scheme，其它一律换成 "#"（点了没反应，不会跳转
+    也不会执行任何东西）——当前几个新闻源可信度都比较高，这只是防御性兜底，
+    不是说已经发现过真实的恶意url。
+    """
+    s = _esc(url)
+    if not re.match(r"^https?://", s, re.IGNORECASE):
+        return "#"
+    return s
 
 
 def _news_to_summary(news) -> str:
@@ -689,7 +743,7 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
             _title = r["新闻标题"]
             _title_color = _news_title_color(_title, _hot_names)
             _title_html = (
-                f"<a href='{_esc(r.get('url', ''))}' target='_blank' style='color:{_title_color};text-decoration:none'>{_esc(_title)}</a>"
+                f"<a href='{_safe_href(r.get('url', ''))}' target='_blank' style='color:{_title_color};text-decoration:none'>{_esc(_title)}</a>"
                 if idx_clickable else f"<span style='color:{_title_color}'>{_esc(_title)}</span>"
             )
             st.markdown(
@@ -722,7 +776,7 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
         tag = r.get("分类", "")
         _title_color = _news_title_color(title, _hot_names)
         title_html = (
-            f"<a href='{_esc(r.get('url', ''))}' target='_blank' style='color:{_title_color};text-decoration:none'>{_esc(title)}</a>"
+            f"<a href='{_safe_href(r.get('url', ''))}' target='_blank' style='color:{_title_color};text-decoration:none'>{_esc(title)}</a>"
             if clickable else f"<span style='color:{_title_color}'>{_esc(title)}</span>"
         )
         st.markdown(
@@ -1013,7 +1067,7 @@ def _render_stock_movers_cards(df, market: str):
                 f"<a class='wl-card-link' href='{href}' target='_self'>"
                 f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:4px'>"
                 f"<div style='flex:2;font-weight:600;color:var(--fa-text);text-decoration:none'>"
-                f"{row['名称']}（{mv_symbol}）</div>"
+                f"{_esc(row['名称'])}（{_esc(mv_symbol)}）</div>"
                 f"<div style='flex:1;text-align:right;font-weight:600;color:{mv_color}'>{row['最新价']:.2f}</div>"
                 f"<div style='flex:1;text-align:right;color:{mv_color}'>{row['涨跌幅']:+.2f}%</div>"
                 f"</div></a>",
@@ -1157,7 +1211,7 @@ def _render_index_snapshot(mkt_code: str):
             st.markdown(
                 f"<a class='idx-card-link' href='{href}' target='_self'>"
                 f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:4px'>"
-                f"<div style='flex:2.4;font-weight:600;color:var(--fa-text);text-decoration:none'>{idx['名称']}</div>"
+                f"<div style='flex:2.4;font-weight:600;color:var(--fa-text);text-decoration:none'>{_esc(idx['名称'])}</div>"
                 f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{idx['最新']:,.2f}</div>"
                 f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
                 f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌']:+.2f}</div>"
@@ -1602,7 +1656,7 @@ def _render_home_page():
         _title_color = _news_title_color(row["summary"], _hot_names)
         with st.container(border=True):
             st.markdown(
-                f"<a href='{_esc(row['url'])}' target='_blank' style='color:{_title_color};text-decoration:none;font-weight:600'>{_esc(row['summary'])}</a>"
+                f"<a href='{_safe_href(row['url'])}' target='_blank' style='color:{_title_color};text-decoration:none;font-weight:600'>{_esc(row['summary'])}</a>"
                 f"<div style='font-size:0.75rem;color:var(--fa-muted);margin-top:2px'>{_esc(row.get('tag',''))} · {_esc(row.get('日期') or '-')}</div>",
                 unsafe_allow_html=True,
             )
@@ -2039,31 +2093,16 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         # 并发起来，A股之间该排队还是排队，但A股和港股/美股之间、以及港股/
         # 美股彼此之间不用再互相等，混合市场的自选股整体加载时间能明显缩短。
         #
-        # 实测过真实瓶颈：_fetch_sparkline_closes里的get_stock_history缓存
-        # 一过期(30分钟)，港股/美股这条走新浪源，单只冷取一次能到6秒多——
-        # 用 with ThreadPoolExecutor() + ex.map() 会等这个最慢的取完才返回，
-        # 拖累整批。第一版改成逐个 future.result(timeout=4)——实测发现这样
-        # 不对：每个future的4秒窗口是从"轮到检查它"那一刻重新计时，排在
-        # 后面的future会绕过预期上限（前面几个如果很快返回，轮到最后一个时
-        # 它已经跑了好几秒、检查时又给它新的4秒，总耗时照样能到6秒多，
-        # 没起到限制作用）。改用 concurrent.futures.wait() 对整批futures
-        # 设一个统一的4秒截止时间（从submit那一刻算起，不是从检查它那一刻），
-        # 时间到了还没完成的直接跳过用空数据占位，真正把整批的总耗时上限
-        # 卡在4秒左右，不会因为顺序问题被绕过。executor用shutdown(wait=False)
-        # 不等慢线程收尾。
-        ex = ThreadPoolExecutor(max_workers=min(8, len(watched_filtered)))
-        futures = [ex.submit(_fetch_one, item) for item in watched_filtered]
-        done, _not_done = _futures_wait(futures, timeout=4)
+        # 统一截止时间/避免线程堆积的实现细节抽到了共享的
+        # _run_concurrent_with_deadline（见它的docstring——那里记录了同一个
+        # 教训：per-future timeout会被排队顺序绕过，必须用整批统一的deadline）。
+        results = _run_concurrent_with_deadline(watched_filtered, _fetch_one, timeout=4)
         rows = []
-        for item, fut in zip(watched_filtered, futures):
-            if fut in done:
-                try:
-                    rows.append(fut.result())
-                    continue
-                except Exception:
-                    pass
-            rows.append((item, item.get("market", "A"), item["symbol"], {}, []))
-        ex.shutdown(wait=False)
+        for i, item in enumerate(watched_filtered):
+            if i in results:
+                rows.append(results[i])
+            else:
+                rows.append((item, item.get("market", "A"), item["symbol"], {}, []))
         return rows
 
     # 这个fragment每3秒自动刷新一次——只有真正第一次加载（session里还没有
@@ -2150,7 +2189,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
                 # a.wl-card-link{{color:inherit!important}}死活压不过浏览器
                 # 默认的a:link蓝色，元素自己的inline style优先级天然最高，不用
                 # 再跟CSS特异性较劲。
-                f"<div style='flex:2.1;font-weight:600;color:var(--fa-text);text-decoration:none'>{item['name']}（{symbol}）</div>"
+                f"<div style='flex:2.1;font-weight:600;color:var(--fa-text);text-decoration:none'>{_esc(item['name'])}（{_esc(symbol)}）</div>"
                 f"<div style='flex:1.1;display:flex;justify-content:center'>{spark_svg}</div>"
                 f"</div></a>",
                 unsafe_allow_html=True,
@@ -2315,9 +2354,16 @@ def _show_compare_dialog(watched: list):
 
         with st.spinner("加载行情..."):
             # 每只标的都是一次独立的网络请求，并发起来跟自选股列表
-            # (_render_watchlist_rows) 是同一个道理，不用互相等。
-            with ThreadPoolExecutor(max_workers=min(8, len(picked_labels))) as ex:
-                results = list(ex.map(_fetch, picked_labels))
+            # (_render_watchlist_rows) 是同一个道理，不用互相等。原来是
+            # with ThreadPoolExecutor() as ex: ex.map(...)——退出with块时会
+            # 等所有线程真正跑完才返回，没有截止时间，某一只标的的数据源
+            # 卡得久，这次"生成对比图"点击就跟着卡多久。改用共享的
+            # _run_concurrent_with_deadline给整批一个统一截止时间，超时的
+            # 那几只直接跳过不算，不会拖累这次点击的响应时间。这是手动点击
+            # 触发的一次性操作（不是自动刷新循环），给的deadline比自选股
+            # 列表/回看补录那两处更宽松一些。
+            fetch_map = _run_concurrent_with_deadline(picked_labels, _fetch, timeout=15)
+            results = list(fetch_map.values())
 
         hist_by_name = {label: hist for label, hist in results if hist is not None and not hist.empty}
         if len(hist_by_name) < 2:
@@ -2417,31 +2463,18 @@ else:
                         # 实测过：即使节流到每60秒最多跑一次，会话里"第一次"渲染
                         # 这个分区时还是要真跑一遍——用真实账号数据测过，5条到期
                         # 记录里有1条港股要等Futu，单这一条就能吃掉10秒左右
-                        # （Futu没连上/需要重连时）。用 with ThreadPoolExecutor()
-                        # 配 ex.map() 会在退出 with 块时等所有线程跑完，慢的那个
-                        # 依然会拖住整页。第一版改成逐个future.result(timeout=3)——
-                        # 后来发现这样不对：每个future的超时窗口是从"轮到检查它"
-                        # 那一刻才开始计时，排在后面检查的future会绕过预期上限
-                        # （前面的很快返回时，轮到最后一个又重新给3秒，总耗时照样
-                        # 压不住）。改用 concurrent.futures.wait() 给整批futures
-                        # 一个从submit那刻算起的统一3秒截止时间，到点还没完成的
-                        # 直接跳过（不影响它下一个60秒窗口重试），这样才是真正把
-                        # 整个"到期补录"批次的总耗时卡在3秒左右。executor用
-                        # shutdown(wait=False)不等慢线程收尾。
-                        ex = ThreadPoolExecutor(max_workers=min(8, len(due)))
-                        futures = [ex.submit(_fetch_review_price, item) for item in due]
-                        done, _not_done = _futures_wait(futures, timeout=3)
-                        for fut in done:
-                            try:
-                                item, spot = fut.result()
-                            except Exception:
-                                continue
+                        # （Futu没连上/需要重连时）。统一截止时间/避免线程堆积的
+                        # 实现细节抽到了共享的_run_concurrent_with_deadline（见它
+                        # 的docstring——那里记录了同一个教训：per-future timeout
+                        # 会被排队顺序绕过，必须用整批统一的deadline），不影响
+                        # "到期没补上的下一个60秒窗口重试"这个原有行为。
+                        review_results = _run_concurrent_with_deadline(due, _fetch_review_price, timeout=3)
+                        for item, spot in review_results.values():
                             if spot and spot.get("最新价"):
                                 try:
                                     record_review(item["id"], float(spot["最新价"]))
                                 except Exception:
                                     continue
-                        ex.shutdown(wait=False)
                     st.session_state["_review_checked_at"] = time.time()
 
                 stats = get_accuracy_stats(_uemail)
@@ -2486,7 +2519,9 @@ else:
                 history = get_history(_uemail, limit=10)
                 for h in history:
                     verdict_color = {"偏多": UP_COLOR, "偏空": DOWN_COLOR, "中性": NEUTRAL_COLOR}.get(h["verdict"], NEUTRAL_COLOR)
-                    line = f"{h.get('name') or h['symbol']}（{h['symbol']}） {h['created_at'][:10]}"
+                    # name/symbol 来自数据源解析出的公司名/代码，跟自选股卡片同一类外部
+                    # 数据，统一补上转义（同一次审查发现自选股卡片那边也漏了）。
+                    line = f"{_esc(h.get('name') or h['symbol'])}（{_esc(h['symbol'])}） {h['created_at'][:10]}"
                     st.markdown(
                         f"<div style='font-size:0.78rem;margin:6px 0'>{line}　"
                         f"<span style='color:{verdict_color}'>{h['verdict']}</span>　"

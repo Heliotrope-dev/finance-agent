@@ -1215,7 +1215,7 @@ def _run_with_timeout(fn, timeout=8, default=None):
         return default
 
 
-_futu_ctx = None  # 只在 _futu_worker_loop 这一个线程里创建/读写，其它地方不要直接碰
+_futu_ctx = None  # 只应该被"当前生效"的那一代worker线程创建/读写，其它地方不要直接碰
 _futu_queue = None
 _futu_worker_lock = threading.Lock()
 _futu_worker_started = False
@@ -1226,8 +1226,29 @@ _futu_reconnect_fail_streak = 0  # 连续"重连尝试本身"失败的次数（�
 _FUTU_RECONNECT_BASE_COOLDOWN = 30  # 重连间隔起点（秒）
 _FUTU_RECONNECT_MAX_COOLDOWN = 300  # 重连间隔封顶（秒）——指数退避不能无限拉长
 
+# ── 看门狗：兜底"worker线程真的卡死在一次SDK调用里出不来"这种极端情况 ──────────
+# _futu_call 给"调用方等多久"设了超时，但那只保护调用方，worker线程内部执行
+# fn(_futu_ctx)/candidate.get_global_state() 这些同步阻塞调用本身完全没有
+# 超时——如果某一次SDK调用真的悬挂不返回（不是慢，是挂死，_futu_worker_loop
+# 的说明里记录过真实先例"90秒以上没有任何响应"，不是不可能），worker线程会
+# 卡在那一行永远出不来：不会崩溃、不会报错，就是从此再也不从_futu_queue.get()
+# 取下一个任务，Futu功能从那一刻起永久性静默失效，直到进程重启才能恢复
+# ——健康检查/自动重连逻辑本身也再没机会跑，因为都在同一个卡住的循环里。
+#
+# 没有真实Futu环境验证过这一整套看门狗逻辑（包括下面的阈值选取），是纯防御性
+# 的兜底，设计原则是"宁可极端情况下慢一点才自愈，也不要在正常场景下误伤"：
+_FUTU_WATCHDOG_STALL_SECONDS = 180  # 判定"worker真的卡死"的阈值，特意设得比README
+                                     # 记录过的"几十秒到几分钟"最坏首次连接延迟还要更高，
+                                     # 尽量避免把正常的慢请求误判成卡死
+_futu_heartbeat_at = 0.0  # 当前生效worker"正卡在某次阻塞SDK调用里"的起始时间戳，
+                           # 0表示"当前没有正在执行的阻塞调用"，看门狗只在非0时才检查是否超时
+_futu_worker_epoch = 0  # 当前生效worker的代号。看门狗一旦判定卡死，会+1并起一个新worker——
+                          # 旧worker线程即使将来真的从阻塞调用里返回，也会发现自己的epoch已经
+                          # 过期，不再碰任何共享全局状态（不会跟新worker抢_futu_ctx），直接退出
+_futu_watchdog_started = False
 
-def _futu_worker_loop():
+
+def _futu_worker_loop(my_epoch: int, my_queue):
     """Futu OpenD 连接的唯一owner线程——所有连接和方法调用永远发生在这一个
     线程里执行。这是让 Futu SDK 稳定工作的硬要求：实测 ctx 在一个线程里
     创建、换另一个线程调用它的方法，会导致 SDK 内部状态错乱直接卡死不返回
@@ -1261,10 +1282,29 @@ def _futu_worker_loop():
     尝试的间隔（指数退避，30秒翻倍封顶到5分钟）——OpenD长时间没恢复时，
     降低"我们这边又造出一个新candidate、又留下一个新僵尸线程"的频率，
     但不能消除已经留下的僵尸线程，只能减缓新增速度。
+
+    my_epoch/my_queue：这个worker线程自己这一代的身份凭证和专属队列，不是
+    每次都从全局变量_futu_queue现读——配合上面的看门狗：一旦看门狗判定这个
+    worker卡死、把_futu_worker_epoch/_futu_queue换成新的一代，这个（旧的、
+    可能仍在某次阻塞SDK调用里出不来的）线程即使将来真的从阻塞调用里返回，
+    也会在每一处touch共享全局状态之前先检查"my_epoch是不是还等于当前生效的
+    _futu_worker_epoch"，发现自己已经被弃用就直接放弃这次任务，不写任何全局
+    状态、不去关正在被新worker使用的_futu_ctx——避免"两个线程同时碰同一个
+    ctx"这个从架构上本来就要杜绝的错误借着这条恢复路径重新出现。Python线程
+    没办法被强制杀死，卡死的旧线程本身依然会在后台一直存在直到它自己的阻塞
+    调用真的返回（如果永远不返回，这个daemon线程会陪着进程活到退出，不阻塞
+    进程本身退出，是可以接受的资源代价）。
     """
     global _futu_ctx, _futu_last_connect_attempt, _futu_fail_count, _futu_reconnect_fail_streak
+    global _futu_heartbeat_at
     while True:
-        fn, out_q = _futu_queue.get()
+        fn, out_q = my_queue.get()
+        if my_epoch != _futu_worker_epoch:
+            # 已经被看门狗弃用重建过了，不是现役worker——正常不该走到这里，
+            # 只有"旧线程从卡死的调用里最终恢复过来、还残留着排队任务"这种
+            # 边缘情况才会触发，直接放弃，不碰共享状态。
+            out_q.put(None)
+            continue
         if _futu_ctx is None:
             now = time.time()
             _reconnect_cooldown = min(
@@ -1273,8 +1313,18 @@ def _futu_worker_loop():
             if now - _futu_last_connect_attempt >= _reconnect_cooldown:
                 _futu_last_connect_attempt = now
                 try:
+                    _futu_heartbeat_at = time.time()
                     candidate = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
                     ret, _ = candidate.get_global_state()
+                    if my_epoch != _futu_worker_epoch:
+                        # 连接过程中被看门狗弃用了——这个candidate跟新worker
+                        # 无关，自己关掉，不要让它也变成一个泄漏的连接。
+                        try:
+                            candidate.close()
+                        except Exception:
+                            pass
+                        out_q.put(None)
+                        continue
                     if ret == ft.RET_OK:
                         _futu_ctx = candidate
                         _futu_fail_count = 0
@@ -1283,35 +1333,84 @@ def _futu_worker_loop():
                         candidate.close()
                         _futu_reconnect_fail_streak += 1
                 except Exception:
-                    _futu_reconnect_fail_streak += 1
+                    if my_epoch == _futu_worker_epoch:
+                        _futu_reconnect_fail_streak += 1
+                finally:
+                    if my_epoch == _futu_worker_epoch:
+                        _futu_heartbeat_at = 0.0
+        if my_epoch != _futu_worker_epoch:
+            out_q.put(None)
+            continue
         if _futu_ctx is not None:
             try:
+                _futu_heartbeat_at = time.time()
                 result = fn(_futu_ctx)
-                _futu_fail_count = 0
+                if my_epoch == _futu_worker_epoch:
+                    _futu_fail_count = 0
             except Exception:
                 result = None
-                _futu_fail_count += 1
-                if _futu_fail_count >= _FUTU_MAX_CONSEC_FAILS:
-                    try:
-                        _futu_ctx.close()
-                    except Exception:
-                        pass
-                    _futu_ctx = None
-                    _futu_fail_count = 0
+                if my_epoch == _futu_worker_epoch:
+                    _futu_fail_count += 1
+                    if _futu_fail_count >= _FUTU_MAX_CONSEC_FAILS:
+                        try:
+                            _futu_ctx.close()
+                        except Exception:
+                            pass
+                        _futu_ctx = None
+                        _futu_fail_count = 0
+            finally:
+                if my_epoch == _futu_worker_epoch:
+                    _futu_heartbeat_at = 0.0
         else:
             result = None
         out_q.put(result)
 
 
+def _futu_watchdog_loop():
+    """看门狗——独立线程，只读一个心跳时间戳，不碰 _futu_ctx、不调用任何SDK
+    方法。每隔一小段时间醒来检查一次：如果当前生效worker"正卡在某次阻塞调用
+    里"的时间已经超过 _FUTU_WATCHDOG_STALL_SECONDS，判定这一代worker已经卡死
+    救不回来了——换一个全新的queue、把_futu_ctx置空、epoch+1，起一个全新的
+    worker线程接手。旧worker线程和它可能还攥着的ctx原地放着自生自灭（daemon
+    线程，不阻塞进程退出），新提交的_futu_call请求全部会排到新worker这边，
+    不会再排到一个永远不会被处理的旧队列里。
+
+    没有真实Futu环境验证过这套逻辑——包括阈值选取是否合适、真发生卡死时是否
+    确实能让功能恢复正常。上线后需要留意健康面板/日志确认没有误伤正常慢请求，
+    也确认真卡死时这条恢复路径确实生效。
+    """
+    global _futu_queue, _futu_ctx, _futu_worker_epoch, _futu_heartbeat_at
+    global _futu_last_connect_attempt, _futu_fail_count, _futu_reconnect_fail_streak
+    while True:
+        time.sleep(10)
+        with _futu_worker_lock:
+            hb = _futu_heartbeat_at
+            if not hb or time.time() - hb <= _FUTU_WATCHDOG_STALL_SECONDS:
+                continue
+            _futu_queue = _queue.Queue()
+            _futu_ctx = None
+            _futu_fail_count = 0
+            _futu_heartbeat_at = 0.0
+            # 不清零 _futu_reconnect_fail_streak/_futu_last_connect_attempt：
+            # 判定卡死本身就说明这次连接不健康，退避节奏应该延续，不要因为
+            # 换了一代worker就重新给一次"立刻重连"的优待。
+            _futu_worker_epoch += 1
+            threading.Thread(
+                target=_futu_worker_loop, args=(_futu_worker_epoch, _futu_queue), daemon=True,
+            ).start()
+
+
 def _ensure_futu_worker():
-    global _futu_queue, _futu_worker_started
+    global _futu_queue, _futu_worker_started, _futu_watchdog_started
     if _futu_worker_started:
         return
     with _futu_worker_lock:
         if _futu_worker_started:
             return
         _futu_queue = _queue.Queue()
-        threading.Thread(target=_futu_worker_loop, daemon=True).start()
+        threading.Thread(target=_futu_worker_loop, args=(_futu_worker_epoch, _futu_queue), daemon=True).start()
+        threading.Thread(target=_futu_watchdog_loop, daemon=True).start()
+        _futu_watchdog_started = True
         _futu_worker_started = True
 
 
@@ -1320,6 +1419,13 @@ def _futu_call(fn, timeout: float = 8, default=None):
     写法。fn 接收 ctx 并返回结果；ctx 还没连上/连接失败/排队超时/fn 抛异常，
     统一按 default 处理（fn 正常返回 None 的情况这里认为不存在——Futu SDK的
     调用永远是 (ret, data) 元组，跟 default 的失败语义不冲突）。
+
+    注意：get_hstech_constituents/get_futu_news 这两处没有走这个统一入口，
+    是刻意的例外——它们各自在自己的临时子线程里"连接+查询+关闭"一次性做完，
+    不碰这里的常驻worker/共享_futu_ctx，同样满足"连接和调用同一线程"这条硬
+    规则，只是不复用常驻连接。这么做是因为这两个查询本身不追求复用长连接，
+    独立短连接反而更简单可控；缺点是两套Futu访问方式并存，以后新增Futu调用点
+    时要留意选对模式，不要想当然地复用常驻ctx。详见这两个函数各自的说明。
     """
     if not _FUTU_SDK_AVAILABLE:
         return default
