@@ -2944,9 +2944,8 @@ else:
         st.markdown(
             f"""
             <div class='fa-flex-row' style='background:{UP_COLOR};margin:-1rem -1rem 0 -1rem;padding:14px 24px;
-                        display:flex;align-items:center;justify-content:space-between'>
+                        display:flex;align-items:center'>
                 <span style='color:#fff;font-size:1.3rem;font-weight:700;letter-spacing:.02em'>Invest Agent</span>
-                <span style='color:#fff;font-size:0.8rem;opacity:0.85'>行情 · 财务 · 新闻交叉验证</span>
             </div>
             """,
             unsafe_allow_html=True,
