@@ -2,12 +2,14 @@
 
 import contextlib
 import io
+import json
 import queue as _queue
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import akshare as ak
 import baostock as bs
@@ -1953,6 +1955,106 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
         }
 
     return _with_retry(_fetch, retries=1, backoff=2, throttle=False)
+
+
+_MARKET_CURRENCY = {"A": "CNY", "HK": "HKD", "US": "USD"}
+_FX_CACHE_PATH = Path(__file__).parent / "data" / "fx_rate_cache.json"
+
+# 实测记录（2026-08-21，同一天从Mac和VPS两台机器分别测）：东财push2的CNH
+# 汇率端点(push2.eastmoney.com/api/qt/stock/get?secid=133.USDCNH)连续多次
+# 502，不是网络问题，是这个端点本身不稳定——所以这里把新浪当主源、东财降级
+# 成第二尝试，不是随手选的顺序。两条路径都要用离岸(CNH)不用在岸(CNY)，
+# 离岸/在岸差价约0.1%，主源切兜底时口径要一致，否则总资产会莫名跳一下。
+_SINA_FX_CODE = {"USD": "fx_susdcnh", "HKD": "fx_shkdcny"}
+_EASTMONEY_FX_SECID = {"USD": "133.USDCNH", "HKD": "133.HKDCNH"}
+
+
+def _fetch_fx_sina(currency: str) -> float | None:
+    code = _SINA_FX_CODE.get(currency)
+    if not code:
+        return None
+    r = requests.get(
+        f"https://hq.sinajs.cn/list={code}",
+        headers={"Referer": "https://finance.sina.com.cn", "User-Agent": "Mozilla/5.0"},
+        timeout=8,
+    )
+    text = r.content.decode("gbk", errors="ignore")
+    fields = text.split('"')[1].split(",") if '"' in text else []
+    if len(fields) < 3:
+        return None
+    bid, ask = float(fields[1]), float(fields[2])
+    if bid <= 0 or ask <= 0:
+        return None
+    return (bid + ask) / 2
+
+
+def _fetch_fx_eastmoney(currency: str) -> float | None:
+    secid = _EASTMONEY_FX_SECID.get(currency)
+    if not secid:
+        return None
+    r = requests.get(
+        f"https://push2.eastmoney.com/api/qt/stock/get?secid={secid}&fields=f43,f59",
+        timeout=8,
+    )
+    data = r.json().get("data")
+    if not data or not data.get("f43"):
+        return None
+    scale = 10 ** data.get("f59", 4)  # f59是小数位数，读不到就按已知的4位兜底
+    return data["f43"] / scale
+
+
+def _load_fx_cache() -> dict:
+    try:
+        return json.loads(_FX_CACHE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def _save_fx_cache(cache: dict):
+    try:
+        _FX_CACHE_PATH.write_text(json.dumps(cache))
+    except Exception:
+        pass
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_fx_rate(currency: str, quote: str = "CNY") -> tuple[float | None, str]:
+    """currency兑quote的汇率，目前只支持quote="CNY"（HKD/USD → CNY，A股本身
+    就是CNY不用转）。1800秒缓存——汇率日内波动幅度远小于股价，不需要像行情
+    那样3秒刷新，全塞进热路径纯粹浪费还会把限流风险引到最热的路径上。
+
+    返回 (汇率, 数据时间说明)——第二个值不是摆设：两条实时源都失败时会退回
+    本地缓存的上一次成功值，这时候必须让调用方能告诉用户"这个汇率不是实时的、
+    是XX时候取的"，不能悄悄拿一个过期数字充当实时数据用。
+    """
+    if currency == quote:
+        return 1.0, "实时"
+    if currency not in _MARKET_CURRENCY.values():
+        return None, "不支持的币种"
+
+    for fetch, name in ((_fetch_fx_sina, "新浪"), (_fetch_fx_eastmoney, "东财")):
+        try:
+            rate = _with_retry(lambda f=fetch: f(currency), retries=1, backoff=2, throttle=False)
+        except Exception:
+            rate = None
+        if rate:
+            cache = _load_fx_cache()
+            cache[currency] = {"rate": rate, "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M")}
+            _save_fx_cache(cache)
+            return rate, "实时"
+
+    # 两条实时源都失败——读本地缓存的上一次成功值，不编一个常数糊弄
+    cached = _load_fx_cache().get(currency)
+    if cached:
+        return cached["rate"], f"非实时，取自{cached['fetched_at']}"
+    return None, "汇率获取失败"
+
+
+def to_cny(amount: float, currency: str) -> tuple[float | None, str]:
+    rate, note = get_fx_rate(currency)
+    if rate is None:
+        return None, note
+    return amount * rate, note
 
 
 @st.cache_data(ttl=600, show_spinner=False)

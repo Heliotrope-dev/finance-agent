@@ -106,46 +106,244 @@ def init_db():
             )
             """
         )
+
+        # positions：取代 watchlist 的"持仓分析"数据模型。shares=0 表示"只关注
+        # 不持仓"（保留旧自选股的语义，详情页"加入自选"按钮不用大改）。
+        # cost_total存累计成本(原币种)而不是均价——用户输入的是"股数+金额"，
+        # 加仓就是shares+=n,cost_total+=amount，不会滚浮点误差；均价现算
+        # cost_total/shares。currency显式存不从market现算，以后遇到"市场跟
+        # 计价币不一致"(比如ADR)的情况改一行数据就行，不用改代码逻辑。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                market TEXT NOT NULL DEFAULT 'A',
+                shares REAL NOT NULL DEFAULT 0,
+                cost_total REAL NOT NULL DEFAULT 0,
+                currency TEXT NOT NULL DEFAULT 'CNY',
+                opened_at TEXT NOT NULL DEFAULT '',
+                added_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(email, symbol)
+            )
+            """
+        )
+
+        # position_lots：只写不读的买卖流水账，供以后需要精确核算(比如TWR)时用，
+        # 现在这些漏记的话以后补不回来，先建上成本很低。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS position_lots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                market TEXT NOT NULL DEFAULT 'A',
+                action TEXT NOT NULL,
+                shares REAL NOT NULL,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'CNY',
+                traded_at TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+        # portfolio_advice：跟advice表字段语义不同(没有symbol/market/technical_
+        # signal，多了total_value_cny/holdings_json)，独立建表——参考advice表
+        # 自己的注释，字段语义不同就不硬塞进同一张表。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS portfolio_advice (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                total_value_cny REAL,
+                holdings_json TEXT NOT NULL DEFAULT '',
+                analysis_text TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+        # 从watchlist一次性迁移进positions，shares/cost_total都是0(纯关注)。
+        # UNIQUE(email,symbol)保证INSERT OR IGNORE天然幂等，每次启动跑一遍
+        # 无副作用，不会覆盖已经有真实持仓数据的行。
+        c.execute(
+            """
+            INSERT OR IGNORE INTO positions
+                (email, symbol, name, market, shares, cost_total, currency, opened_at, added_at, updated_at)
+            SELECT email, symbol, name, market, 0, 0,
+                   CASE market WHEN 'HK' THEN 'HKD' WHEN 'US' THEN 'USD' ELSE 'CNY' END,
+                   '', added_at, added_at
+            FROM watchlist
+            """
+        )
         c.commit()
 
 
+_MARKET_CURRENCY = {"A": "CNY", "HK": "HKD", "US": "USD"}
+
+
 def add_to_watchlist(email: str, symbol: str, name: str, market: str = "A") -> bool:
+    """薄封装：在positions里插入一行shares=0(只关注不持仓)的记录——正式的
+    "持仓分析"功能上线后，这个函数名保留不改，是为了详情页"加入自选"按钮
+    (app.py) 不用跟着大改，数据层换底座、调用方无感知。真正记持仓用
+    upsert_position。"""
     init_db()
+    now = datetime.now(timezone.utc).isoformat()
     with closing(_conn()) as c:
         try:
             c.execute(
-                "INSERT INTO watchlist (email, symbol, name, market, added_at) VALUES (?, ?, ?, ?, ?)",
-                (email, symbol, name, market, datetime.now(timezone.utc).isoformat()),
+                "INSERT INTO positions (email, symbol, name, market, shares, cost_total, currency, opened_at, added_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 0, 0, ?, '', ?, ?)",
+                (email, symbol, name, market, _MARKET_CURRENCY.get(market, "CNY"), now, now),
             )
             c.commit()
             return True
         except sqlite3.IntegrityError:
-            return False  # 已经在自选里了，不重复加
+            return False  # 已经在里面了，不重复加
 
 
 def remove_from_watchlist(email: str, symbol: str):
-    with closing(_conn()) as c:
-        c.execute("DELETE FROM watchlist WHERE email = ? AND symbol = ?", (email, symbol))
-        c.commit()
+    """薄封装：等价于delete_position——不管有没有真实持仓，整行删掉。"""
+    delete_position(email, symbol)
 
 
 def is_in_watchlist(email: str, symbol: str) -> bool:
     init_db()
     with closing(_conn()) as c:
         row = c.execute(
-            "SELECT 1 FROM watchlist WHERE email = ? AND symbol = ?", (email, symbol)
+            "SELECT 1 FROM positions WHERE email = ? AND symbol = ?", (email, symbol)
         ).fetchone()
         return row is not None
 
 
 def get_watchlist(email: str) -> list[dict]:
+    """薄封装：等价于get_positions，函数名保留给advisor.py等老调用点用。"""
+    return get_positions(email)
+
+
+def get_positions(email: str) -> list[dict]:
     init_db()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
         rows = c.execute(
-            "SELECT * FROM watchlist WHERE email = ? ORDER BY added_at DESC", (email,)
+            "SELECT * FROM positions WHERE email = ? ORDER BY added_at DESC", (email,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_all_position_emails() -> list[str]:
+    """给advisor.py的组合AI分析用——真正有持仓(shares>0)的用户邮箱列表，
+    只关注不持仓的不算"持仓"，不需要跑组合分析。"""
+    init_db()
+    with closing(_conn()) as c:
+        rows = c.execute("SELECT DISTINCT email FROM positions WHERE shares > 0").fetchall()
+        return [r[0] for r in rows]
+
+
+def log_position_lot(
+    email: str, symbol: str, market: str, action: str, shares: float, amount: float,
+    currency: str = "CNY", note: str = "",
+):
+    with closing(_conn()) as c:
+        c.execute(
+            "INSERT INTO position_lots (email, symbol, market, action, shares, amount, currency, traded_at, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (email, symbol, market, action, shares, amount, currency, datetime.now(timezone.utc).isoformat(), note),
+        )
+        c.commit()
+
+
+def upsert_position(
+    email: str, symbol: str, name: str, market: str, add_shares: float, add_amount: float,
+    currency: str | None = None,
+) -> None:
+    """买入/加仓。加权平均成本：shares和cost_total都是累加，均价现算
+    cost_total/shares，不会因为多次加仓滚浮点误差。同时记一笔买入流水。"""
+    init_db()
+    currency = currency or _MARKET_CURRENCY.get(market, "CNY")
+    now = datetime.now(timezone.utc).isoformat()
+    with closing(_conn()) as c:
+        row = c.execute(
+            "SELECT shares, opened_at FROM positions WHERE email = ? AND symbol = ?", (email, symbol)
+        ).fetchone()
+        if row is None:
+            c.execute(
+                "INSERT INTO positions (email, symbol, name, market, shares, cost_total, currency, opened_at, added_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (email, symbol, name, market, add_shares, add_amount, currency, now, now, now),
+            )
+        else:
+            prev_shares, opened_at = row
+            # 之前是"只关注"(shares=0)转成真正持仓，opened_at补上这次建仓时间
+            new_opened_at = opened_at if prev_shares and prev_shares > 0 and opened_at else now
+            c.execute(
+                "UPDATE positions SET shares = shares + ?, cost_total = cost_total + ?, "
+                "name = ?, currency = ?, opened_at = ?, updated_at = ? WHERE email = ? AND symbol = ?",
+                (add_shares, add_amount, name, currency, new_opened_at, now, email, symbol),
+            )
+        c.commit()
+    log_position_lot(email, symbol, market, "买入", add_shares, add_amount, currency)
+
+
+def reduce_position(email: str, symbol: str, sell_shares: float, sell_amount: float) -> None:
+    """卖出/减仓。按当前均价比例扣减cost_total，避免"先卖出高成本部分"这类
+    分批假设——这个工具存的是加权平均成本，不区分批次。减到≤0直接删掉这行
+    (用户明确要求：卖光了就不留"仅关注"状态，这跟"从来没买过"的shares=0
+    是两回事，不要混）。同时记一笔卖出流水。"""
+    init_db()
+    with closing(_conn()) as c:
+        row = c.execute(
+            "SELECT shares, cost_total, market, currency FROM positions WHERE email = ? AND symbol = ?",
+            (email, symbol),
+        ).fetchone()
+        if row is None:
+            return
+        shares, cost_total, market, currency = row
+        sell_shares = min(sell_shares, shares) if shares else sell_shares
+        avg_cost = (cost_total / shares) if shares else 0
+        new_shares = shares - sell_shares
+        new_cost_total = max(cost_total - avg_cost * sell_shares, 0)
+        if new_shares <= 1e-6:
+            c.execute("DELETE FROM positions WHERE email = ? AND symbol = ?", (email, symbol))
+        else:
+            c.execute(
+                "UPDATE positions SET shares = ?, cost_total = ?, updated_at = ? WHERE email = ? AND symbol = ?",
+                (new_shares, new_cost_total, datetime.now(timezone.utc).isoformat(), email, symbol),
+            )
+        c.commit()
+    log_position_lot(email, symbol, market, "卖出", sell_shares, sell_amount, currency)
+
+
+def delete_position(email: str, symbol: str):
+    with closing(_conn()) as c:
+        c.execute("DELETE FROM positions WHERE email = ? AND symbol = ?", (email, symbol))
+        c.commit()
+
+
+def log_portfolio_advice(email: str, total_value_cny: float | None, holdings_json: str, analysis_text: str) -> int:
+    init_db()
+    with closing(_conn()) as c:
+        cur = c.execute(
+            "INSERT INTO portfolio_advice (email, created_at, total_value_cny, holdings_json, analysis_text) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (email, datetime.now(timezone.utc).isoformat(), total_value_cny, holdings_json, analysis_text),
+        )
+        c.commit()
+        return cur.lastrowid
+
+
+def get_latest_portfolio_advice(email: str) -> dict | None:
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        row = c.execute(
+            "SELECT * FROM portfolio_advice WHERE email = ? ORDER BY created_at DESC LIMIT 1", (email,)
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def log_analysis(
