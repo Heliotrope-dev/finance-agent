@@ -125,7 +125,11 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
             {"role": "system", "content": _JUDGE_SYSTEM},
             {"role": "user", "content": user_content},
         ],
-        max_tokens=800,
+        # 800太小——DeepSeek隐藏的reasoning_content跟正式回答共用同一个max_tokens
+        # 预算，这个项目自己就反复踩过这个坑（README"AI分析概率性返回空内容"），
+        # 连2000都不够，最复杂的cross_validate最后调到4000。实测这个800确实
+        # 复现了同一个bug：全部22条判断fundamental_verdict都是空字符串。
+        max_tokens=4000,
         temperature=0.3,
         stream=False,
     )
