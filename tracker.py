@@ -597,7 +597,7 @@ def get_latest_advice(limit_per_market: int = 3) -> dict:
     卖出)排，跟advisor.py里_top_picks的逻辑保持一致——避免两处各写一套
     排序规则将来跑偏。
 
-    返回 {"run_date": "YYYY-MM-DD"|None, "US": [...], "HK": [...]}，
+    返回 {"run_date": "YYYY-MM-DD"|None, "US": [...], "HK": [...], "A": [...]}，
     run_date为None表示还没有任何历史记录（比如cron还没跑过第一次）。
     """
     init_db()
@@ -607,7 +607,7 @@ def get_latest_advice(limit_per_market: int = 3) -> dict:
             "SELECT created_at FROM advice WHERE source = 'screen' ORDER BY created_at DESC LIMIT 1"
         ).fetchone()
         if latest is None:
-            return {"run_date": None, "US": [], "HK": []}
+            return {"run_date": None, "US": [], "HK": [], "A": []}
         run_date = latest["created_at"][:10]
         rows = c.execute(
             "SELECT * FROM advice WHERE source = 'screen' AND created_at LIKE ? ORDER BY created_at",
@@ -616,7 +616,7 @@ def get_latest_advice(limit_per_market: int = 3) -> dict:
     rows = [dict(r) for r in rows]
 
     result = {"run_date": run_date}
-    for market in ("US", "HK"):
+    for market in ("US", "HK", "A"):
         pool = sorted(
             (r for r in rows if r.get("market") == market),
             key=lambda r: _ADVICE_ACTION_PRIORITY.get(r["action"], 9),

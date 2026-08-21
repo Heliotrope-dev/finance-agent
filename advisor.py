@@ -1,17 +1,19 @@
-"""投研顾问 —— 每个工作日收盘后扫一遍港美股全市场，用 Futu 的股票筛选器按市值/
-估值/盈利增长挑出候选，基本面为主、技术面辅助，给买卖参考。私有工具，不在
-Streamlit 页面里，由 OpenClaw 的 stock-advisor cron 触发，走
+"""投研顾问 —— 每个工作日收盘后扫一遍 A股/港股/美股全市场，用 Futu 的股票筛选器
+按市值/估值/盈利增长挑出候选，基本面为主、技术面辅助，给买卖参考。私有工具，
+不在 Streamlit 页面里，由 OpenClaw 的 stock-advisor cron 触发，走
 `venv/bin/python3 advisor.py`，结果打印到 stdout 给 agent 读了转成微信消息。
 
 跟 analysis.py 刻意"只讲事实不下结论"的公开页面定位不同——这里明确要给买卖
 参考，所以判断函数（judge_stock）单独新写，不改 analysis.py 里现成的那几个。
 
-第一版做过手动关注列表+A股候选池，用户反馈不需要这块，目标就是"扫几乎全部
-港美股，挑几个有潜力有机遇的股票参考"——data_sources.py 里原有的港美股"候选池"
-函数（get_index_top_movers 之类）靠的是人气榜/硬编码知名股名单，覆盖面完全
-撑不起"全市场筛选"这个目标，改用 Futu SDK 自带的 get_stock_filter（按市值/PE/
-盈利增长这些真实指标在全市场服务端筛选，不是本地维护的名单），实测 US 市场
-一次筛选能命中一千多只符合条件的股票，HK 三百多只，是真正的全市场覆盖。
+第一版做过手动关注列表+A股候选池，当时用户反馈不需要这块，改成只扫港美股；
+后来（2026-08-21）又要求把 A股 候选加回来，跟港美股同一套全市场量化初筛
+逻辑——data_sources.py 里原有的"候选池"函数（get_index_top_movers 之类）
+靠的是人气榜/硬编码知名股名单，覆盖面完全撑不起"全市场筛选"这个目标，改用
+Futu SDK 自带的 get_stock_filter（按市值/PE/盈利增长这些真实指标在全市场
+服务端筛选，不是本地维护的名单），实测 US 市场一次筛选能命中一千多只符合
+条件的股票，HK 三百多只，是真正的全市场覆盖。A股 没有统一的 Futu 市场代码，
+沪/深两个交易所分开筛选后合并成一个候选池（见 screen_candidates）。
 """
 
 import os
@@ -46,12 +48,14 @@ _DEEPSEEK_BASE = "https://api.deepseek.com"
 # 超过要分页拉（见 _futu_screen_pool）。
 _US_POOL_TARGET = 500
 _HK_POOL_TARGET = 500
+_A_POOL_TARGET = 500  # A股按沪/深两个交易所分别筛，各250凑够500
 
 # 池子里最靠前的这些才交给AI逐一判断——控制AI调用次数和运行时长，不是对
 # 全部500只跑判断（500只全跑一遍AI单次要几十分钟，不现实也没必要）。因为
 # 池子本身已经按净利润增速降序排，取最前面这批本身就是"增长最快的一批"。
 _US_CANDIDATE_CAP = 20
 _HK_CANDIDATE_CAP = 20
+_A_CANDIDATE_CAP = 20
 
 # 最终重点介绍几支——每个市场挑action优先级最高的几支详细展开理由+数据。
 _TOP_PICKS = 3
@@ -186,7 +190,10 @@ def _futu_screen_pool(market, quarter, cap_threshold: float, target_count: int) 
     f_growth.sort = ft.SortDir.DESCEND
 
     filters = [f_cap, f_pe, f_growth]
-    market_code = "HK" if market == ft.Market.HK else "US"
+    # Futu的get_stock_filter market参数没有统一的"A股"选项，沪/深要分开传
+    # (ft.Market.SH/ft.Market.SZ)，但项目里A股统一用"A"这个market_code，
+    # 两个交易所都映射到"A"，调用方各自merge成一个候选池。
+    market_code = {ft.Market.HK: "HK", ft.Market.SH: "A", ft.Market.SZ: "A"}.get(market, "US")
     page_size = 200  # 实测确认的单次请求上限，超过会报"请求个数超过限制"
     items: list[dict] = []
     all_count = 0
@@ -249,7 +256,7 @@ def _top_picks(judged: list[dict], market: str, n: int = _TOP_PICKS) -> list[dic
     return pool[:n]
 
 
-def screen_hk_us_candidates() -> dict:
+def screen_candidates() -> dict:
     # 每个市场各自的_futu_screen_pool内部已经用_futu_call_with_timeout做了
     # 超时保护（每页最多等30秒），不需要在这里再维护一个跨两个市场共用的
     # ctx——共用连接省下的那点建连开销，跟"任何一次调用卡住会拖累后面所有
@@ -260,8 +267,18 @@ def screen_hk_us_candidates() -> dict:
     hk_pool, hk_all = _futu_screen_pool(
         ft.Market.HK, ft.FinancialQuarter.ANNUAL, 5_000_000_000, _HK_POOL_TARGET
     )
+    # A股没有统一的Futu市场代码，沪/深分开筛(各250凑够500)再合并成一个池子。
+    # 市值门槛100亿人民币，量级上大致对应US的20亿美元/HK的50亿港元门槛
+    # （同一个"中大盘"筛选意图，按各市场估值/汇率量级换算，不是精确折算）。
+    sh_pool, sh_all = _futu_screen_pool(
+        ft.Market.SH, ft.FinancialQuarter.ANNUAL, 10_000_000_000, _A_POOL_TARGET // 2
+    )
+    sz_pool, sz_all = _futu_screen_pool(
+        ft.Market.SZ, ft.FinancialQuarter.ANNUAL, 10_000_000_000, _A_POOL_TARGET // 2
+    )
+    a_pool, a_all = sh_pool + sz_pool, sh_all + sz_all
 
-    shortlist = us_pool[:_US_CANDIDATE_CAP] + hk_pool[:_HK_CANDIDATE_CAP]
+    shortlist = us_pool[:_US_CANDIDATE_CAP] + hk_pool[:_HK_CANDIDATE_CAP] + a_pool[:_A_CANDIDATE_CAP]
     judged: list[dict] = []
     if shortlist:
         results = _run_concurrent_with_deadline(
@@ -270,8 +287,8 @@ def screen_hk_us_candidates() -> dict:
         judged = [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
 
     return {
-        "us_pool": us_pool, "hk_pool": hk_pool,
-        "us_all_count": us_all, "hk_all_count": hk_all,
+        "us_pool": us_pool, "hk_pool": hk_pool, "a_pool": a_pool,
+        "us_all_count": us_all, "hk_all_count": hk_all, "a_all_count": a_all,
         "judged": judged,
     }
 
@@ -418,7 +435,11 @@ def _price_position_text(symbol: str, market: str) -> str:
     该函数docstring里2026-08-21的真实故障记录）——跟_futu_screen_pool的
     连接是分开的，_judge_one并发调用时各自独立开关，不跨线程共享连接对象。
     """
-    code = f"{market}.{symbol}"
+    # Futu的get_market_snapshot要求带交易所前缀的代码(SH.600000/SZ.000858)，
+    # 不接受项目里统一用的market_code"A"——按代码开头判断沪/深，
+    # 跟data_sources.py _sina_symbol同一套"6/9开头沪市，其它深市"规则。
+    code_prefix = ("SH" if symbol.startswith(("6", "9")) else "SZ") if market == "A" else market
+    code = f"{code_prefix}.{symbol}"
     result = _futu_call_with_timeout(lambda ctx: ctx.get_market_snapshot([code]), timeout=20)
     if result is None:
         return ""
@@ -518,9 +539,10 @@ def main():
         )
     print(f"（持仓判断：{len(position_results)} 只已更新，结果在网站持仓页面查看，不进本条简报正文）\n")
 
-    data = screen_hk_us_candidates()
+    data = screen_candidates()
     print(_pool_summary(data["us_pool"], data["us_all_count"], "美股"))
     print(_pool_summary(data["hk_pool"], data["hk_all_count"], "港股"))
+    print(_pool_summary(data["a_pool"], data["a_all_count"], "A股"))
     print()
 
     judged = data["judged"]
@@ -536,6 +558,7 @@ def main():
 
     us_top = _top_picks(judged, "US")
     hk_top = _top_picks(judged, "HK")
+    a_top = _top_picks(judged, "A")
 
     print(f"==================== 最值得关注：美股 Top {len(us_top)} ====================")
     for e in us_top:
@@ -543,6 +566,10 @@ def main():
 
     print(f"==================== 最值得关注：港股 Top {len(hk_top)} ====================")
     for e in hk_top:
+        print(_fmt_entry(e))
+
+    print(f"==================== 最值得关注：A股 Top {len(a_top)} ====================")
+    for e in a_top:
         print(_fmt_entry(e))
 
     print(f"（本次共对 {len(judged)} 只候选做了完整判断，全部记录进数据库。以上为数据驱动的参考意见，不构成投资建议，请自行判断。）")
