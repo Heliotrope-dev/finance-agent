@@ -577,7 +577,16 @@ _PORTFOLIO_SYSTEM = """你是一位理性、保守的投研助理，正在给一
 7. 用**加粗**标出你认为整段分析里最重要、用户最应该马上看到的结论性
    判断（比如"集中度过高必须优先处理"这类），不要把无关紧要的内容也
    加粗，加粗是用来突出重点的，滥用就失去意义了。
-8. 最后必须附一句："仅供参考，不构成投资建议，请自行判断。"
+8. 最后附加一个"交易信号"结构化区块——这是给用户对照着去券商手动下单用
+   的，格式必须严格遵守（程序要解析这部分，格式错了解析不出来）：每支
+   持仓（不管动作是什么，包括"继续持有"）单独一行，用竖线分隔六个字段，
+   不要加多余的空格、不要用中文顿号代替竖线：
+   名称|代码|市场代码(A/HK/US)|动作(买入/卖出/不动)|股数(纯数字，不动填0)|金额(折人民币，纯数字，不动填0)
+   "加仓/定投"对应动作填"买入"，"减仓/止盈/割肉"对应动作填"卖出"，
+   "继续持有"对应动作填"不动"——这是给程序解析用的简化三分类，跟"逐支
+   跟踪"里六选一的细分类是两个不同粒度，不矛盾。股数用逐支跟踪里同样
+   算出来的数字，不要重新编一个不一致的数字。
+9. 最后必须附一句："仅供参考，不构成投资建议，请自行判断。"
 
 严格按以下格式输出（不要多余寒暄）：
 总体评估：<两三句话，这个组合现在处于什么状态，健康还是有明显问题>
@@ -588,7 +597,47 @@ _PORTFOLIO_SYSTEM = """你是一位理性、保守的投研助理，正在给一
 新增配置建议：<结合近期AI候选，1-2支能改善组合结构的标的+参考仓位+理由，
 没有合适的就如实说没有>
 操作建议：<组合层面的触发条件，每条一行，必须可执行>
+交易信号：<按要求8的格式，每支一行，不要任何多余文字或表头>
 """
+
+_SIGNAL_ACTIONS = ("买入", "卖出", "不动")
+
+
+def _parse_trade_signals(text: str) -> list[dict]:
+    """从AI输出的"交易信号"区块里解析出结构化的买卖信号——这是"先只调研+
+    搭好架子，不接真实下单"这个决定的核心产物：把现在这种一段话式的建议
+    升级成可以直接照着操作的结构化数据（标的/方向/股数/金额），但下单
+    这个动作还是用户自己去券商手动做，这里不调用、也不import任何富途
+    交易接口（OpenSecTradeContext/place_order那一套），纯粹是文本解析+
+    展示。格式不对的行跳过，不强行凑数据，宁可信号少也不能编。
+    """
+    idx = text.find("交易信号：")
+    if idx == -1:
+        idx = text.find("交易信号:")
+    if idx == -1:
+        return []
+    block = text[idx:].split("：", 1)[-1].split(":", 1)[-1]
+    signals = []
+    for line in block.strip().splitlines():
+        line = line.strip().lstrip("-•").strip()
+        if not line or "|" not in line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != 6:
+            continue
+        name, symbol, market, action, shares_s, amount_s = parts
+        if action not in _SIGNAL_ACTIONS or market not in ("A", "HK", "US"):
+            continue
+        try:
+            shares = float(shares_s)
+            amount_cny = float(amount_s)
+        except ValueError:
+            continue
+        signals.append({
+            "name": name, "symbol": symbol, "market": market, "action": action,
+            "shares": shares, "amount_cny": amount_cny,
+        })
+    return signals
 
 
 def advise_portfolio(email: str) -> dict | None:
@@ -752,8 +801,18 @@ def advise_portfolio(email: str) -> dict | None:
           "value_cny": round(r["value_cny"], 2), "pnl_pct": round(r["pnl_pct"], 2)} for r in rows],
         ensure_ascii=False,
     )
-    tracker.log_portfolio_advice(email, total_value_cny, holdings_json, text)
-    return {"email": email, "total_value_cny": total_value_cny, "analysis_text": text}
+    signals = _parse_trade_signals(text)
+    signals_json = json.dumps(signals, ensure_ascii=False)
+    # 展示用的正文不带"交易信号"那段原始竖线分隔文本——那段是给程序解析的，
+    # 直接混在叙述性文字里显示很生硬，已经解析成signals结构化数据单独展示，
+    # 正文里去掉避免重复。
+    sig_idx = text.find("交易信号：")
+    if sig_idx == -1:
+        sig_idx = text.find("交易信号:")
+    analysis_text = text[:sig_idx].rstrip() if sig_idx != -1 else text
+
+    tracker.log_portfolio_advice(email, total_value_cny, holdings_json, analysis_text, signals_json)
+    return {"email": email, "total_value_cny": total_value_cny, "analysis_text": analysis_text, "signals": signals}
 
 
 def _fmt_entry(e: dict) -> str:

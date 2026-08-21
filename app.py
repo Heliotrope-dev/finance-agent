@@ -2289,6 +2289,37 @@ def _render_bold_as_red(text: str) -> str:
     return "".join(html_parts)
 
 
+def _render_trade_signals(signals_json: str):
+    """结构化交易信号——用户明确要求"先只调研+搭好架子，不接真实下单"：
+    这里只是把advisor.py解析好的信号(标的/方向/股数/金额)展示成一张能
+    直接照着操作的表，不调用富途交易接口(OpenSecTradeContext/place_order)，
+    下单动作还是用户自己去券商完成。红涨绿跌配色跟买卖方向复用同一套
+    UP_COLOR/DOWN_COLOR（买入用涨色、卖出用跌色，跟这个项目一贯的红绿
+    约定保持一致，不是另外发明一套买卖配色）。
+    """
+    try:
+        signals = json.loads(signals_json) if signals_json else []
+    except (json.JSONDecodeError, TypeError):
+        signals = []
+    if not signals:
+        return
+    action_signals = [s for s in signals if s.get("action") != "不动"]
+    if not action_signals:
+        st.caption("本次信号：全部维持不动，没有需要操作的标的。")
+        return
+    st.caption("交易信号（仅供参考，需要你自己去券商手动下单，不会自动执行）")
+    for s in action_signals:
+        color = UP_COLOR if s["action"] == "买入" else DOWN_COLOR
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;align-items:center;"
+            f"padding:6px 10px;margin:4px 0;border-radius:6px;background:var(--fa-card-bg,rgba(0,0,0,.03))'>"
+            f"<span>{_esc(s['name'])}（{_esc(s['symbol'])}·{_esc(s['market'])}）</span>"
+            f"<span style='color:{color};font-weight:700'>"
+            f"{_esc(s['action'])} {s['shares']:g}股 · 约¥{s['amount_cny']:,.0f}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+
 def _render_portfolio_advice(email: str, positions: list):
     """AI组合分析卡片——跟左边"今日收益"不同，这块不是实时刷新的（AI调用
     有成本，不能每3秒跑一次），只读advisor.py（每工作日17:30跑）写进
@@ -2302,6 +2333,7 @@ def _render_portfolio_advice(email: str, positions: list):
     if advice:
         created = advice["created_at"][:19].replace("T", " ")
         st.caption(f"更新于 {created}（UTC）")
+        _render_trade_signals(advice.get("signals_json", ""))
         st.markdown(_render_bold_as_red(advice["analysis_text"]), unsafe_allow_html=True)
     else:
         st.caption("AI 组合分析还没生成过。")
@@ -2318,7 +2350,7 @@ def _render_portfolio_advice(email: str, positions: list):
 
     if st.button("立即重新分析", key=f"_portfolio_reanalyze_{email}", use_container_width=True):
         st.session_state[throttle_key] = time.time()
-        with st.spinner("AI 正在分析组合……（要逐支查行情/新闻+推理，大约1-2分钟）"):
+        with st.spinner("AI 正在分析组合……（要逐支查行情/新闻+推理+生成交易信号，大约1-3分钟）"):
             try:
                 import advisor
                 advisor._load_secrets_into_env()

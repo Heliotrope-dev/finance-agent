@@ -162,10 +162,17 @@ def init_db():
                 created_at TEXT NOT NULL,
                 total_value_cny REAL,
                 holdings_json TEXT NOT NULL DEFAULT '',
-                analysis_text TEXT NOT NULL DEFAULT ''
+                analysis_text TEXT NOT NULL DEFAULT '',
+                signals_json TEXT NOT NULL DEFAULT ''
             )
             """
         )
+        # 老库升级：signals_json是后加的字段（结构化交易信号，见advisor.py
+        # _parse_trade_signals），CREATE TABLE IF NOT EXISTS对已存在的老表
+        # 不会补列，要显式ALTER。
+        pa_cols = [r[1] for r in c.execute("PRAGMA table_info(portfolio_advice)").fetchall()]
+        if "signals_json" not in pa_cols:
+            c.execute("ALTER TABLE portfolio_advice ADD COLUMN signals_json TEXT NOT NULL DEFAULT ''")
 
         # user_settings：目前只有一个字段(最大资金投入上限，折人民币)，用户
         # 明确要求"AI要知道我们总共有多少钱，不能盲目加仓"——advise_portfolio
@@ -331,13 +338,16 @@ def delete_position(email: str, symbol: str):
         c.commit()
 
 
-def log_portfolio_advice(email: str, total_value_cny: float | None, holdings_json: str, analysis_text: str) -> int:
+def log_portfolio_advice(
+    email: str, total_value_cny: float | None, holdings_json: str, analysis_text: str,
+    signals_json: str = "",
+) -> int:
     init_db()
     with closing(_conn()) as c:
         cur = c.execute(
-            "INSERT INTO portfolio_advice (email, created_at, total_value_cny, holdings_json, analysis_text) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (email, datetime.now(timezone.utc).isoformat(), total_value_cny, holdings_json, analysis_text),
+            "INSERT INTO portfolio_advice (email, created_at, total_value_cny, holdings_json, analysis_text, signals_json) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (email, datetime.now(timezone.utc).isoformat(), total_value_cny, holdings_json, analysis_text, signals_json),
         )
         c.commit()
         return cur.lastrowid
