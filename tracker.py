@@ -167,6 +167,21 @@ def init_db():
             """
         )
 
+        # user_settings：目前只有一个字段(最大资金投入上限，折人民币)，用户
+        # 明确要求"AI要知道我们总共有多少钱，不能盲目加仓"——advise_portfolio
+        # 只看得到已经买了多少，看不到用户自己设的资金天花板，这里补上让AI
+        # 能算"还剩多少额度"。email是主键，一人一条，不用像positions那样
+        # UNIQUE(email,symbol)按标的区分。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_settings (
+                email TEXT PRIMARY KEY,
+                max_capital_cny REAL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
         # 从watchlist表一次性迁移进positions，shares/cost_total都是0(纯关注)。
         # UNIQUE(email,symbol)保证INSERT OR IGNORE天然幂等，每次启动跑一遍
         # 无副作用，不会覆盖已经有真实持仓数据的行。
@@ -336,6 +351,27 @@ def get_latest_portfolio_advice(email: str) -> dict | None:
             "SELECT * FROM portfolio_advice WHERE email = ? ORDER BY created_at DESC LIMIT 1", (email,)
         ).fetchone()
         return dict(row) if row else None
+
+
+def set_max_capital(email: str, amount: float | None):
+    """amount=None表示用户清空了这个设置(不想设上限)，跟"设成0"是两种状态——
+    0是"明确不打算再投钱"，None是"没设置/不想告诉AI这个信息"，advise_portfolio
+    要能区分这两种，不能把None当0处理。"""
+    init_db()
+    with closing(_conn()) as c:
+        c.execute(
+            "INSERT INTO user_settings (email, max_capital_cny, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(email) DO UPDATE SET max_capital_cny = excluded.max_capital_cny, updated_at = excluded.updated_at",
+            (email, amount, datetime.now(timezone.utc).isoformat()),
+        )
+        c.commit()
+
+
+def get_max_capital(email: str) -> float | None:
+    init_db()
+    with closing(_conn()) as c:
+        row = c.execute("SELECT max_capital_cny FROM user_settings WHERE email = ?", (email,)).fetchone()
+        return row[0] if row else None
 
 
 def log_analysis(

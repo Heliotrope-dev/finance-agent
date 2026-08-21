@@ -58,7 +58,7 @@ from tracker import (
     get_accuracy_trend, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_advice, get_advice_accuracy,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
-    get_latest_portfolio_advice,
+    get_latest_portfolio_advice, get_max_capital, set_max_capital,
 )
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
@@ -2208,6 +2208,23 @@ def _render_positions_today_pnl(positions: list):
         st.caption(f"有 {skipped} 支持仓因行情/汇率暂时获取不到，未计入。")
 
 
+def _render_max_capital_input(email: str):
+    """最大资金投入量（折人民币，手动设定）——用户明确要求"AI要知道我们
+    总共有多少钱，不能盲目加仓"，advise_portfolio只看得到已经买了多少，
+    看不到用户自己心里的资金上限，这里让用户手动设一下，写进
+    user_settings表，advise_portfolio读取后能算"还剩多少额度"。不设是
+    合法状态(None)，不强制填。"""
+    current = get_max_capital(email)
+    new_value = st.number_input(
+        "最大资金投入量（¥，AI组合分析会参考，不填则不限制）",
+        min_value=0.0, value=float(current) if current else 0.0, step=1000.0,
+        key=f"_max_capital_input_{email}",
+    )
+    if st.button("保存", key=f"_max_capital_save_{email}", use_container_width=True):
+        set_max_capital(email, new_value if new_value > 0 else None)
+        st.success("已保存。")
+
+
 def _render_positions_donut(positions: list):
     """持仓占比环形图。只统计真正持仓(shares>0)，纯关注(shares=0)不占份额。
     不用@st.fragment(run_every=3)——Plotly图3秒重绘会明显闪烁（见持仓分析
@@ -2256,6 +2273,22 @@ def _render_positions_donut(positions: list):
 _PORTFOLIO_REANALYZE_COOLDOWN = 300  # 5分钟节流——组合分析是1次真实AI调用，不是纯本地计算，不能让用户点着玩
 
 
+def _render_bold_as_red(text: str) -> str:
+    """把AI分析文本里的**加粗**改成红色高亮——用户明确要求"重点标红"。AI
+    在_PORTFOLIO_SYSTEM里已经被要求用**加粗**标关键结论，复用这个已有的
+    标记习惯改渲染方式，不用再发明新的自定义标记语法。非加粗部分照常转义
+    （AI生成文本理论上不该有恶意内容，但统一走_esc()是这个项目一贯的
+    习惯，不因为"来源可信"就破例）。"""
+    parts = re.split(r"(\*\*.+?\*\*)", text)
+    html_parts = []
+    for part in parts:
+        if part.startswith("**") and part.endswith("**") and len(part) > 4:
+            html_parts.append(f"<span style='color:{UP_COLOR};font-weight:700'>{_esc(part[2:-2])}</span>")
+        else:
+            html_parts.append(_esc(part).replace("\n", "<br>"))
+    return "".join(html_parts)
+
+
 def _render_portfolio_advice(email: str, positions: list):
     """AI组合分析卡片——跟左边"今日收益"不同，这块不是实时刷新的（AI调用
     有成本，不能每3秒跑一次），只读advisor.py（每工作日17:30跑）写进
@@ -2269,7 +2302,7 @@ def _render_portfolio_advice(email: str, positions: list):
     if advice:
         created = advice["created_at"][:19].replace("T", " ")
         st.caption(f"更新于 {created}（UTC）")
-        st.markdown(advice["analysis_text"])
+        st.markdown(_render_bold_as_red(advice["analysis_text"]), unsafe_allow_html=True)
     else:
         st.caption("AI 组合分析还没生成过。")
 
@@ -2285,7 +2318,7 @@ def _render_portfolio_advice(email: str, positions: list):
 
     if st.button("立即重新分析", key=f"_portfolio_reanalyze_{email}", use_container_width=True):
         st.session_state[throttle_key] = time.time()
-        with st.spinner("AI 正在分析组合……"):
+        with st.spinner("AI 正在分析组合……（要逐支查行情/新闻+推理，大约1-2分钟）"):
             try:
                 import advisor
                 advisor._load_secrets_into_env()
@@ -3195,6 +3228,8 @@ else:
                 pnl_col, ai_col = st.columns([1, 1])
                 with pnl_col:
                     _render_positions_today_pnl(positions)
+                    st.divider()
+                    _render_max_capital_input(_email)
                 with ai_col:
                     _render_portfolio_advice(_email, positions)
 
