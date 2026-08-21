@@ -1679,11 +1679,6 @@ def _render_advice_section():
         "</style>",
         unsafe_allow_html=True,
     )
-    st.caption(
-        "跟本页其它模块不同：这里 AI 会给出买入/卖出/持有/观望的明确结论（其它模块只摆事实、"
-        "不下结论）。筛选逻辑是全市场按市值/估值/最近盈利增速做量化初筛，AI 基于真实财务数据+"
-        "技术面+52周价格位置做判断，仅供参考，不构成投资建议，请自行判断。"
-    )
     try:
         data = get_latest_advice(limit_per_market=3)
     except Exception:
@@ -1694,32 +1689,42 @@ def _render_advice_section():
         st.caption("还没有生成过投研候选（每个工作日17:30自动更新一次）。")
         return
 
-    st.caption(f"更新于 {data['run_date']}（每个工作日17:30自动更新）")
-
-    # 历史方向一致率——比语气强硬更有说服力：Fable 5独立审查这个模块时指出，
-    # get_advice_accuracy 这个函数早就写好了但从没接到UI上过，是这个模块目前
-    # 唯一真正"有理有据"的可验证证据，比调整AI措辞的成本低得多、也不涉及
-    # 弱化风险提示。_ADVICE_EMAIL是advisor.py那个私人脚本写数据时用的固定
-    # 账号（这个模块的数据来源是私人cron脚本，不是当前登录访客本人的判断
-    # 记录，所以这里查的是那个固定账号，不是st.session_state里的当前用户）。
-    try:
-        acc = get_advice_accuracy(_ADVICE_EMAIL)
-    except Exception:
-        acc = {"总数": 0}
-    if acc.get("总数"):
-        rate = acc["一致率"]
-        by_market = "、".join(
-            f"{m} {s['一致率']:.0f}%（{s['总数']}次）" for m, s in acc.get("按市场", {}).items() if s.get("总数")
-        )
+    # 说明文字/更新时间/历史一致率折进一个默认收起的expander——不再在模块
+    # 顶部常驻一整段小字。用户明确要求"小字不要"，但这块信息（尤其"不构成
+    # 投资建议"+可验证的历史一致率）是Fable 5合规审查时的结论，不能整段删掉，
+    # 收进一次点击可见的位置，两边都照顾到。
+    with st.expander("说明", expanded=False):
         st.caption(
-            f"历史追踪：已回看 {acc['总数']} 次判断（7天后按事后价格核对方向），一致率 {rate:.0f}%"
-            + (f"，按市场拆分：{by_market}" if by_market else "")
-            + "——这是历史记录的客观统计，不代表未来表现。"
+            "跟本页其它模块不同：这里 AI 会给出买入/卖出/持有/观望的明确结论（其它模块只摆事实、"
+            "不下结论）。筛选逻辑是全市场按市值/估值/最近盈利增速做量化初筛，AI 基于真实财务数据+"
+            "技术面+52周价格位置做判断，仅供参考，不构成投资建议，请自行判断。"
         )
-    else:
-        st.caption("历史追踪：判断满7天后会自动回填实际价格算方向一致率，现在还没有满足条件的历史记录。")
+        st.caption(f"更新于 {data['run_date']}（每个工作日17:30自动更新）")
 
-    for market_label, market_key in (("美股", "US"), ("港股", "HK")):
+        # 历史方向一致率——比语气强硬更有说服力：Fable 5独立审查这个模块时指出，
+        # get_advice_accuracy 这个函数早就写好了但从没接到UI上过，是这个模块目前
+        # 唯一真正"有理有据"的可验证证据，比调整AI措辞的成本低得多、也不涉及
+        # 弱化风险提示。_ADVICE_EMAIL是advisor.py那个私人脚本写数据时用的固定
+        # 账号（这个模块的数据来源是私人cron脚本，不是当前登录访客本人的判断
+        # 记录，所以这里查的是那个固定账号，不是st.session_state里的当前用户）。
+        try:
+            acc = get_advice_accuracy(_ADVICE_EMAIL)
+        except Exception:
+            acc = {"总数": 0}
+        if acc.get("总数"):
+            rate = acc["一致率"]
+            by_market = "、".join(
+                f"{m} {s['一致率']:.0f}%（{s['总数']}次）" for m, s in acc.get("按市场", {}).items() if s.get("总数")
+            )
+            st.caption(
+                f"历史追踪：已回看 {acc['总数']} 次判断（7天后按事后价格核对方向），一致率 {rate:.0f}%"
+                + (f"，按市场拆分：{by_market}" if by_market else "")
+                + "——这是历史记录的客观统计，不代表未来表现。"
+            )
+        else:
+            st.caption("历史追踪：判断满7天后会自动回填实际价格算方向一致率，现在还没有满足条件的历史记录。")
+
+    for market_label, market_key in (("美股", "US"), ("港股", "HK"), ("A股", "A")):
         picks = data.get(market_key) or []
         if not picks:
             continue
@@ -2572,6 +2577,72 @@ def _resolve_confirmed_symbol(email: str, q: str, market_code: str) -> dict | No
     }
 
 
+@st.dialog("搜索")
+def _show_stock_search_dialog(email: str):
+    """纯搜索——找到标的直接跳详情页，不问股数/金额，跟"添加持仓"（+号）是
+    两个独立入口：这个只看行情，添加持仓才是真正记一笔仓位。跟历史记录那条
+    "点了直接跳详情页"是同一个模式。
+    """
+    query = st.text_input("代码或名称（如 600519 / 腾讯 / 特斯拉）", key="_pos_search_query_dialog")
+    candidates = st.session_state.get("_pos_search_candidates")
+
+    if st.button("搜索", type="primary", use_container_width=True, key="_pos_search_btn_dialog") and query:
+        cands = detect_symbol_candidates(query)
+        if not cands:
+            st.error(f"没查到「{query}」——试试直接输代码，或者换个更常见的名称。")
+        elif len(cands) == 1:
+            sym = _resolve_add_symbol(query, cands[0]["market"])
+            if sym:
+                add_search_history(email, query, cands[0]["market"])
+                st.session_state["_detail_symbol"] = sym
+                st.session_state["_detail_market"] = cands[0]["market"]
+                st.session_state["_detail_name"] = query
+                st.session_state.pop("_pos_search_candidates", None)
+                st.rerun()
+            else:
+                st.error(f"「{query}」查不到行情。")
+        else:
+            st.session_state["_pos_search_candidates"] = cands
+            st.session_state["_pos_search_query"] = query
+            st.rerun(scope="fragment")
+
+    if candidates:
+        cq = st.session_state.get("_pos_search_query", "")
+        st.info(f"「{cq}」在多个市场都有上市，选一个：")
+        cand_cols = st.columns(len(candidates))
+        for ccol, c in zip(cand_cols, candidates):
+            if ccol.button(
+                f"{c['market_label']}（{c['symbol']}）", key=f"_pos_search_cand_{c['market']}_{c['symbol']}",
+                use_container_width=True,
+            ):
+                sym = _resolve_add_symbol(cq, c["market"])
+                if sym:
+                    add_search_history(email, cq, c["market"])
+                    st.session_state["_detail_symbol"] = sym
+                    st.session_state["_detail_market"] = c["market"]
+                    st.session_state["_detail_name"] = cq
+                    st.session_state.pop("_pos_search_candidates", None)
+                    st.session_state.pop("_pos_search_query", None)
+                    st.rerun()
+
+    history = get_search_history(email, limit=10)
+    if history:
+        st.divider()
+        st.caption("最近搜索")
+        _hist_market_label = {"A": "A股", "HK": "港股", "US": "美股"}
+        for h in history:
+            row_label = f"{h['query']}（{_hist_market_label.get(h['market'], h['market'])}）"
+            if st.button(row_label, key=f"_pos_search_hist_{h['id']}", use_container_width=True):
+                sym = _resolve_add_symbol(h["query"], h["market"])
+                if sym:
+                    st.session_state["_detail_symbol"] = sym
+                    st.session_state["_detail_market"] = h["market"]
+                    st.session_state["_detail_name"] = h["query"]
+                    st.rerun()
+                else:
+                    st.error(f"没查到「{h['query']}」的行情。")
+
+
 @st.dialog("添加持仓")
 def _show_add_position_dialog(email: str):
     confirmed = st.session_state.get("_pos_add_confirmed")
@@ -2591,8 +2662,15 @@ def _show_add_position_dialog(email: str):
             st.session_state.pop("_pos_add_confirmed", None)
             st.rerun()
         if ac2.button("返回重新搜索", use_container_width=True):
+            # 不调st.rerun()——dialog函数本身是@st.fragment，按钮点击已经会
+            # 触发它自己重跑，弹窗留在原地。之前这里调了st.rerun()，会触发
+            # 全脚本重跑，dialog判定为"这轮脚本没再调用打开它的那行代码"就
+            # 直接关掉了，表现成"点了下一步后窗口突然消失，得重新点放大镜
+            # 才看到填股数的第二步"——这是Streamlit官方文档明确写的行为
+            # （st.dialog继承st.fragment的重跑范围，st.rerun()会跳出fragment
+            # 范围触发整页重跑，从而关闭弹窗）。
             st.session_state.pop("_pos_add_confirmed", None)
-            st.rerun()
+            st.rerun(scope="fragment")
         return
 
     # 第一阶段：搜索定标的
@@ -2609,7 +2687,10 @@ def _show_add_position_dialog(email: str):
             confirmed = _resolve_confirmed_symbol(email, add_query, candidates[0]["market"])
             if confirmed:
                 st.session_state["_pos_add_confirmed"] = confirmed
-                st.rerun()
+                # scope="fragment"：只重跑这个dialog本身，弹窗不关，直接从
+                # "搜索"无缝切到"填股数"——不能用默认的st.rerun()（=整页重跑），
+                # 那会把弹窗关掉，见下面"返回重新搜索"按钮那条注释的详细说明。
+                st.rerun(scope="fragment")
         else:
             st.session_state["_pos_add_candidates"] = candidates
             st.session_state["_pos_add_candidates_query"] = add_query
@@ -2629,7 +2710,7 @@ def _show_add_position_dialog(email: str):
                     st.session_state.pop("_pos_add_candidates", None)
                     st.session_state.pop("_pos_add_candidates_query", None)
                     st.session_state["_pos_add_confirmed"] = confirmed
-                    st.rerun()
+                    st.rerun(scope="fragment")
 
     history = get_search_history(email, limit=10)
     if history:
@@ -2998,27 +3079,34 @@ else:
 
             st.markdown(
                 "<style>"
-                "[class*='st-key-pos_search_icon'] button, [class*='st-key-pos_compare_icon'] button {"
+                "[class*='st-key-pos_search_icon'] button, [class*='st-key-pos_compare_icon'] button,"
+                "[class*='st-key-pos_add_icon'] button {"
                 "  display: flex; align-items: center; justify-content: center;"
                 "  height: 44px; min-height: 44px; width: 44px; min-width: 44px;"
                 "  padding: 0; border-radius: 50% !important;"
                 "}"
                 "[class*='st-key-pos_search_icon'] span[data-testid='stIconMaterial'],"
-                "[class*='st-key-pos_compare_icon'] span[data-testid='stIconMaterial'] {"
+                "[class*='st-key-pos_compare_icon'] span[data-testid='stIconMaterial'],"
+                "[class*='st-key-pos_add_icon'] span[data-testid='stIconMaterial'] {"
                 "  font-size: 1.6rem !important;"
                 "}"
                 "</style>",
                 unsafe_allow_html=True,
             )
-            # build_multi_comparison（charts.py）之前写好了没接界面，这里补上入口：
-            # 持仓至少2只时才显示"对比"图标，跟搜索图标并排。
+            # 搜索（🔍纯查行情，跳详情页）和添加持仓（➕真正记一笔仓位）是两个
+            # 独立入口，不要合并——之前合并成一个放大镜图标时，点开就是"添加
+            # 持仓"弹窗，没有单纯查一下行情的入口。build_multi_comparison
+            # （charts.py）之前写好了没接界面，这里补上入口：持仓至少2只时才
+            # 显示"对比"图标，三个图标并排。
             if len(positions) >= 2:
-                title_col, compare_col, search_col = st.columns([10, 1, 1], vertical_alignment="center")
+                title_col, compare_col, search_col, add_col = st.columns([9, 1, 1, 1], vertical_alignment="center")
                 if compare_col.button("", icon=":material/show_chart:", key="pos_compare_icon", type="tertiary", help="对比持仓走势"):
                     _show_compare_dialog(positions)
             else:
-                title_col, search_col = st.columns([11, 1], vertical_alignment="center")
-            if search_col.button("", icon=":material/search:", key="pos_search_icon", type="tertiary", help="添加持仓"):
+                title_col, search_col, add_col = st.columns([10, 1, 1], vertical_alignment="center")
+            if search_col.button("", icon=":material/search:", key="pos_search_icon", type="tertiary", help="搜索"):
+                _show_stock_search_dialog(_email)
+            if add_col.button("", icon=":material/add:", key="pos_add_icon", type="tertiary", help="添加持仓"):
                 _show_add_position_dialog(_email)
 
             if not positions:
@@ -3028,7 +3116,7 @@ else:
                     st.markdown(
                         "<div style='text-align:center;color:var(--fa-muted);padding:20px 0 10px'>"
                         "还没有持仓或关注的股票<br>"
-                        "<span style='font-size:0.82rem'>点右上角的搜索按钮添加</span>"
+                        "<span style='font-size:0.82rem'>点右上角的 + 按钮添加</span>"
                         "</div>",
                         unsafe_allow_html=True,
                     )

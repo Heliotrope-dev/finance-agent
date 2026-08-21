@@ -766,6 +766,15 @@ _US_NAME_MAP = {
     "拼多多": "PDD", "pdd": "PDD",
     "唯品会": "VIPS", "vipshop": "VIPS",
     "腾讯音乐": "TME", "tencent music": "TME",
+    # 大宗商品没有个股代码，用户明确要求"一律以最典型的指数或个股出现"——
+    # 这里挑各品类流动性最好、最被广泛当作价格代理的ETF：黄金GLD(SPDR
+    # Gold Shares，规模最大的黄金ETF)、白银SLV、原油USO(跟踪WTI原油价格，
+    # 零售投资者最常用的原油代理，不是期货本身)、天然气UNG、铜CPER。
+    "黄金": "GLD", "gold": "GLD",
+    "白银": "SLV", "silver": "SLV",
+    "原油": "USO", "石油": "USO", "crude oil": "USO", "oil": "USO",
+    "天然气": "UNG", "natural gas": "UNG",
+    "铜": "CPER", "copper": "CPER",
 }
 
 
