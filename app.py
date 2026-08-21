@@ -54,7 +54,7 @@ from analysis import (
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
     get_accuracy_trend, add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
-    add_search_history, get_search_history, get_latest_advice,
+    add_search_history, get_search_history, get_latest_advice, get_advice_accuracy,
 )
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
@@ -1625,6 +1625,7 @@ def _render_home_map():
     _cv1.html(map_html, height=440)
 
 
+_ADVICE_EMAIL = "a13989358483@gmail.com"  # advisor.py 私人脚本写advice表时用的固定账号，跟当前登录访客无关
 _ADVICE_ACTION_COLOR = {"买入": UP_COLOR, "卖出": DOWN_COLOR, "持有": NEUTRAL_COLOR, "观望": NEUTRAL_COLOR}
 _ADVICE_SECTIONS = ("结论", "置信度", "基本面", "技术面", "价格位置", "理由")
 
@@ -1692,6 +1693,29 @@ def _render_advice_section():
         return
 
     st.caption(f"更新于 {data['run_date']}（每个工作日17:30自动更新）")
+
+    # 历史方向一致率——比语气强硬更有说服力：Fable 5独立审查这个模块时指出，
+    # get_advice_accuracy 这个函数早就写好了但从没接到UI上过，是这个模块目前
+    # 唯一真正"有理有据"的可验证证据，比调整AI措辞的成本低得多、也不涉及
+    # 弱化风险提示。_ADVICE_EMAIL是advisor.py那个私人脚本写数据时用的固定
+    # 账号（这个模块的数据来源是私人cron脚本，不是当前登录访客本人的判断
+    # 记录，所以这里查的是那个固定账号，不是st.session_state里的当前用户）。
+    try:
+        acc = get_advice_accuracy(_ADVICE_EMAIL)
+    except Exception:
+        acc = {"总数": 0}
+    if acc.get("总数"):
+        rate = acc["一致率"]
+        by_market = "、".join(
+            f"{m} {s['一致率']:.0f}%（{s['总数']}次）" for m, s in acc.get("按市场", {}).items() if s.get("总数")
+        )
+        st.caption(
+            f"历史追踪：已回看 {acc['总数']} 次判断（7天后按事后价格核对方向），一致率 {rate:.0f}%"
+            + (f"，按市场拆分：{by_market}" if by_market else "")
+            + "——这是历史记录的客观统计，不代表未来表现。"
+        )
+    else:
+        st.caption("历史追踪：判断满7天后会自动回填实际价格算方向一致率，现在还没有满足条件的历史记录。")
 
     for market_label, market_key in (("美股", "US"), ("港股", "HK")):
         picks = data.get(market_key) or []
