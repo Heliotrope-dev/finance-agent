@@ -18,6 +18,7 @@ Futu SDK 自带的 get_stock_filter（按市值/PE/盈利增长这些真实指�
 
 import json
 import os
+import re
 
 # 必须在任何可能引入 tqdm/streamlit 的 import 之前设置，减少 exec 工具读输出时
 # 的噪音（详见下方 __main__ 里的说明）。
@@ -294,6 +295,17 @@ def screen_candidates() -> dict:
     }
 
 
+def _extract_action(text: str) -> str:
+    """从AI输出里解析"结论：XXX"这一行的动作——真实踩过的坑：prompt里的格式
+    示例写的是"结论：[买入/卖出/持有/观望]"（方括号是"四选一"的记号，不是要求
+    照抄），但DeepSeek偶尔会把方括号也原样输出成"结论：[持有]"，用精确子串匹配
+    "结论：持有"就完全匹配不上，会静默落回默认值"观望"——这是判断明明是"持有"
+    却被记成"观望"的真实数据错误，不是无害的格式问题，会污染后续的排序/统计。
+    改用正则，方括号/全半角冒号/前后空格都容错。"""
+    m = re.search(r"结论[：:]\s*[\[【]?\s*(买入|卖出|持有|观望)\s*[\]】]?", text)
+    return m.group(1) if m else "观望"
+
+
 _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是一位会自己做最终决策的
 个人投资者——你的任务是基于给定的真实数据给出参考判断，不是替他下单。
 
@@ -350,17 +362,94 @@ _HOLDING_ADDENDUM = """
     两者性质不同，不能混着说。
 """
 
+# 多空辩论——参考开源项目TradingAgents（TauricResearch）的架构思路：单次AI
+# 判断容易带单边偏向，让两个立场相反的AI各自基于同一份真实数据把最有力的
+# 论据摆出来，再让裁判权衡谁更站得住脚，比直接一次性下结论更扎实。只用在
+# 持仓判断(judge_stock_with_debate)，不用在候选池初筛(judge_stock)——候选池
+# 一天要判断几十支，3倍AI调用成本/耗时在这个量级上不划算；持仓通常只有
+# 几支，多花的成本对判断质量提升是值得的，这里的场景比初筛更值得较真。
+_BULL_SYSTEM = """你是一位专业的多头研究员，正在为"这支股票该不该继续持有/加仓"这个
+辩论准备论据。只能用下面给出的真实数据（财务/技术面/价格位置/新闻），不能编造
+任何数字或消息，但你的立场是多头——从这些真实数据里，尽你所能挖掘出对多头最
+有利的解读角度，把最强的论据摆出来。不用面面俱到，挑最有说服力的2-3点讲透，
+每一点都要引用具体数字。最后一句话总结你的核心论点。"""
 
-def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
-                 technical_summary: str, news_summary: str, position_summary: str = "",
-                 holding: bool = False) -> dict:
-    user_content = (
+_BEAR_SYSTEM = """你是一位专业的空头研究员，正在为"这支股票该不该减仓/卖出"这个
+辩论准备论据。只能用下面给出的真实数据（财务/技术面/价格位置/新闻），不能编造
+任何数字或消息，但你的立场是空头——从这些真实数据里，尽你所能挖掘出对空头最
+有利的解读角度，把最强的论据摆出来。不用面面俱到，挑最有说服力的2-3点讲透，
+每一点都要引用具体数字。最后一句话总结你的核心论点。"""
+
+_DEBATE_JUDGE_ADDENDUM = """
+
+补充要求（这次你会看到两份针对同一支股票的对立论证，不是直接看原始数据）：
+11. 你会拿到"多头论证"和"空头论证"两段文字，都是基于同一份真实数据但立场
+    相反写的。你的任务是权衡哪一边的论据更站得住脚，不能各打五十大板、和稀泥，
+    必须明确表态更认同哪一边、具体是哪一条论据说服了你。
+12. 被你否决的那一方如果有合理的点（比如空头指出的风险确实存在，只是你认为
+    不足以推翻买入逻辑），要在理由里明确提一句承认，不能假装对方论证不存在。
+"""
+
+
+def _build_judge_user_content(symbol: str, market: str, name: str, financial_summary: str,
+                               technical_summary: str, news_summary: str, position_summary: str) -> str:
+    return (
         f"股票：{name}（{symbol}，{market}股）\n\n"
         f"财务摘要：\n{financial_summary or '（暂无财务数据）'}\n\n"
         f"技术面信号：{technical_summary or '（数据不足）'}\n\n"
         f"价格位置（52周区间）：{position_summary or '（数据不足）'}\n\n"
         f"近期新闻：\n{news_summary or '（暂无相关新闻）'}"
     )
+
+
+def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summary: str,
+                             technical_summary: str, news_summary: str, position_summary: str = "",
+                             holding: bool = True) -> dict:
+    """带多空辩论的判断——只给持仓用（见上面的成本考量注释）。bull/bear两个
+    论证并发生成（互不依赖，同时发也不影响独立性——两边都只能看到原始数据，
+    看不到对方的论证，这才是真正各自独立的论据，不是一个抄另一个）。"""
+    data_context = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary)
+
+    def _fetch_stance(system_prompt):
+        resp = _client().chat.completions.create(
+            model=_MODEL,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": data_context}],
+            max_tokens=4000,  # 论据比最终判断的六段结构化输出短得多，但同样的空内容坑保底调高一点
+            temperature=0.5,  # 辩论双方要有观点区分度，比最终判断的0.3稍高
+            stream=False,
+        )
+        text = resp.choices[0].message.content or ""
+        if not text.strip():
+            raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
+        return text
+
+    stance_results = _run_concurrent_with_deadline(
+        [_BULL_SYSTEM, _BEAR_SYSTEM], _fetch_stance, timeout=60, max_workers=2
+    )
+    if 0 not in stance_results or 1 not in stance_results:
+        raise RuntimeError("多空论证生成失败（可能是网络/AI调用超时），跳过这次辩论判断。")
+    bull_text, bear_text = stance_results[0], stance_results[1]
+
+    final_user_content = f"{data_context}\n\n多头论证：\n{bull_text}\n\n空头论证：\n{bear_text}"
+    system_prompt = _JUDGE_SYSTEM + (_HOLDING_ADDENDUM if holding else "") + _DEBATE_JUDGE_ADDENDUM
+    resp = _client().chat.completions.create(
+        model=_MODEL,
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": final_user_content}],
+        max_tokens=8000,
+        temperature=0.3,
+        stream=False,
+    )
+    text = resp.choices[0].message.content or ""
+    if not text.strip():
+        raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
+    action = _extract_action(text)
+    return {"action": action, "fundamental_verdict": text, "bull_argument": bull_text, "bear_argument": bear_text}
+
+
+def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
+                 technical_summary: str, news_summary: str, position_summary: str = "",
+                 holding: bool = False) -> dict:
+    user_content = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary)
     system_prompt = _JUDGE_SYSTEM + _HOLDING_ADDENDUM if holding else _JUDGE_SYSTEM
     resp = _client().chat.completions.create(
         model=_MODEL,
@@ -382,11 +471,7 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
         # 所以观望"是两回事，前者写进advice表会污染统计还会让人误以为是真判断。
         # 交给调用方(_judge_one)的except分支处理为失败，跳过这条不记录。
         raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
-    action = "观望"
-    for a in ("买入", "卖出", "持有", "观望"):
-        if f"结论：{a}" in text or f"结论:{a}" in text:
-            action = a
-            break
+    action = _extract_action(text)
     return {"action": action, "fundamental_verdict": text}
 
 
@@ -475,7 +560,13 @@ def _judge_one(item: dict, source: str) -> dict | None:
     news = _news_summary_text(name or symbol)
     position = _price_position_text(symbol, market)
     try:
-        verdict = judge_stock(symbol, market, name, fin, tech, news, position, holding=holding)
+        # 持仓判断走多空辩论版本（更扎实但3倍AI调用），候选池初筛(source=
+        # "screen")继续用单次判断——几十支候选一天判断一遍，辩论版本的
+        # 调用量级在那个场景下不划算，见judge_stock_with_debate上面的注释。
+        if holding:
+            verdict = judge_stock_with_debate(symbol, market, name, fin, tech, news, position, holding=True)
+        else:
+            verdict = judge_stock(symbol, market, name, fin, tech, news, position, holding=False)
     except Exception as e:
         return {"symbol": symbol, "market": market, "name": name, "error": str(e)}
     return {
