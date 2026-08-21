@@ -126,14 +126,22 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
             {"role": "user", "content": user_content},
         ],
         # 800太小——DeepSeek隐藏的reasoning_content跟正式回答共用同一个max_tokens
-        # 预算，这个项目自己就反复踩过这个坑（README"AI分析概率性返回空内容"），
-        # 连2000都不够，最复杂的cross_validate最后调到4000。实测这个800确实
-        # 复现了同一个bug：全部22条判断fundamental_verdict都是空字符串。
-        max_tokens=4000,
+        # 预算，这个项目自己就反复踩过这个坑（README"AI分析概率性返回空内容"）。
+        # 调到4000（对齐项目里最复杂的cross_validate）后实测22条里仍有9条
+        # （41%）是空的——这个判断要求综合基本面+成长性+负债+估值+技术面五项
+        # 给结论，比cross_validate那种单一维度的总结更容易触发长思考链，4000
+        # 还是不够，调到8000。即便如此仍可能偶发失败，下面显式检查空内容
+        # 并当作失败处理（不写入一条假的"观望"记录），不能只靠加大数字碰运气。
+        max_tokens=8000,
         temperature=0.3,
         stream=False,
     )
     text = resp.choices[0].message.content or ""
+    if not text.strip():
+        # 空内容不当成"观望"记下去——那是"没判断出来"，跟AI主动判断"没有把握
+        # 所以观望"是两回事，前者写进advice表会污染统计还会让人误以为是真判断。
+        # 交给调用方(_judge_one)的except分支处理为失败，跳过这条不记录。
+        raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
     action = "观望"
     for a in ("买入", "卖出", "持有", "观望"):
         if f"结论：{a}" in text or f"结论:{a}" in text:
