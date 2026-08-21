@@ -22,6 +22,8 @@ os.environ.setdefault("TQDM_DISABLE", "1")
 import logging as _logging
 _logging.getLogger("streamlit").setLevel(_logging.ERROR)
 
+import queue as _queue
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as _futures_wait
 from datetime import datetime, timedelta
@@ -106,7 +108,49 @@ def _run_concurrent_with_deadline(items: list, fn, timeout: float, max_workers: 
     return results
 
 
-def _futu_screen_pool(ctx, market, quarter, cap_threshold: float, target_count: int) -> tuple[list[dict], int]:
+def _futu_call_with_timeout(fn, timeout: float = 30, default=None):
+    """在独立线程里创建 Futu 连接 + 执行调用 + 关闭，全程同一个线程完成——
+    遵守 Futu SDK "连接和调用必须同一线程" 的硬规则（data_sources.py 的
+    `_futu_worker_loop`/`_run_with_timeout` 两处 docstring 里反复强调的同一
+    个教训：连接在一个线程建、调用在另一个线程发，SDK 内部状态会错乱直接
+    卡死不返回）。主线程只是排队等结果，等不到就超时返回 default，不会跨
+    线程碰那个连接对象。
+
+    实测复现过的真实故障：2026-08-21 生产环境定时 cron 跑 advisor.py 时，
+    Futu 行情连接反复断开又重连，卡在拉行情这一步 6 分钟没有任何响应，
+    最后被 OpenClaw 的 900 秒 agent 超时强制杀掉——当天投研简报完全没有
+    生成，比"结果差一点"更糟，是"整个功能当天完全没跑出来"。这个函数是
+    补这个洞：单次 Futu 调用最多等 timeout 秒，超时就放弃这一步（fn 所在的
+    worker 线程会被丢弃，不强杀——Python 没有安全的跨线程强制终止手段，
+    daemon=True 保证进程退出时不会被这个残留线程拖住），脚本还能继续往下
+    走，不会被外层整体 abort 导致颗粒无收。
+    """
+    q = _queue.Queue(maxsize=1)
+
+    def _worker():
+        try:
+            ctx = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
+        except Exception:
+            q.put(default)
+            return
+        try:
+            q.put(fn(ctx))
+        except Exception:
+            q.put(default)
+        finally:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=_worker, daemon=True).start()
+    try:
+        return q.get(timeout=timeout)
+    except _queue.Empty:
+        return default
+
+
+def _futu_screen_pool(market, quarter, cap_threshold: float, target_count: int) -> tuple[list[dict], int]:
     """在 market 全市场范围内按"市值下限 + PE在合理区间(0-50，排除亏损股和
     极端高估值) + 最近一期净利润同比增速>10%"筛选，按增速降序排，分页拉到最多
     target_count 条（Futu 单次最多返回200条一页，一次拉不完500条要翻页）。
@@ -148,10 +192,14 @@ def _futu_screen_pool(ctx, market, quarter, cap_threshold: float, target_count: 
     all_count = 0
     begin = 0
     while len(items) < target_count:
-        try:
-            ret, data = ctx.get_stock_filter(market=market, filter_list=filters, begin=begin, num=page_size)
-        except Exception:
+        _begin = begin  # 闭包捕获循环变量要显式拷贝一份，不然下面的lambda全部指向同一个begin
+        result = _futu_call_with_timeout(
+            lambda ctx, _b=_begin: ctx.get_stock_filter(market=market, filter_list=filters, begin=_b, num=page_size),
+            timeout=30,
+        )
+        if result is None:
             break
+        ret, data = result
         if ret != ft.RET_OK:
             break
         _last_page, all_count, ret_list = data
@@ -202,26 +250,16 @@ def _top_picks(judged: list[dict], market: str, n: int = _TOP_PICKS) -> list[dic
 
 
 def screen_hk_us_candidates() -> dict:
-    try:
-        ctx = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
-    except Exception:
-        ctx = None
-
-    if ctx is None:
-        return {"us_pool": [], "hk_pool": [], "us_all_count": 0, "hk_all_count": 0, "judged": []}
-
-    try:
-        us_pool, us_all = _futu_screen_pool(
-            ctx, ft.Market.US, ft.FinancialQuarter.MOST_RECENT_QUARTER, 2_000_000_000, _US_POOL_TARGET
-        )
-        hk_pool, hk_all = _futu_screen_pool(
-            ctx, ft.Market.HK, ft.FinancialQuarter.ANNUAL, 5_000_000_000, _HK_POOL_TARGET
-        )
-    finally:
-        try:
-            ctx.close()
-        except Exception:
-            pass
+    # 每个市场各自的_futu_screen_pool内部已经用_futu_call_with_timeout做了
+    # 超时保护（每页最多等30秒），不需要在这里再维护一个跨两个市场共用的
+    # ctx——共用连接省下的那点建连开销，跟"任何一次调用卡住会拖累后面所有
+    # 请求"这个风险比，完全不值得，2026-08-21生产环境的真实故障就是前车之鉴。
+    us_pool, us_all = _futu_screen_pool(
+        ft.Market.US, ft.FinancialQuarter.MOST_RECENT_QUARTER, 2_000_000_000, _US_POOL_TARGET
+    )
+    hk_pool, hk_all = _futu_screen_pool(
+        ft.Market.HK, ft.FinancialQuarter.ANNUAL, 5_000_000_000, _HK_POOL_TARGET
+    )
 
     shortlist = us_pool[:_US_CANDIDATE_CAP] + hk_pool[:_HK_CANDIDATE_CAP]
     judged: list[dict] = []
@@ -376,40 +414,31 @@ def _price_position_text(symbol: str, market: str) -> str:
     出来，明确喂给AI，逼它把"价格位置"当成独立于基本面之外的第三个判断维度，
     不能光看财报数字好看就无脑给买入。
 
-    单独开一个短连接查get_market_snapshot——跟_futu_screen_pool那个筛选连接
-    是分开的（那个只在screen_hk_us_candidates里开一次，这里是_judge_one并发
-    调用时按需查，各自独立开关不复用，避免跨线程共享同一个连接对象）。
+    每次调用单独开一个短连接（通过_futu_call_with_timeout，带超时保护，见
+    该函数docstring里2026-08-21的真实故障记录）——跟_futu_screen_pool的
+    连接是分开的，_judge_one并发调用时各自独立开关，不跨线程共享连接对象。
     """
-    try:
-        ctx = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
-    except Exception:
+    code = f"{market}.{symbol}"
+    result = _futu_call_with_timeout(lambda ctx: ctx.get_market_snapshot([code]), timeout=20)
+    if result is None:
         return ""
-    try:
-        code = f"{market}.{symbol}"
-        ret, data = ctx.get_market_snapshot([code])
-        if ret != ft.RET_OK or data is None or data.empty:
-            return ""
-        row = data.iloc[0]
-        cur = row.get("last_price")
-        hi = row.get("highest52weeks_price")
-        lo = row.get("lowest52weeks_price")
-        if not cur or not hi or not lo or hi <= 0 or lo <= 0:
-            return ""
-        from_high_pct = (cur - hi) / hi * 100
-        from_low_x = cur / lo
-        percentile = (cur - lo) / (hi - lo) * 100 if hi > lo else 50
-        return (
-            f"现价{cur:.2f}，52周最高{hi:.2f}（较高点{from_high_pct:+.1f}%），"
-            f"52周最低{lo:.2f}（是低点的{from_low_x:.1f}倍），"
-            f"当前处于52周区间约{percentile:.0f}%分位（越接近100%越接近高点）。"
-        )
-    except Exception:
+    ret, data = result
+    if ret != ft.RET_OK or data is None or data.empty:
         return ""
-    finally:
-        try:
-            ctx.close()
-        except Exception:
-            pass
+    row = data.iloc[0]
+    cur = row.get("last_price")
+    hi = row.get("highest52weeks_price")
+    lo = row.get("lowest52weeks_price")
+    if not cur or not hi or not lo or hi <= 0 or lo <= 0:
+        return ""
+    from_high_pct = (cur - hi) / hi * 100
+    from_low_x = cur / lo
+    percentile = (cur - lo) / (hi - lo) * 100 if hi > lo else 50
+    return (
+        f"现价{cur:.2f}，52周最高{hi:.2f}（较高点{from_high_pct:+.1f}%），"
+        f"52周最低{lo:.2f}（是低点的{from_low_x:.1f}倍），"
+        f"当前处于52周区间约{percentile:.0f}%分位（越接近100%越接近高点）。"
+    )
 
 
 def _judge_one(item: dict, source: str) -> dict | None:
