@@ -77,7 +77,11 @@ def _client() -> OpenAI:
     key = os.environ.get("DEEPSEEK_API_KEY", "")
     if not key:
         raise RuntimeError("未配置 DEEPSEEK_API_KEY。")
-    return OpenAI(api_key=key, base_url=_DEEPSEEK_BASE, max_retries=2)
+    # 踩坑记录：没设timeout时，账号余额不足(402)这类快速失败的错误在openai SDK
+    # 默认重试逻辑下实测挂了将近10分钟没返回——不是DeepSeek真的在处理，是客户端
+    # 卡在某个没有时间上限的等待/重试循环里。显式给60秒超时，快速失败好过整批
+    # 候选全部在同一个坑里陪跑到_run_concurrent_with_deadline的400秒外层超时。
+    return OpenAI(api_key=key, base_url=_DEEPSEEK_BASE, max_retries=2, timeout=60)
 
 
 def _run_concurrent_with_deadline(items: list, fn, timeout: float, max_workers: int = 8) -> dict:
