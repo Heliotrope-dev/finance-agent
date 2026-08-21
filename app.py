@@ -54,9 +54,9 @@ from analysis import (
 )
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
-    get_accuracy_trend, add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
+    get_accuracy_trend, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_advice, get_advice_accuracy,
-    get_watchlist_advice, get_positions, upsert_position, reduce_position, delete_position,
+    get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
 )
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
@@ -132,7 +132,7 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 
 /* ── 移动端（窄屏）适配 ──────────────────────────────────────────────────────
    之前这个项目完全没有@media适配——大量信息密集的卡片（涨跌停池/核心股/
-   成分股卡片、指数快照表头、自选股行、热门板块宫格）都是手写flex比例布局，
+   成分股卡片、指数快照表头、持仓行、热门板块宫格）都是手写flex比例布局，
    不会跟着窄屏自动折行，手机打开容易挤出文字截断、数字错位。这里不重做
    信息架构，只让这几处关键卡片在窄屏下改成允许换行/压缩字号，同时保留
    数据本身的可读性。 */
@@ -177,8 +177,8 @@ st.markdown(
     "<style id='_fa_loader_css'>[data-testid=\"stAppViewContainer\"]{opacity:0!important}</style>",
     unsafe_allow_html=True,
 )
-# 之前这个遮罩只在"真实整页导航"（点<a href>链接）时生效，切"行情/自选股"
-# 这种纯靠st.radio触发的内部rerun时完全不出现——用户反馈"自选股页面还是有
+# 之前这个遮罩只在"真实整页导航"（点<a href>链接）时生效，切"行情/持仓"
+# 这种纯靠st.radio触发的内部rerun时完全不出现——用户反馈"持仓页面还是有
 # 上一页残留"，排查发现st.components.v1.html()传入的HTML/JS内容如果两次
 # rerun之间字节完全相同，Streamlit前端不会重新挂载这个iframe（判定为"没变化"
 # 直接跳过），脚本也就不会重新执行，遮罩自然不会在内部rerun时重新出现。
@@ -358,7 +358,7 @@ if not st.session_state.get("logged_in"):
     _show_login_page()
     st.stop()
 
-# 自选股列表整卡片可点——之前试过CSS覆盖层、JS找DOM绑事件两种方案，
+# 持仓列表整卡片可点——之前试过CSS覆盖层、JS找DOM绑事件两种方案，
 # 在真实浏览器里都点不动（大概率是这两种方案都依赖对Streamlit内部渲染结构
 # 的猜测，版本一变或者猜错了就失效）。改成最朴素可靠的办法：卡片内容整个
 # 包在一个真正的<a href="?...">链接里，点击就是标准的浏览器导航行为，
@@ -368,10 +368,10 @@ if st.query_params.get("open_symbol"):
     st.session_state["_detail_symbol"] = st.query_params["open_symbol"]
     st.session_state["_detail_market"] = st.query_params.get("open_market", "A")
     st.session_state["_detail_name"] = st.query_params.get("open_name", st.query_params["open_symbol"])
-    # 从自选股卡片点进来的，"返回"要能回到自选股分区，不是每次都弹回默认的
+    # 从持仓卡片点进来的，"返回"要能回到持仓分区，不是每次都弹回默认的
     # "行情"分区——整页导航会把session_state清空，"_active_section"记不住
     # 是从哪个分区点进来的，得靠这个参数显式带过来。
-    if st.query_params.get("open_from") == "wl":
+    if st.query_params.get("open_from") == "pos":
         st.session_state["_active_section"] = "持仓"
     st.query_params.clear()
     st.rerun()
@@ -422,7 +422,7 @@ def _fetch_news_items(keyword: str, symbol: str | None, market: str) -> tuple:
 
 
 def _build_sparkline_svg(values: list, color: str, width: int = 60, height: int = 26) -> str:
-    """自选股行情列表里那种"一眼看趋势"的迷你走势图——不用plotly（每行一个太重，
+    """持仓行情列表里那种"一眼看趋势"的迷你走势图——不用plotly（每行一个太重，
     列表长了会很卡），纯手算折线点位吐一段内联SVG，跟长桥/同花顺那种列表里的
     小图一个意思。
     """
@@ -442,7 +442,7 @@ def _build_sparkline_svg(values: list, color: str, width: int = 60, height: int 
 
 
 def _fetch_sparkline_closes(symbol: str, market: str, days: int = 20) -> list:
-    """自选股迷你图用的近期收盘价——直接复用已有的历史行情接口（带缓存，5分钟
+    """持仓迷你图用的近期收盘价——直接复用已有的历史行情接口（带缓存，5分钟
     过期），不新开专门的接口，多取一倍自然日天数换算成够用的交易日数量。
     """
     try:
@@ -472,7 +472,7 @@ def _fmt_turnover(v) -> str:
 
 def _run_concurrent_with_deadline(items: list, fn, timeout: float, max_workers: int = 8) -> dict:
     """一批任务并发跑、给整批一个统一的deadline（从submit那一刻算起，不是从"轮到
-    检查它"那一刻）——自选股列表/组合对比/回看补录三处原来各自手写一份几乎一样的
+    检查它"那一刻）——持仓列表/组合对比/回看补录三处原来各自手写一份几乎一样的
     "ThreadPoolExecutor + concurrent.futures.wait(timeout) + shutdown(wait=False)"，
     抽成这一个共享helper，不用再维护三份重复代码。
 
@@ -522,7 +522,7 @@ def _auth_qs() -> str:
 
 
 def _resolve_add_symbol(q: str, market_code: str) -> str | None:
-    """"新增自选股"用的名称→代码解析，A股之前一直漏了——resolve_symbol_by_name
+    """"新增持仓"用的名称→代码解析，A股之前一直漏了——resolve_symbol_by_name
     只支持HK/US（内部的知名股名单和Futu模糊搜索都没有A股这块），A股market
     传进去必然返回None，退化成直接把"茅台"这种中文名当代码用，当然查不到。
     这里A股单独先走search_stock_by_name（BaoStock按名称模糊匹配，真支持A股）。
@@ -977,14 +977,14 @@ def _render_price_header(symbol: str, market: str):
     hcol2.metric("最低", f"{spot.get('最低', 0):.2f}")
     hcol3.metric("今开", f"{spot.get('今开', 0):.2f}")
 
-    _watched_now = is_in_watchlist(st.session_state["user_email"], symbol)
-    if _watched_now:
-        if st.button("取消关注", key="wl_toggle"):
-            remove_from_watchlist(st.session_state["user_email"], symbol)
+    _tracked_now = is_position_tracked(st.session_state["user_email"], symbol)
+    if _tracked_now:
+        if st.button("取消关注", key="pos_toggle"):
+            delete_position(st.session_state["user_email"], symbol)
             st.rerun()
     else:
-        if st.button("关注", key="wl_toggle"):
-            add_to_watchlist(st.session_state["user_email"], symbol, spot.get("名称", symbol), market=market)
+        if st.button("关注", key="pos_toggle"):
+            add_watch_only(st.session_state["user_email"], symbol, spot.get("名称", symbol), market=market)
             st.rerun()
 
 
@@ -1018,19 +1018,19 @@ def _render_index_price_header(name: str, market: str):
     st.caption("每 3 秒自动刷新")
 
 
-def _inject_wl_card_css():
-    """wl-card-link 这个class的样式——多个板块（自选股/成分股/涨跌停池/核心股
+def _inject_pos_card_css():
+    """pos-card-link 这个class的样式——多个板块（持仓/成分股/涨跌停池/核心股
     榜）共用同一个class做卡片点击跳转，样式只需要注入一次，但每个板块渲染时
     不一定确定其它板块的注入代码有没有跑过，重复调用这个函数是幂等的，
     不会有副作用。
     """
     st.markdown(
         "<style>"
-        "a.wl-card-link, a.wl-card-link:link, a.wl-card-link:visited {"
+        "a.pos-card-link, a.pos-card-link:link, a.pos-card-link:visited {"
         "  text-decoration: none !important; color: inherit !important;"
         "  display: block; cursor: pointer;"
         "}"
-        "a.wl-card-link:hover { opacity: 0.85; }"
+        "a.pos-card-link:hover { opacity: 0.85; }"
         "</style>",
         unsafe_allow_html=True,
     )
@@ -1042,12 +1042,12 @@ def _render_stock_movers_cards(df, market: str):
     这个形态，抽成公共函数不用每处各写一遍。df为空时调用方自己处理提示语，
     这里不管。
 
-    价格变了背景闪一下红/绿：跟自选股列表(_render_watchlist_rows)、详情页
+    价格变了背景闪一下红/绿：跟持仓列表(_render_position_rows)、详情页
     价格区块(_render_price_header)同一套_PRICE_FLASH_CSS机制，用户反馈"行情
     里的股票也要有这个效果"——调用方（涨跌停池/港股核心股/美股核心股这几个
     fragment）都已经是run_every=3自动刷新，数据变了这里自然就能跟着闪。
     """
-    _inject_wl_card_css()
+    _inject_pos_card_css()
     st.markdown(_PRICE_FLASH_CSS, unsafe_allow_html=True)
     for _, row in df.iterrows():
         mv_symbol = str(row["代码"])
@@ -1066,7 +1066,7 @@ def _render_stock_movers_cards(df, market: str):
             flash_class = "price-flash-up" if row["最新价"] > prev else "price-flash-down"
         with st.container(border=True):
             st.markdown(
-                f"<a class='wl-card-link' href='{href}' target='_self'>"
+                f"<a class='pos-card-link' href='{href}' target='_self'>"
                 f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:4px'>"
                 f"<div style='flex:2;font-weight:600;color:var(--fa-text);text-decoration:none'>"
                 f"{_esc(row['名称'])}（{_esc(mv_symbol)}）</div>"
@@ -1161,7 +1161,7 @@ def _render_index_snapshot(mkt_code: str):
     任何一个的交互按钮都会连带其余区块一起重新拉一遍数据。
 
     之前试过给这个fragment加run_every=3做涨跌闪烁，结果导致"从行情切到
-    自选股"出现页面残留——猜测是这个fragment自己的自动刷新定时器切换页面
+    持仓"出现页面残留——猜测是这个fragment自己的自动刷新定时器切换页面
     后仍在后台继续触发，把已经不该存在的旧内容重新塞回DOM里。残留问题
     优先级更高，撤回run_every，闪烁效果的代码保留（不会触发，也无副作用），
     等找到不会导致残留的方案再说。
@@ -1231,7 +1231,7 @@ def _render_a_share_overview():
     这是页面交互感觉卡顿的主要原因。拆成独立fragment后，点这个按钮只会
     重新跑这一个区块。
 
-    之前试过加run_every=3做涨跌闪烁，结果导致"从行情切到自选股"出现页面
+    之前试过加run_every=3做涨跌闪烁，结果导致"从行情切到持仓"出现页面
     残留（这几个fragment自己的定时器猜测在切页后仍在后台触发，把旧内容
     重新塞回DOM）。残留问题优先级更高，撤回run_every，闪烁效果的代码
     保留（不会触发，也无副作用）。
@@ -1278,7 +1278,7 @@ def _render_a_share_overview():
 @st.fragment
 def _render_hk_overview():
     """港股南向资金+核心股，独立fragment，原因同_render_a_share_overview
-    （包括撤回run_every=3的原因——切到自选股页面残留）。"""
+    （包括撤回run_every=3的原因——切到持仓页面残留）。"""
     try:
         south = get_southbound_flow()
     except Exception:
@@ -1305,7 +1305,7 @@ def _render_hk_overview():
 @st.fragment
 def _render_us_overview():
     """美股核心股，独立fragment，原因同_render_a_share_overview
-    （包括撤回run_every=3的原因——切到自选股页面残留）。"""
+    （包括撤回run_every=3的原因——切到持仓页面残留）。"""
     st.markdown("**美股核心股**")
     try:
         us_movers = get_us_famous_movers(15)
@@ -1665,17 +1665,17 @@ def _render_advice_section():
     每次访问都触发一遍完全不现实，也没必要（这类基本面判断一天一次足够新）。
     """
     st.markdown("**AI 投研候选**")
-    # 卡片可点击跳转详情页——复用自选股列表卡片验证过的方案（见
-    # _render_watchlist_rows 的踩坑记录：JS/CSS猜DOM结构点不动，最后用最朴素
-    # 的<a href="?open_symbol=...">整页导航才可靠）。那段CSS只在自选股tab渲染
+    # 卡片可点击跳转详情页——复用持仓列表卡片验证过的方案（见
+    # _render_position_rows 的踩坑记录：JS/CSS猜DOM结构点不动，最后用最朴素
+    # 的<a href="?open_symbol=...">整页导航才可靠）。那段CSS只在持仓tab渲染
     # 时才注入，首页不一定会经过那个函数，这里独立注入一份，不依赖执行顺序。
     st.markdown(
         "<style>"
-        "a.wl-card-link, a.wl-card-link:link, a.wl-card-link:visited {"
+        "a.pos-card-link, a.pos-card-link:link, a.pos-card-link:visited {"
         "  text-decoration: none !important; color: inherit !important;"
         "  display: block; cursor: pointer;"
         "}"
-        "a.wl-card-link:hover { opacity: 0.85; }"
+        "a.pos-card-link:hover { opacity: 0.85; }"
         "</style>",
         unsafe_allow_html=True,
     )
@@ -1740,7 +1740,7 @@ def _render_advice_section():
             with col:
                 with st.container(border=True):
                     st.markdown(
-                        f"<a class='wl-card-link' href='{href}' target='_self'>"
+                        f"<a class='pos-card-link' href='{href}' target='_self'>"
                         f"<div style='display:flex;justify-content:space-between;align-items:center'>"
                         f"<span style='font-weight:700'>{_esc(row.get('name',''))}</span>"
                         f"<span style='background:{color};color:#fff;border-radius:4px;padding:1px 8px;"
@@ -2140,14 +2140,70 @@ def _render_index_detail(name: str, code: str, market: str):
         _render_overall_summary(st.session_state[idx_summary_key])
 
 
-def _render_positions_donut(watched: list):
+@st.fragment(run_every=3)
+def _render_positions_today_pnl(positions: list):
+    """今日收益，要求实时同步——跟_render_position_rows一样每3秒刷新。
+    get_stock_realtime本身@st.cache_data(ttl=3)，跟这个fragment的刷新节奏
+    对齐，同一只股票3秒内被两个fragment各查一次实际只打一次真实请求，
+    第二次直接命中缓存，不算"额外请求"。只用最新价/昨收这两个已有字段
+    算涨跌额，不需要新接口。汇率/行情任一失败就跳过那一支，跳过的部分
+    在展示里如实说明，不拿旧数字硬凑。
+    """
+    holding_items = [w for w in positions if (w.get("shares") or 0) > 0]
+    if not holding_items:
+        st.caption("今日收益：暂无真实持仓。")
+        return
+
+    def _fetch_today(item):
+        symbol, market = item["symbol"], item.get("market", "A")
+        try:
+            spot = get_stock_realtime(symbol, market=market)
+        except Exception:
+            spot = {}
+        price, prev_close = spot.get("最新价"), spot.get("昨收")
+        if not price or not prev_close:
+            return None
+        pnl_native = (price - prev_close) * item["shares"]
+        pnl_cny, _note = to_cny(pnl_native, item.get("currency", "CNY"))
+        value_cny, _note2 = to_cny(price * item["shares"], item.get("currency", "CNY"))
+        if pnl_cny is None or value_cny is None:
+            return None
+        return pnl_cny, value_cny
+
+    results = _run_concurrent_with_deadline(holding_items, _fetch_today, timeout=6)
+    total_pnl, total_value, skipped = 0.0, 0.0, 0
+    for i in range(len(holding_items)):
+        r = results.get(i)
+        if r is None:
+            skipped += 1
+            continue
+        total_pnl += r[0]
+        total_value += r[1]
+
+    if total_value <= 0:
+        st.caption("今日收益：行情/汇率暂时都获取不到，稍后重试。")
+        return
+
+    pnl_pct = total_pnl / (total_value - total_pnl) * 100 if (total_value - total_pnl) else 0
+    pnl_color = UP_COLOR if total_pnl >= 0 else DOWN_COLOR
+    st.markdown(
+        f"<div style='font-size:0.8rem;color:var(--fa-muted)'>今日收益</div>"
+        f"<div style='font-size:1.6rem;font-weight:700;color:{pnl_color}'>"
+        f"{total_pnl:+,.0f} <span style='font-size:1rem'>（{pnl_pct:+.2f}%）</span></div>",
+        unsafe_allow_html=True,
+    )
+    if skipped:
+        st.caption(f"有 {skipped} 支持仓因行情/汇率暂时获取不到，未计入。")
+
+
+def _render_positions_donut(positions: list):
     """持仓占比环形图。只统计真正持仓(shares>0)，纯关注(shares=0)不占份额。
     不用@st.fragment(run_every=3)——Plotly图3秒重绘会明显闪烁（见持仓分析
     方案里的踩坑记录），这块跟着页面正常rerun刷新就够了，不需要独立3秒轮询。
     汇率/实时价任何一项失败就跳过那一支（不拿0或旧数字硬凑），并在图下方
     如实提示"部分持仓因数据获取失败未计入"，不悄悄编一个不准的总资产出来。
     """
-    holding_items = [w for w in watched if (w.get("shares") or 0) > 0]
+    holding_items = [w for w in positions if (w.get("shares") or 0) > 0]
     if not holding_items:
         st.caption("暂无真实持仓——添加持仓时填股数才会计入占比图。")
         return
@@ -2186,8 +2242,8 @@ def _render_positions_donut(watched: list):
 
 
 @st.fragment(run_every=3)
-def _render_watchlist_rows(watched_filtered: list, _email: str):
-    """自选股列表本体单独做成 fragment，价格/涨跌幅每3秒自己刷新，效仿长桥的
+def _render_position_rows(position_items: list, _email: str):
+    """持仓列表本体单独做成 fragment，价格/涨跌幅每3秒自己刷新，效仿长桥的
     紧凑列表样式：名称代码 + 迷你走势图 + 现价/成交额 + 涨跌幅色块 + 删除键。
     数字真变了背景闪一下（复用详情页那套red/green flash动画）。每行用
     st.container(border=True)包起来，整行都是一个卡片。
@@ -2199,7 +2255,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
     的 st.query_params 检查）。删除键单独放在旁边一个真正的 st.button，
     跟这个<a>标签是两个独立的DOM元素，互不干扰。
     """
-    if not watched_filtered:
+    if not position_items:
         st.caption("这个分类下暂时没有持仓。")
         return
 
@@ -2210,17 +2266,17 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         + "<style>"
         # 浏览器默认的 a:link/a:visited 样式（蓝色+下划线）选择器带伪类，
         # 优先级比单纯的class选择器高，必须用!important才能真正覆盖掉。
-        + "a.wl-card-link, a.wl-card-link:link, a.wl-card-link:visited {"
+        + "a.pos-card-link, a.pos-card-link:link, a.pos-card-link:visited {"
         + "  text-decoration: none !important; color: inherit !important;"
         + "  display: block; cursor: pointer;"
         + "}"
-        + "a.wl-card-link:hover { opacity: 0.85; }"
+        + "a.pos-card-link:hover { opacity: 0.85; }"
         # 删除键用type="tertiary"，图标本身默认偏小，用户反馈要大一点、位置要
         # 跟卡片内容对齐。垂直对齐交给st.columns自己的vertical_alignment="center"
         # 处理（原生机制，比猜CSS高度靠谱）。默认按钮是圆角矩形/胶囊形，用户
         # 反馈这个和"对比/搜索"图标按钮一样改成正圆——固定等宽高+50%圆角。
-        + "[class*='st-key-wl_del_'] button p { font-size: 1.5rem !important; font-weight: 700; margin: 0; }"
-        + "[class*='st-key-wl_del_'] button {"
+        + "[class*='st-key-pos_del_'] button p { font-size: 1.5rem !important; font-weight: 700; margin: 0; }"
+        + "[class*='st-key-pos_del_'] button {"
         + "  height: 36px; min-height: 36px; width: 36px; min-width: 36px;"
         + "  padding: 0; border-radius: 50% !important;"
         + "  display: flex; align-items: center; justify-content: center;"
@@ -2265,20 +2321,20 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
 
     def _collect_rows():
         # 之前是for循环一只一只顺序取（实时价+迷你图两个接口都要等网络返回），
-        # 用户反馈"自选股加载好慢"——几只股票乘以两次网络请求累加起来确实慢。
+        # 用户反馈"持仓加载好慢"——几只股票乘以两次网络请求累加起来确实慢。
         # A股走BaoStock/akshare，内部各自有全局锁保证线程安全，并发提交时这
         # 部分本来就会排队，不会因为并发就变快；但港股/美股走Futu，现在走的是
         # 单一常驻worker线程+队列（见data_sources.py的_futu_call），单次查询
         # 本身只要零点几秒，并发提交多只互不阻塞。用线程池把每只股票的取数
         # 并发起来，A股之间该排队还是排队，但A股和港股/美股之间、以及港股/
-        # 美股彼此之间不用再互相等，混合市场的自选股整体加载时间能明显缩短。
+        # 美股彼此之间不用再互相等，混合市场的持仓整体加载时间能明显缩短。
         #
         # 统一截止时间/避免线程堆积的实现细节抽到了共享的
         # _run_concurrent_with_deadline（见它的docstring——那里记录了同一个
         # 教训：per-future timeout会被排队顺序绕过，必须用整批统一的deadline）。
-        results = _run_concurrent_with_deadline(watched_filtered, _fetch_one, timeout=4)
+        results = _run_concurrent_with_deadline(position_items, _fetch_one, timeout=4)
         rows = []
-        for i, item in enumerate(watched_filtered):
+        for i, item in enumerate(position_items):
             if i in results:
                 rows.append(results[i])
             else:
@@ -2291,10 +2347,10 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
     # 抖一下，跟_render_price_header那套"数字变了背景轻轻一闪"的丝滑感
     # 完全相反。改成只有首次展示这一遭才等得起spinner，后续刷新静默取数，
     # 取完直接原地重画，观感上就是"数字自己跳动"而不是"列表重绘"。
-    if not st.session_state.get("_wl_seen_once"):
+    if not st.session_state.get("_pos_seen_once"):
         with st.spinner("加载中..."):
             _rows_data = _collect_rows()
-        st.session_state["_wl_seen_once"] = True
+        st.session_state["_pos_seen_once"] = True
     else:
         _rows_data = _collect_rows()
 
@@ -2302,7 +2358,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
     # 这个fragment本身每3秒会重跑，一起刷新代价很小。数据来自advisor.py
     # 每个工作日跑一次的持仓判断(holding=True的judge_stock)，不是现场生成。
     try:
-        _advice_map = get_watchlist_advice(_email)
+        _advice_map = get_position_advice(_email)
     except Exception:
         _advice_map = {}
 
@@ -2314,9 +2370,9 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
         # 名称+走势图这部分每3秒刷新时几乎不变（迷你图数据本身缓存了好几分钟，
         # 涨跌方向短期内也很少翻转），但之前跟价格/涨跌幅拼进同一个markdown
         # 字符串——价格每次都变，导致这一整块（含SVG）每3秒都要重新生成、
-        # 重新发给前端重绘，是watchlist"感觉卡顿"的一部分原因。缓存住SVG
+        # 重新发给前端重绘，是持仓列表"感觉卡顿"的一部分原因。缓存住SVG
         # 字符串，输入不变就直接复用，减少每次刷新真正要重绘的内容量。
-        spark_key = f"_wl_spark_{symbol}_{item_market}"
+        spark_key = f"_pos_spark_{symbol}_{item_market}"
         spark_cache = st.session_state.get(spark_key)
         closes_tuple = tuple(closes)
         if spark_cache is not None and spark_cache[0] == closes_tuple and spark_cache[1] == spark_color:
@@ -2334,7 +2390,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
             wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
             color = UP_COLOR if wchange >= 0 else DOWN_COLOR
 
-            flash_key = f"_wl_last_price_{symbol}_{item_market}"
+            flash_key = f"_pos_last_price_{symbol}_{item_market}"
             prev = st.session_state.get(flash_key)
             st.session_state[flash_key] = wspot["最新价"]
             flash_class = ""
@@ -2355,7 +2411,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
             )
 
             # 真正持仓(shares>0)才算市值/浮盈——纯关注(shares=0)不显示这一行，
-            # 跟原来自选股的观感保持一致，不会突然多出一堆"0股"的噪音信息。
+            # 跟原来持仓的观感保持一致，不会突然多出一堆"0股"的噪音信息。
             if shares > 0:
                 market_value = shares * wspot["最新价"]
                 pnl = market_value - cost_total
@@ -2380,7 +2436,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
                 f"?open_symbol={urllib.parse.quote(symbol)}"
                 f"&open_market={urllib.parse.quote(item_market)}"
                 f"&open_name={urllib.parse.quote(item['name'])}"
-                f"&open_from=wl"
+                f"&open_from=pos"
                 f"{_auth_qs()}"
             )
             # 名称+走势图（静态部分）和价格+涨跌幅（动态部分）拆成两个独立的
@@ -2388,10 +2444,10 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
             # 但静态部分的HTML字符串在数据没变时保持不变，Streamlit的diff能
             # 跳过它不用每3秒都重绘，只有动态部分真正需要每次刷新。
             static_col.markdown(
-                f"<a class='wl-card-link' href='{href}' target='_self'>"
+                f"<a class='pos-card-link' href='{href}' target='_self'>"
                 f"<div class='fa-flex-row' style='display:flex;align-items:center'>"
                 # 颜色直接写在这个div自己身上，不靠继承父级<a>的color——之前靠
-                # a.wl-card-link{{color:inherit!important}}死活压不过浏览器
+                # a.pos-card-link{{color:inherit!important}}死活压不过浏览器
                 # 默认的a:link蓝色，元素自己的inline style优先级天然最高，不用
                 # 再跟CSS特异性较劲。
                 f"<div style='flex:2.1;font-weight:600;color:var(--fa-text);text-decoration:none'>{_esc(item['name'])}（{_esc(symbol)}）</div>"
@@ -2400,15 +2456,15 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
                 unsafe_allow_html=True,
             )
             dynamic_col.markdown(
-                f"<a class='wl-card-link' href='{href}' target='_self'>"
+                f"<a class='pos-card-link' href='{href}' target='_self'>"
                 f"<div class='fa-flex-row' style='display:flex;align-items:center'>"
                 f"<div style='flex:1.3'>{price_html}</div>"
                 f"<div style='flex:1'>{badge_html}</div>"
                 f"</div>{pnl_html}</a>",
                 unsafe_allow_html=True,
             )
-            if del_col.button("×", key=f"wl_del_{symbol}", help="卖出/取消关注", type="tertiary"):
-                _confirm_delete_dialog(_email, item, item_market, wspot.get("最新价") if wspot else None)
+            if del_col.button("×", key=f"pos_del_{symbol}", help="卖出/取消关注", type="tertiary"):
+                _confirm_sell_dialog(_email, item, item_market, wspot.get("最新价") if wspot else None)
 
             adv = _advice_map.get(symbol)
             if adv:
@@ -2429,7 +2485,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
 
 
 @st.dialog("卖出确认")
-def _confirm_delete_dialog(email: str, item: dict, market: str, cur_price: float | None):
+def _confirm_sell_dialog(email: str, item: dict, market: str, cur_price: float | None):
     """shares=0（纯关注，没有真实持仓）走原来的简单确认删除；shares>0是真的
     在卖持仓，要展示股数/均价/现价/浮盈，让用户输入卖出股数+成交金额——
     默认卖出全部、金额按现价估算，用户可以改成真实成交价。
@@ -2442,7 +2498,7 @@ def _confirm_delete_dialog(email: str, item: dict, market: str, cur_price: float
         st.write(f"确定要取消关注「{name}」（{symbol}）吗？")
         dc1, dc2 = st.columns(2)
         if dc1.button("确认", type="primary", use_container_width=True):
-            remove_from_watchlist(email, symbol)
+            delete_position(email, symbol)
             st.rerun()
         if dc2.button("取消", use_container_width=True):
             st.rerun()
@@ -2517,32 +2573,32 @@ def _resolve_confirmed_symbol(email: str, q: str, market_code: str) -> dict | No
 
 
 @st.dialog("添加持仓")
-def _show_add_watchlist_dialog(email: str):
-    confirmed = st.session_state.get("_wl_add_confirmed")
+def _show_add_position_dialog(email: str):
+    confirmed = st.session_state.get("_pos_add_confirmed")
 
     # 第二阶段：标的已确认，填股数/金额（不填股数=只关注不持仓）
     if confirmed:
         st.write(f"**{confirmed['name']}**（{confirmed['symbol']}·{confirmed['market']}） 现价 {confirmed['price']:.2f}")
-        shares = st.number_input("股数（不填=只关注，不算真实持仓）", min_value=0.0, value=0.0, step=1.0, key="_wl_add_shares")
+        shares = st.number_input("股数（不填=只关注，不算真实持仓）", min_value=0.0, value=0.0, step=1.0, key="_pos_add_shares")
         default_amount = shares * confirmed["price"]
-        amount = st.number_input("买入金额（默认按现价估算，可改成真实成交金额）", min_value=0.0, value=float(default_amount), step=1.0, key="_wl_add_amount")
+        amount = st.number_input("买入金额（默认按现价估算，可改成真实成交金额）", min_value=0.0, value=float(default_amount), step=1.0, key="_pos_add_amount")
         ac1, ac2 = st.columns(2)
         if ac1.button("确认添加", type="primary", use_container_width=True):
             if shares > 0:
                 upsert_position(email, confirmed["symbol"], confirmed["name"], confirmed["market"], shares, amount)
             else:
-                add_to_watchlist(email, confirmed["symbol"], confirmed["name"], market=confirmed["market"])
-            st.session_state.pop("_wl_add_confirmed", None)
+                add_watch_only(email, confirmed["symbol"], confirmed["name"], market=confirmed["market"])
+            st.session_state.pop("_pos_add_confirmed", None)
             st.rerun()
         if ac2.button("返回重新搜索", use_container_width=True):
-            st.session_state.pop("_wl_add_confirmed", None)
+            st.session_state.pop("_pos_add_confirmed", None)
             st.rerun()
         return
 
     # 第一阶段：搜索定标的
-    add_query = st.text_input("代码或名称（如 600519 / 腾讯 / 特斯拉）", key="_wl_add_query_dialog")
+    add_query = st.text_input("代码或名称（如 600519 / 腾讯 / 特斯拉）", key="_pos_add_query_dialog")
 
-    if st.button("下一步", type="primary", use_container_width=True, key="_wl_add_btn_dialog") and add_query:
+    if st.button("下一步", type="primary", use_container_width=True, key="_pos_add_btn_dialog") and add_query:
         # 不再让用户先选市场——大多数公司名字只在一个市场上市，自动判断就够了
         # （比如"苹果"只有美股）。只有像"阿里巴巴"这种港股美股都有的名字，
         # 才需要用户自己选，见下面的候选按钮。
@@ -2552,27 +2608,27 @@ def _show_add_watchlist_dialog(email: str):
         elif len(candidates) == 1:
             confirmed = _resolve_confirmed_symbol(email, add_query, candidates[0]["market"])
             if confirmed:
-                st.session_state["_wl_add_confirmed"] = confirmed
+                st.session_state["_pos_add_confirmed"] = confirmed
                 st.rerun()
         else:
-            st.session_state["_wl_add_candidates"] = candidates
-            st.session_state["_wl_add_candidates_query"] = add_query
+            st.session_state["_pos_add_candidates"] = candidates
+            st.session_state["_pos_add_candidates_query"] = add_query
 
-    if st.session_state.get("_wl_add_candidates"):
-        cands = st.session_state["_wl_add_candidates"]
-        cq = st.session_state.get("_wl_add_candidates_query", "")
+    if st.session_state.get("_pos_add_candidates"):
+        cands = st.session_state["_pos_add_candidates"]
+        cq = st.session_state.get("_pos_add_candidates_query", "")
         st.info(f"「{cq}」在多个市场都有上市，选一个：")
         cand_cols = st.columns(len(cands))
         for ccol, c in zip(cand_cols, cands):
             if ccol.button(
-                f"{c['market_label']}（{c['symbol']}）", key=f"_wl_cand_{c['market']}_{c['symbol']}",
+                f"{c['market_label']}（{c['symbol']}）", key=f"_pos_cand_{c['market']}_{c['symbol']}",
                 use_container_width=True,
             ):
                 confirmed = _resolve_confirmed_symbol(email, cq, c["market"])
                 if confirmed:
-                    st.session_state.pop("_wl_add_candidates", None)
-                    st.session_state.pop("_wl_add_candidates_query", None)
-                    st.session_state["_wl_add_confirmed"] = confirmed
+                    st.session_state.pop("_pos_add_candidates", None)
+                    st.session_state.pop("_pos_add_candidates_query", None)
+                    st.session_state["_pos_add_confirmed"] = confirmed
                     st.rerun()
 
     history = get_search_history(email, limit=10)
@@ -2582,9 +2638,9 @@ def _show_add_watchlist_dialog(email: str):
         _hist_market_label = {"A": "A股", "HK": "港股", "US": "美股"}
         for h in history:
             row_label = f"{h['query']}（{_hist_market_label.get(h['market'], h['market'])}）"
-            # 点历史记录直接跳去那只股票的详情页，不是再加一遍自选——
+            # 点历史记录直接跳去那只股票的详情页，不是再加一遍持仓——
             # 用户反馈"再加"这个按钮没必要，点了就想直接看那只股票。
-            if st.button(row_label, key=f"_wl_hist_open_{h['id']}", use_container_width=True):
+            if st.button(row_label, key=f"_pos_hist_open_{h['id']}", use_container_width=True):
                 sym = _resolve_add_symbol(h["query"], h["market"])
                 if sym:
                     st.session_state["_detail_symbol"] = sym
@@ -2596,29 +2652,29 @@ def _show_add_watchlist_dialog(email: str):
 
 
 @st.dialog("持仓对比")
-def _show_compare_dialog(watched: list):
+def _show_compare_dialog(positions: list):
     """build_multi_comparison（charts.py）之前写好了但一直没接界面——这里补上
-    唯一缺的入口：勾选几只自选股，起点归一化到100画在一张图上，直接看
+    唯一缺的入口：勾选几支持仓，起点归一化到100画在一张图上，直接看
     "这段时间谁涨得多"，跟单只详情页里的"对比大盘"是同一套归一化思路，
-    只是不限定跟大盘比，自选股互相之间也能比。
+    只是不限定跟大盘比，持仓互相之间也能比。
 
     生成结果存进 session_state 并记下当时的选股+区间参数——多选框/区间单选
     在 st.dialog 里改动都会触发这个函数重新整个跑一遍，如果不记参数直接显示
     上次的图，选项已经变了图却没跟着变，会让人以为点了什么但没生效；比对
     参数不一致就不显示旧图，逼用户重新点一次"生成对比图"。
     """
-    if len(watched) < 2:
+    if len(positions) < 2:
         st.caption("持仓至少要有2只才能对比，先去加几只吧。")
         return
 
     st.caption("勾选2-6只持仓，起点统一归一化到100，直接对比这段时间谁涨得多。")
-    options = {f"{w['name']}（{w['symbol']}）": w for w in watched}
+    options = {f"{w['name']}（{w['symbol']}）": w for w in positions}
     labels = list(options.keys())
     picked_labels = st.multiselect(
-        "对比标的", labels, default=labels[: min(3, len(labels))], key="_wl_compare_pick",
+        "对比标的", labels, default=labels[: min(3, len(labels))], key="_pos_compare_pick",
     )
     period_label = st.radio(
-        "区间", ["近1月", "近3月", "近6月", "近1年"], index=1, horizontal=True, key="_wl_compare_period",
+        "区间", ["近1月", "近3月", "近6月", "近1年"], index=1, horizontal=True, key="_pos_compare_period",
     )
     period_days = {"近1月": 30, "近3月": 90, "近6月": 180, "近1年": 365}[period_label]
 
@@ -2629,7 +2685,7 @@ def _show_compare_dialog(watched: list):
         st.caption("最多选6只，太多线挤在一起反而看不清。")
         return
 
-    if st.button("生成对比图", type="primary", use_container_width=True, key="_wl_compare_go"):
+    if st.button("生成对比图", type="primary", use_container_width=True, key="_pos_compare_go"):
         end = datetime.now().strftime("%Y%m%d")
         start = (datetime.now() - timedelta(days=period_days + 10)).strftime("%Y%m%d")
 
@@ -2642,14 +2698,14 @@ def _show_compare_dialog(watched: list):
             return label, hist
 
         with st.spinner("加载行情..."):
-            # 每只标的都是一次独立的网络请求，并发起来跟自选股列表
-            # (_render_watchlist_rows) 是同一个道理，不用互相等。原来是
+            # 每只标的都是一次独立的网络请求，并发起来跟持仓列表
+            # (_render_position_rows) 是同一个道理，不用互相等。原来是
             # with ThreadPoolExecutor() as ex: ex.map(...)——退出with块时会
             # 等所有线程真正跑完才返回，没有截止时间，某一只标的的数据源
             # 卡得久，这次"生成对比图"点击就跟着卡多久。改用共享的
             # _run_concurrent_with_deadline给整批一个统一截止时间，超时的
             # 那几只直接跳过不算，不会拖累这次点击的响应时间。这是手动点击
-            # 触发的一次性操作（不是自动刷新循环），给的deadline比自选股
+            # 触发的一次性操作（不是自动刷新循环），给的deadline比持仓
             # 列表/回看补录那两处更宽松一些。
             fetch_map = _run_concurrent_with_deadline(picked_labels, _fetch, timeout=15)
             results = list(fetch_map.values())
@@ -2658,12 +2714,12 @@ def _show_compare_dialog(watched: list):
         if len(hist_by_name) < 2:
             st.error("至少要有2只成功取到行情才能对比，换一批试试，或者稍后重试。")
         else:
-            st.session_state["_wl_compare_result"] = {
+            st.session_state["_pos_compare_result"] = {
                 "params": (tuple(picked_labels), period_label),
                 "hist_by_name": hist_by_name,
             }
 
-    cached = st.session_state.get("_wl_compare_result")
+    cached = st.session_state.get("_pos_compare_result")
     if cached and cached["params"] == (tuple(picked_labels), period_label):
         st.plotly_chart(build_multi_comparison(cached["hist_by_name"]), use_container_width=True)
 
@@ -2719,11 +2775,11 @@ else:
                            "过去的方向一致率不代表未来表现。")
                 # get_due_for_review 带了 limit（默认20条），避免这个列表越攒越多；
                 # st.expander 内部代码不论展没展开每次渲染都会跑，之前是for循环
-                # 串行发请求，跟自选股列表(_render_watchlist_rows)遇到过同样的
+                # 串行发请求，跟持仓列表(_render_position_rows)遇到过同样的
                 # "越用越慢"问题，这里改成同样用线程池并发取价。
                 #
                 # 排查页面切换卡顿时实测到的真实数据：这一段本身不在任何
-                # @st.fragment里，是主脚本的一部分——意味着"首页/行情/自选股"
+                # @st.fragment里，是主脚本的一部分——意味着"首页/行情/持仓"
                 # 之间随便切一次分区（st.radio触发的是整页rerun，不是fragment
                 # 局部rerun）都会完整重新跑一遍这段代码。用脚本直接测过
                 # get_due_for_review+并发get_stock_realtime这一整套（3条到期
@@ -2808,8 +2864,8 @@ else:
                 history = get_history(_uemail, limit=10)
                 for h in history:
                     verdict_color = {"偏多": UP_COLOR, "偏空": DOWN_COLOR, "中性": NEUTRAL_COLOR}.get(h["verdict"], NEUTRAL_COLOR)
-                    # name/symbol 来自数据源解析出的公司名/代码，跟自选股卡片同一类外部
-                    # 数据，统一补上转义（同一次审查发现自选股卡片那边也漏了）。
+                    # name/symbol 来自数据源解析出的公司名/代码，跟持仓卡片同一类外部
+                    # 数据，统一补上转义（同一次审查发现持仓卡片那边也漏了）。
                     line = f"{_esc(h.get('name') or h['symbol'])}（{_esc(h['symbol'])}） {h['created_at'][:10]}"
                     st.markdown(
                         f"<div style='font-size:0.78rem;margin:6px 0'>{line}　"
@@ -2897,12 +2953,12 @@ else:
         )
 
 
-        # "行情"分区的快速搜索框去掉了——用户反馈是累赘（"自选股"分区里
-        # "新增自选股"自己就有搜索框，两边都放显得重复）。指数/个股的浏览
+        # "行情"分区的快速搜索框去掉了——用户反馈是累赘（"持仓"分区里
+        # "新增持仓"自己就有搜索框，两边都放显得重复）。指数/个股的浏览
         # 入口保留在下面的指数卡片列表和涨跌幅排行榜里。
 
         # 用 radio 手动实现 tab 切换，不用 st.tabs()——st.tabs() 选中哪个是纯前端状态，
-        # 代码控制不了；从自选股点进详情页再返回时，需要能把选中项强制拨回"自选股"。
+        # 代码控制不了；从持仓点进详情页再返回时，需要能把选中项强制拨回"持仓"。
         # "首页"放在最前面且是默认分区——打开网站先看首页（世界地图+今日资讯），
         # 不是直接扔进"行情"这种数据密集页面。
         st.session_state.setdefault("_active_section", "首页")
@@ -2939,34 +2995,34 @@ else:
 
         elif active_section == "持仓":
             _email = st.session_state["user_email"]
-            watched = get_watchlist(_email)
+            positions = get_positions(_email)
 
             st.markdown(
                 "<style>"
-                "[class*='st-key-wl_search_icon'] button, [class*='st-key-wl_compare_icon'] button {"
+                "[class*='st-key-pos_search_icon'] button, [class*='st-key-pos_compare_icon'] button {"
                 "  display: flex; align-items: center; justify-content: center;"
                 "  height: 44px; min-height: 44px; width: 44px; min-width: 44px;"
                 "  padding: 0; border-radius: 50% !important;"
                 "}"
-                "[class*='st-key-wl_search_icon'] span[data-testid='stIconMaterial'],"
-                "[class*='st-key-wl_compare_icon'] span[data-testid='stIconMaterial'] {"
+                "[class*='st-key-pos_search_icon'] span[data-testid='stIconMaterial'],"
+                "[class*='st-key-pos_compare_icon'] span[data-testid='stIconMaterial'] {"
                 "  font-size: 1.6rem !important;"
                 "}"
                 "</style>",
                 unsafe_allow_html=True,
             )
             # build_multi_comparison（charts.py）之前写好了没接界面，这里补上入口：
-            # 自选股至少2只时才显示"对比"图标，跟搜索图标并排。
-            if len(watched) >= 2:
+            # 持仓至少2只时才显示"对比"图标，跟搜索图标并排。
+            if len(positions) >= 2:
                 title_col, compare_col, search_col = st.columns([10, 1, 1], vertical_alignment="center")
-                if compare_col.button("", icon=":material/show_chart:", key="wl_compare_icon", type="tertiary", help="对比持仓走势"):
-                    _show_compare_dialog(watched)
+                if compare_col.button("", icon=":material/show_chart:", key="pos_compare_icon", type="tertiary", help="对比持仓走势"):
+                    _show_compare_dialog(positions)
             else:
                 title_col, search_col = st.columns([11, 1], vertical_alignment="center")
-            if search_col.button("", icon=":material/search:", key="wl_search_icon", type="tertiary", help="添加持仓"):
-                _show_add_watchlist_dialog(_email)
+            if search_col.button("", icon=":material/search:", key="pos_search_icon", type="tertiary", help="添加持仓"):
+                _show_add_position_dialog(_email)
 
-            if not watched:
+            if not positions:
                 st.write("")
                 _, mid_empty, _ = st.columns([1, 2, 1])
                 with mid_empty:
@@ -2978,16 +3034,24 @@ else:
                         unsafe_allow_html=True,
                     )
 
-            if watched:
+            if positions:
                 # 环形图 | 持仓列表，左右各半——环形图不用@st.fragment(run_every=3)
                 # （见_render_positions_donut docstring：Plotly图3秒重绘会闪烁），
                 # 右边列表沿用原来的3秒自动刷新fragment，两边各自独立刷新节奏。
                 donut_col, list_col = st.columns([1, 1])
                 with donut_col:
-                    _render_positions_donut(watched)
+                    _render_positions_donut(positions)
                 with list_col:
-                    # 用户反馈自选股一般也就几只，市场筛选(全部/A股/港股/美股)没有实际
-                    # 必要，反而多一层点击——去掉筛选，统一直接展示全部自选股。
-                    _render_watchlist_rows(watched, _email)
+                    # 用户反馈持仓一般也就几只，市场筛选(全部/A股/港股/美股)没有实际
+                    # 必要，反而多一层点击——去掉筛选，统一直接展示全部持仓。
+                    _render_position_rows(positions, _email)
+
+                st.divider()
+                pnl_col, ai_col = st.columns([1, 1])
+                with pnl_col:
+                    _render_positions_today_pnl(positions)
+                with ai_col:
+                    # AI组合总评（阶段6）还没接，先占位——不显示假内容。
+                    st.caption("AI 组合分析即将上线。")
 
 

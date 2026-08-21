@@ -389,7 +389,7 @@ def build_benchmark_comparison(hist: pd.DataFrame, benchmark: pd.DataFrame, benc
 
 # 第一个和第三个位置分别用品牌红/绿（跟UP_COLOR/DOWN_COLOR保持同一个色号），
 # 后面几个是纯粹的分类色（蓝/橙/紫/青），不代表涨跌方向，只用来区分不同标的。
-# 凑够6个——自选股对比入口（app.py _show_compare_dialog）最多允许勾选6只，
+# 凑够6个——持仓对比入口（app.py _show_compare_dialog）最多允许勾选6只，
 # 凑够6个颜色能保证6只同时对比时每条线颜色都不重复。
 _MULTI_COLORS = [UP_COLOR, "#3b82f6", DOWN_COLOR, "#f59e0b", "#a855f7", "#0891b2"]
 

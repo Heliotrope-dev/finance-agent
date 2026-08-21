@@ -66,7 +66,7 @@ def init_db():
             )
             """
         )
-        # 老库升级：多市场之前建的自选表没有 market 列，统一按A股兼容
+        # 老库升级：多市场之前建的watchlist表没有 market 列，统一按A股兼容
         wcols = [r[1] for r in c.execute("PRAGMA table_info(watchlist)").fetchall()]
         if "market" not in wcols:
             c.execute("ALTER TABLE watchlist ADD COLUMN market TEXT NOT NULL DEFAULT 'A'")
@@ -100,15 +100,15 @@ def init_db():
                 fundamental_verdict TEXT NOT NULL DEFAULT '',
                 technical_signal TEXT NOT NULL DEFAULT '',
                 action TEXT NOT NULL DEFAULT '观望',
-                source TEXT NOT NULL DEFAULT 'watchlist',
+                source TEXT NOT NULL DEFAULT 'position',
                 review_price REAL,
                 review_at TEXT
             )
             """
         )
 
-        # positions：取代 watchlist 的"持仓分析"数据模型。shares=0 表示"只关注
-        # 不持仓"（保留旧自选股的语义，详情页"加入自选"按钮不用大改）。
+        # positions：取代 watchlist 表的"持仓分析"数据模型。shares=0 表示"只
+        # 关注不持仓"（详情页"关注"按钮走这个状态）。
         # cost_total存累计成本(原币种)而不是均价——用户输入的是"股数+金额"，
         # 加仓就是shares+=n,cost_total+=amount，不会滚浮点误差；均价现算
         # cost_total/shares。currency显式存不从market现算，以后遇到"市场跟
@@ -167,7 +167,7 @@ def init_db():
             """
         )
 
-        # 从watchlist一次性迁移进positions，shares/cost_total都是0(纯关注)。
+        # 从watchlist表一次性迁移进positions，shares/cost_total都是0(纯关注)。
         # UNIQUE(email,symbol)保证INSERT OR IGNORE天然幂等，每次启动跑一遍
         # 无副作用，不会覆盖已经有真实持仓数据的行。
         c.execute(
@@ -180,17 +180,19 @@ def init_db():
             FROM watchlist
             """
         )
+        # advice表里source='watchlist'是"持仓分析"上线之前的旧标签，
+        # 统一改成'position'，跟log_advice新默认值/get_position_advice的查询
+        # 条件对齐，不留旧名字的数据痕迹。
+        c.execute("UPDATE advice SET source = 'position' WHERE source = 'watchlist'")
         c.commit()
 
 
 _MARKET_CURRENCY = {"A": "CNY", "HK": "HKD", "US": "USD"}
 
 
-def add_to_watchlist(email: str, symbol: str, name: str, market: str = "A") -> bool:
-    """薄封装：在positions里插入一行shares=0(只关注不持仓)的记录——正式的
-    "持仓分析"功能上线后，这个函数名保留不改，是为了详情页"加入自选"按钮
-    (app.py) 不用跟着大改，数据层换底座、调用方无感知。真正记持仓用
-    upsert_position。"""
+def add_watch_only(email: str, symbol: str, name: str, market: str = "A") -> bool:
+    """在positions里插入一行shares=0(只关注不持仓)的记录——用户点详情页"关注"
+    按钮、或添加持仓弹窗里不填股数时走这条路径。真正记持仓用upsert_position。"""
     init_db()
     now = datetime.now(timezone.utc).isoformat()
     with closing(_conn()) as c:
@@ -206,23 +208,13 @@ def add_to_watchlist(email: str, symbol: str, name: str, market: str = "A") -> b
             return False  # 已经在里面了，不重复加
 
 
-def remove_from_watchlist(email: str, symbol: str):
-    """薄封装：等价于delete_position——不管有没有真实持仓，整行删掉。"""
-    delete_position(email, symbol)
-
-
-def is_in_watchlist(email: str, symbol: str) -> bool:
+def is_position_tracked(email: str, symbol: str) -> bool:
     init_db()
     with closing(_conn()) as c:
         row = c.execute(
             "SELECT 1 FROM positions WHERE email = ? AND symbol = ?", (email, symbol)
         ).fetchone()
         return row is not None
-
-
-def get_watchlist(email: str) -> list[dict]:
-    """薄封装：等价于get_positions，函数名保留给advisor.py等老调用点用。"""
-    return get_positions(email)
 
 
 def get_positions(email: str) -> list[dict]:
@@ -487,7 +479,7 @@ def get_accuracy_trend(email: str, window: int = 5) -> list[dict]:
 
 
 def add_search_history(email: str, query: str, market: str = "A"):
-    """记一笔"添加自选股"时搜过的关键词——给搜索弹窗里的历史记录用，方便
+    """记一笔"添加持仓"时搜过的关键词——给搜索弹窗里的历史记录用，方便
     常用的名字不用每次重新打字。同一个词短时间内重复搜不重复记（去重靠
     先删旧的再插入），每个用户只保留最近20条，太老的自动清掉。
     """
@@ -513,7 +505,7 @@ def add_search_history(email: str, query: str, market: str = "A"):
 def log_advice(
     email: str, symbol: str, price_at_advice: float, fundamental_verdict: str,
     technical_signal: str, action: str = "观望", market: str = "A", name: str = "",
-    source: str = "watchlist",
+    source: str = "position",
 ) -> int:
     init_db()
     with closing(_conn()) as c:
@@ -584,8 +576,8 @@ def get_advice_accuracy(email: str) -> dict:
         for m in sorted(set(r.get("market", "A") for r in rows))
     }
     stats["按来源"] = {
-        s: _advice_accuracy_from_rows([r for r in rows if r.get("source", "watchlist") == s])
-        for s in sorted(set(r.get("source", "watchlist") for r in rows))
+        s: _advice_accuracy_from_rows([r for r in rows if r.get("source", "position") == s])
+        for s in sorted(set(r.get("source", "position") for r in rows))
     }
     return stats
 
@@ -633,10 +625,10 @@ def get_latest_advice(limit_per_market: int = 3) -> dict:
     return result
 
 
-def get_watchlist_advice(email: str) -> dict:
-    """给自选股列表用：每支持仓股票最新的一条AI判断(source='watchlist')，
+def get_position_advice(email: str) -> dict:
+    """给持仓列表用：每支持仓股票最新的一条AI判断(source='position')，
     按symbol取最近一条——跟get_latest_advice(首页候选，全局只有一批"最近
-    一次")不同，这里每个symbol各自独立找"这支股票最近一次判断"，因为自选股
+    一次")不同，这里每个symbol各自独立找"这支股票最近一次判断"，因为持仓
     是逐支持续跟踪的，不是同一批筛选结果。返回{symbol: row}，没有判断过的
     symbol不会出现在返回的dict里，调用方用.get(symbol)处理"还没判断过"。
     """
@@ -645,9 +637,9 @@ def get_watchlist_advice(email: str) -> dict:
         c.row_factory = sqlite3.Row
         rows = c.execute(
             """
-            SELECT * FROM advice WHERE email = ? AND source = 'watchlist'
+            SELECT * FROM advice WHERE email = ? AND source = 'position'
             AND id IN (
-                SELECT MAX(id) FROM advice WHERE email = ? AND source = 'watchlist' GROUP BY symbol
+                SELECT MAX(id) FROM advice WHERE email = ? AND source = 'position' GROUP BY symbol
             )
             """,
             (email, email),

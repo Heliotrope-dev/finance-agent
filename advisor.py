@@ -6,7 +6,7 @@ Streamlit 页面里，由 OpenClaw 的 stock-advisor cron 触发，走
 跟 analysis.py 刻意"只讲事实不下结论"的公开页面定位不同——这里明确要给买卖
 参考，所以判断函数（judge_stock）单独新写，不改 analysis.py 里现成的那几个。
 
-第一版做过自选股+A股候选池，用户反馈不需要自选股这块，目标就是"扫几乎全部
+第一版做过手动关注列表+A股候选池，用户反馈不需要这块，目标就是"扫几乎全部
 港美股，挑几个有潜力有机遇的股票参考"——data_sources.py 里原有的港美股"候选池"
 函数（get_index_top_movers 之类）靠的是人气榜/硬编码知名股名单，覆盖面完全
 撑不起"全市场筛选"这个目标，改用 Futu SDK 自带的 get_stock_filter（按市值/PE/
@@ -313,13 +313,13 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
 理由：<两到三句话，具体点出依据，必须体现价格位置对结论的影响>
 """
 
-# 自选股是用户已经持有的仓位，判断的问题不是"要不要买"而是"要不要卖/继续拿"——
+# 持仓是用户已经持有的仓位，判断的问题不是"要不要买"而是"要不要卖/继续拿"——
 # 用同一套四选一结论框架（这里"买入"含义变成"可以加仓"），但额外要求给出
 # 具体的卖出触发条件，不能只说"注意风险"这种空话。追加在_JUDGE_SYSTEM后面，
 # 不改原来的prompt（screen候选池用的是原版，两者场景不同不能共用一份预期）。
 _HOLDING_ADDENDUM = """
 
-补充要求（这是用户已经持有的自选股，不是新的候选）：
+补充要求（这是用户已经持有的持仓，不是新的候选）：
 8. 你的核心任务是回答"继续持有还是应该卖出"，不是"值不值得新买入"——判断
    基调从"入场时机"切换成"仓位管理"。
 9. 结论如果是"持有"或"观望"，必须给出具体的卖出触发条件，二选一或都给：
@@ -442,7 +442,7 @@ def _price_position_text(symbol: str, market: str) -> str:
 
 
 def _judge_one(item: dict, source: str) -> dict | None:
-    holding = source == "watchlist"
+    holding = source == "position"
     symbol, market, name = item["symbol"], item.get("market", "US"), item.get("name", "")
     try:
         price = ds.get_stock_realtime(symbol, market).get("最新价")
@@ -484,17 +484,17 @@ def _backfill_due_advice() -> int:
     return n
 
 
-def advise_watchlist() -> list[dict]:
-    """自选股持仓判断——跟screen候选不同，这是"要不要卖"的仓位管理判断
+def advise_positions() -> list[dict]:
+    """持仓判断——跟screen候选不同，这是"要不要卖"的仓位管理判断
     (holding=True，见judge_stock的_HOLDING_ADDENDUM)。结果只落库给网站
-    自选股页面用，不进每日微信简报正文——用户明确说过不用在微信里报自选股
-    这块，微信简报的定位是"发现新机会"，自选股走网站页面自己看。
+    持仓页面用，不进每日微信简报正文——用户明确说过不用在微信里报持仓
+    这块，微信简报的定位是"发现新机会"，持仓走网站页面自己看。
     """
-    items = tracker.get_watchlist(_EMAIL)
+    items = tracker.get_positions(_EMAIL)
     if not items:
         return []
     results = _run_concurrent_with_deadline(
-        items, lambda it: _judge_one(it, "watchlist"), timeout=250, max_workers=4
+        items, lambda it: _judge_one(it, "position"), timeout=250, max_workers=4
     )
     return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
 
@@ -510,13 +510,13 @@ def main():
     backfilled = _backfill_due_advice()
     print(f"（已回填 {backfilled} 条到期的历史建议价格）\n")
 
-    watch_results = advise_watchlist()
-    for e in watch_results:
+    position_results = advise_positions()
+    for e in position_results:
         tracker.log_advice(
             _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
-            e["technical_signal"], e["action"], e["market"], e["name"], source="watchlist",
+            e["technical_signal"], e["action"], e["market"], e["name"], source="position",
         )
-    print(f"（自选股持仓判断：{len(watch_results)} 只已更新，结果在网站自选股页面查看，不进本条简报正文）\n")
+    print(f"（持仓判断：{len(position_results)} 只已更新，结果在网站持仓页面查看，不进本条简报正文）\n")
 
     data = screen_hk_us_candidates()
     print(_pool_summary(data["us_pool"], data["us_all_count"], "美股"))
