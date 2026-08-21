@@ -864,9 +864,15 @@ def detect_symbol_candidates(query: str) -> list[dict]:
         return []
 
     if re.match(r"^\d{6}$", q):
+        # 6位数字：可能是交易所个股/ETF代码，也可能是OTC联接基金代码
+        # （比如012805），两者代码格式完全一样区分不了，交给get_stock_realtime
+        # 自己按"先试交易所行情、查不到再试基金净值"的顺序兜底，这里不用
+        # 提前判断是哪一种。
         return [{"symbol": q, "market": "A", "market_label": "A股"}]
     if re.match(r"^\d{4,5}$", q):
         return [{"symbol": q.zfill(5), "market": "HK", "market_label": "港股"}]
+    if q.upper() in _SGE_SYMBOL_MAP:
+        return [{"symbol": q.upper(), "market": "A", "market_label": "A股"}]
 
     results = []
     q_lower = q.lower()
@@ -878,10 +884,15 @@ def detect_symbol_candidates(query: str) -> list[dict]:
         results.append({"symbol": a_matches[0]["code"], "market": "A", "market_label": "A股"})
     else:
         # search_stock_by_name(BaoStock按名称模糊搜索)只覆盖个股，不含ETF/基金，
-        # 名字查不到个股时试一下手动维护的A股基金别名表。
+        # 名字查不到个股时先试手动维护的A股场内ETF别名表，再试OTC联接基金
+        # 全量名录子串匹配（覆盖面更广但没有人工筛选过，放在最后兜底）。
         a_fund_code = _A_FUND_NAME_MAP.get(q_lower)
         if a_fund_code:
             results.append({"symbol": a_fund_code, "market": "A", "market_label": "A股"})
+        else:
+            otc_hit = search_otc_fund_by_name(q)
+            if otc_hit:
+                results.append({"symbol": otc_hit["symbol"], "market": "A", "market_label": "A股"})
 
     hk_code = _HK_NAME_MAP.get(q_lower)
     if hk_code:
@@ -1962,6 +1973,100 @@ def _tencent_quote_fields(text: str) -> list[str] | None:
     return fields
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fund_name_table() -> pd.DataFrame:
+    """场外(OTC)基金全量代码/简称表，一天缓存一次——这张表2万7千多行，不是
+    行情接口，一天更新一次完全够用，不用像股价那样3秒刷新。"""
+    try:
+        return ak.fund_name_em()
+    except Exception:
+        return pd.DataFrame()
+
+
+def _fund_name_by_code(symbol: str) -> str:
+    df = _fund_name_table()
+    if df.empty:
+        return symbol
+    row = df[df["基金代码"] == symbol]
+    return row.iloc[0]["基金简称"] if not row.empty else symbol
+
+
+def search_otc_fund_by_name(query: str) -> dict | None:
+    """OTC联接基金(比如"广发恒生科技ETF联接(QDII)C")没有交易所代码，
+    search_stock_by_name(BaoStock)和_A_FUND_NAME_MAP(手动维护的场内ETF
+    别名表)都覆盖不到——这类基金全市场有几万只，不可能手动维护别名表，
+    只能用akshare的全量基金名录做子串匹配。返回最短匹配的那个(名字越短
+    越可能是用户想要的那一个，不是子串匹配到的某个长尾变体)，找不到
+    返回None。"""
+    df = _fund_name_table()
+    if df.empty:
+        return None
+    hits = df[df["基金简称"].str.contains(query, na=False, regex=False)]
+    if hits.empty:
+        return None
+    hits = hits.assign(_len=hits["基金简称"].str.len()).sort_values("_len")
+    row = hits.iloc[0]
+    return {"symbol": row["基金代码"], "name": row["基金简称"]}
+
+
+def _fetch_otc_fund_quote(symbol: str) -> dict:
+    """OTC联接基金——跟场内ETF不是一回事，没有实时盘口，一个交易日只在
+    收盘后更新一次单位净值（T-1，不是"今天"的价格，是上一个披露日的）。
+    "今日收益"这类3秒刷新的功能对这类标的没有意义，但至少能记持仓算
+    浮盈浮亏——用户明确要求过要能添加自己买的场外基金，有比没有强。
+    """
+    try:
+        df = ak.fund_open_fund_info_em(symbol=symbol, indicator="单位净值走势")
+    except Exception:
+        return {}
+    if df is None or df.empty or "单位净值" not in df.columns:
+        return {}
+    df = df.sort_values("净值日期")
+    last, prev = df.iloc[-1], (df.iloc[-2] if len(df) > 1 else df.iloc[-1])
+    last_price, prev_close = float(last["单位净值"]), float(prev["单位净值"])
+    return {
+        "代码": symbol, "名称": _fund_name_by_code(symbol),
+        "最新价": last_price, "昨收": prev_close,
+        "今开": last_price, "最高": last_price, "最低": last_price,
+        "成交额": None, "更新时间": str(last["净值日期"]),
+        "数据源": "场外基金净值(T-1)",
+    }
+
+
+# 上金所现货合约——没有交易所代码，用户可能搜"AU9999"这种行业内简写，
+# 内部映射到akshare(ak.spot_hist_sge)要求的"Au99.99"格式。跟_US_NAME_MAP里
+# 用ETF代表大宗商品是两条不同的路：那边是"没有更合适的就用最像的ETF代理"，
+# 这里是用户明确想要上金所人民币计价的现货合约本身，两者都保留，用户
+# 搜哪个给哪个。
+_SGE_SYMBOL_MAP = {
+    "AU9999": "Au99.99", "沪金": "Au99.99", "SGE黄金": "Au99.99",
+    "AG9999": "Ag99.99", "沪银": "Ag99.99", "SGE白银": "Ag99.99",
+}
+
+
+def _fetch_sge_spot_quote(symbol: str) -> dict:
+    """上金所现货——T-1日线数据（akshare没有这个的实时盘口接口），道理跟
+    OTC基金一样：没有实时刷新的意义，但至少能记录持仓算浮盈浮亏。"""
+    sge_code = _SGE_SYMBOL_MAP.get(symbol.upper())
+    if not sge_code:
+        return {}
+    try:
+        df = ak.spot_hist_sge(symbol=sge_code)
+    except Exception:
+        return {}
+    if df is None or df.empty:
+        return {}
+    df = df.sort_values("date")
+    last, prev = df.iloc[-1], (df.iloc[-2] if len(df) > 1 else df.iloc[-1])
+    return {
+        "代码": symbol, "名称": f"上海金交所{sge_code}",
+        "最新价": float(last["close"]), "昨收": float(prev["close"]),
+        "今开": float(last["open"]), "最高": float(last["high"]), "最低": float(last["low"]),
+        "成交额": None, "更新时间": str(last["date"]),
+        "数据源": "上金所现货(T-1)",
+    }
+
+
 @st.cache_data(ttl=3, show_spinner=False)
 def get_stock_realtime(symbol: str, market: str = "A") -> dict:
     """真正的实时行情，港股/美股优先走本地 Futu OpenD 网关，A股 + Futu查不到时
@@ -2004,7 +2109,21 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
             "更新时间": fields[30],
         }
 
-    return _with_retry(_fetch, retries=1, backoff=2, throttle=False)
+    tencent_data = _with_retry(_fetch, retries=1, backoff=2, throttle=False)
+    if tencent_data:
+        return tencent_data
+
+    # 交易所行情(Futu/腾讯)都查不到，A股范围内再试两类非交易所标的：
+    # 场外联接基金(OTC，走净值不走盘口)、上金所现货合约。两者都是T-1
+    # 数据，"今日收益"这类实时刷新场景对它们没意义，但至少能记持仓。
+    if market == "A":
+        otc_data = _fetch_otc_fund_quote(symbol)
+        if otc_data:
+            return otc_data
+        sge_data = _fetch_sge_spot_quote(symbol)
+        if sge_data:
+            return sge_data
+    return {}
 
 
 _MARKET_CURRENCY = {"A": "CNY", "HK": "HKD", "US": "USD"}

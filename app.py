@@ -2741,9 +2741,32 @@ def _show_add_position_dialog(email: str):
     # 第二阶段：标的已确认，填股数/金额（不填股数=只关注不持仓）
     if confirmed:
         st.write(f"**{confirmed['name']}**（{confirmed['symbol']}·{confirmed['market']}） 现价 {confirmed['price']:.2f}")
-        shares = st.number_input("股数（不填=只关注，不算真实持仓）", min_value=0.0, value=0.0, step=1.0, key="_pos_add_shares")
-        default_amount = shares * confirmed["price"]
-        amount = st.number_input("买入金额（默认按现价估算，可改成真实成交金额）", min_value=0.0, value=float(default_amount), step=1.0, key="_pos_add_amount")
+        # 股数/金额双向联动——用户反馈"只记得买入金额，不知道股数"，改哪个
+        # 都按现价自动换算另一个，不用自己心算。on_change回调改的是对方的
+        # session_state，不会互相触发（Streamlit的on_change只在真实用户交互
+        # 时触发，程序改session_state不会递归触发），不用担心死循环。
+        def _sync_shares_from_amount():
+            c = st.session_state.get("_pos_add_confirmed")
+            amt = st.session_state.get("_pos_add_amount", 0.0)
+            if c and c.get("price"):
+                st.session_state["_pos_add_shares"] = round(amt / c["price"], 4)
+
+        def _sync_amount_from_shares():
+            c = st.session_state.get("_pos_add_confirmed")
+            sh = st.session_state.get("_pos_add_shares", 0.0)
+            if c and c.get("price"):
+                st.session_state["_pos_add_amount"] = round(sh * c["price"], 2)
+
+        amount = st.number_input(
+            "买入金额（¥，只记得金额就填这个，股数会自动按现价换算）",
+            min_value=0.0, value=0.0, step=100.0, key="_pos_add_amount",
+            on_change=_sync_shares_from_amount,
+        )
+        shares = st.number_input(
+            "股数（自动按金额÷现价换算，知道准确股数就手动改这里，金额会跟着换算回去）",
+            min_value=0.0, value=0.0, step=1.0, key="_pos_add_shares",
+            on_change=_sync_amount_from_shares,
+        )
         ac1, ac2 = st.columns(2)
         if ac1.button("确认添加", type="primary", use_container_width=True):
             if shares > 0:
