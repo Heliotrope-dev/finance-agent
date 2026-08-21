@@ -82,6 +82,30 @@ def init_db():
             )
             """
         )
+
+        # advice：advisor.py（每日投研顾问脚本，不在Streamlit页面里）生成的买卖
+        # 建议记录，跟analyses表是同一套"记录判断→回填价格→算一致率"的模式，
+        # 但字段语义不同（分基本面/技术面两段、action是买卖持有观望而不是方向
+        # 偏多偏空）所以用独立表，不复用analyses。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS advice (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL DEFAULT '',
+                symbol TEXT NOT NULL,
+                market TEXT NOT NULL DEFAULT 'A',
+                name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                price_at_advice REAL,
+                fundamental_verdict TEXT NOT NULL DEFAULT '',
+                technical_signal TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL DEFAULT '观望',
+                source TEXT NOT NULL DEFAULT 'watchlist',
+                review_price REAL,
+                review_at TEXT
+            )
+            """
+        )
         c.commit()
 
 
@@ -286,6 +310,86 @@ def add_search_history(email: str, query: str, market: str = "A"):
             (email,),
         )
         c.commit()
+
+
+def log_advice(
+    email: str, symbol: str, price_at_advice: float, fundamental_verdict: str,
+    technical_signal: str, action: str = "观望", market: str = "A", name: str = "",
+    source: str = "watchlist",
+) -> int:
+    init_db()
+    with closing(_conn()) as c:
+        cur = c.execute(
+            "INSERT INTO advice (email, symbol, market, name, created_at, price_at_advice, "
+            "fundamental_verdict, technical_signal, action, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (email, symbol, market, name, datetime.now(timezone.utc).isoformat(), price_at_advice,
+             fundamental_verdict, technical_signal, action, source),
+        )
+        c.commit()
+        return cur.lastrowid
+
+
+def get_due_for_advice_review(email: str, min_age_days: int = 7, limit: int = 20) -> list[dict]:
+    """同 get_due_for_review 的逻辑，找出该回填实际价格的历史建议（只看当前用户）。"""
+    init_db()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=min_age_days)).isoformat()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM advice WHERE email = ? AND review_price IS NULL AND created_at <= ? "
+            "ORDER BY created_at ASC LIMIT ?",
+            (email, cutoff, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def record_advice_review(advice_id: int, review_price: float):
+    with closing(_conn()) as c:
+        c.execute(
+            "UPDATE advice SET review_price = ?, review_at = ? WHERE id = ?",
+            (review_price, datetime.now(timezone.utc).isoformat(), advice_id),
+        )
+        c.commit()
+
+
+def _advice_accuracy_from_rows(rows: list[dict]) -> dict:
+    """跟_accuracy_from_rows同样的口径，只是判断"一致"的标准换成action：
+    买入=事后应该涨，卖出=事后应该跌；持有/观望不算方向判断，不参与统计。"""
+    scored = [r for r in rows if r["action"] in ("买入", "卖出")]
+    if not scored:
+        return {"总数": 0, "一致数": 0, "一致率": None}
+    match = 0
+    for r in scored:
+        went_up = r["review_price"] > r["price_at_advice"]
+        if (r["action"] == "买入" and went_up) or (r["action"] == "卖出" and not went_up):
+            match += 1
+    return {"总数": len(scored), "一致数": match, "一致率": match / len(scored) * 100}
+
+
+def get_advice_accuracy(email: str) -> dict:
+    """advice表版本的方向一致率统计，字段/口径跟get_accuracy_stats对齐，只是
+    数据源换成advice表、方向标签换成买入/卖出。同样不代表未来表现，只是历史
+    建议和事后价格的客观比对。"""
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM advice WHERE email = ? AND review_price IS NOT NULL",
+            (email,),
+        ).fetchall()
+    rows = [dict(r) for r in rows]
+
+    stats = _advice_accuracy_from_rows(rows)
+    stats["按市场"] = {
+        m: _advice_accuracy_from_rows([r for r in rows if r.get("market", "A") == m])
+        for m in sorted(set(r.get("market", "A") for r in rows))
+    }
+    stats["按来源"] = {
+        s: _advice_accuracy_from_rows([r for r in rows if r.get("source", "watchlist") == s])
+        for s in sorted(set(r.get("source", "watchlist") for r in rows))
+    }
+    return stats
 
 
 def get_search_history(email: str, limit: int = 10) -> list[dict]:
