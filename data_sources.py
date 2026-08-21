@@ -2009,11 +2009,17 @@ def search_otc_fund_by_name(query: str) -> dict | None:
     return {"symbol": row["基金代码"], "name": row["基金简称"]}
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_otc_fund_quote(symbol: str) -> dict:
     """OTC联接基金——跟场内ETF不是一回事，没有实时盘口，一个交易日只在
     收盘后更新一次单位净值（T-1，不是"今天"的价格，是上一个披露日的）。
     "今日收益"这类3秒刷新的功能对这类标的没有意义，但至少能记持仓算
     浮盈浮亏——用户明确要求过要能添加自己买的场外基金，有比没有强。
+
+    30分钟缓存——净值一天只披露一次，被get_stock_realtime(ttl=3)包着的
+    持仓列表/今日收益fragment每3秒就会调一次这个函数，不加缓存等于每3秒
+    真打一次akshare请求，纯粹浪费还可能把这个本来就不算特别稳的接口打
+    出限流，加缓存后这块请求量降到可以忽略。
     """
     try:
         df = ak.fund_open_fund_info_em(symbol=symbol, indicator="单位净值走势")
@@ -2044,9 +2050,12 @@ _SGE_SYMBOL_MAP = {
 }
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_sge_spot_quote(symbol: str) -> dict:
     """上金所现货——T-1日线数据（akshare没有这个的实时盘口接口），道理跟
-    OTC基金一样：没有实时刷新的意义，但至少能记录持仓算浮盈浮亏。"""
+    OTC基金一样：没有实时刷新的意义，但至少能记录持仓算浮盈浮亏。30分钟
+    缓存的理由同_fetch_otc_fund_quote——不加缓存会被3秒刷新的持仓fragment
+    重复打接口，数据本身一天根本不会变。"""
     sge_code = _SGE_SYMBOL_MAP.get(symbol.upper())
     if not sge_code:
         return {}

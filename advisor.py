@@ -702,12 +702,17 @@ def _parse_trade_signals(text: str) -> list[dict]:
     交易接口（OpenSecTradeContext/place_order那一套），纯粹是文本解析+
     展示。格式不对的行跳过，不强行凑数据，宁可信号少也不能编。
     """
-    idx = text.find("交易信号：")
-    if idx == -1:
-        idx = text.find("交易信号:")
-    if idx == -1:
+    # 只在"交易信号"这个表头本身上切一刀，不能对结果再切第二刀——之前是
+    # 连续调用两次.split()，第二次是想兼容半角冒号表头，但两次split都是
+    # 对同一段文字生效：如果表头本身用的是全角冒号（预期情况），第一次
+    # split已经切出了信号正文，第二次split会在这段正文里找任意一个半角
+    # 冒号再切一刀——如果某支标的的名称里恰好带半角冒号，正文前面所有
+    # 已经解析对的信号行会被这一刀切掉，是真实的丢数据bug，不是可以接受
+    # 的边界情况。改成用正则只在表头处切一次，不会误伤正文内容。
+    m = re.search(r"交易信号[：:]", text)
+    if not m:
         return []
-    block = text[idx:].split("：", 1)[-1].split(":", 1)[-1]
+    block = text[m.end():]
     signals = []
     for line in block.strip().splitlines():
         line = line.strip().lstrip("-•").strip()

@@ -2180,10 +2180,17 @@ def _render_positions_today_pnl(positions: list):
         value_cny, _note2 = to_cny(price * item["shares"], item.get("currency", "CNY"))
         if pnl_cny is None or value_cny is None:
             return None
-        return pnl_cny, value_cny
+        # 场外基金/上金所现货走的是T-1净值兜底(见get_stock_realtime里的
+        # _fetch_otc_fund_quote/_fetch_sge_spot_quote)，"最新价/昨收"字段
+        # 形状跟真实实时行情一样，但含义是"上一个披露日 vs 再前一日"，不是
+        # "今天 vs 昨天"——直接汇总进这个每3秒刷新的"今日收益"会让隔夜没
+        # 更新的净值变化看起来像是实时跳动的盈亏，是真实的误导，不是无害的
+        # 显示细节，必须单独标记出来。
+        is_stale = str(spot.get("数据源", "")).endswith("(T-1)")
+        return pnl_cny, value_cny, is_stale
 
     results = _run_concurrent_with_deadline(holding_items, _fetch_today, timeout=6)
-    total_pnl, total_value, skipped = 0.0, 0.0, 0
+    total_pnl, total_value, skipped, stale_count = 0.0, 0.0, 0, 0
     for i in range(len(holding_items)):
         r = results.get(i)
         if r is None:
@@ -2191,6 +2198,8 @@ def _render_positions_today_pnl(positions: list):
             continue
         total_pnl += r[0]
         total_value += r[1]
+        if r[2]:
+            stale_count += 1
 
     if total_value <= 0:
         st.caption("今日收益：行情/汇率暂时都获取不到，稍后重试。")
@@ -2206,6 +2215,8 @@ def _render_positions_today_pnl(positions: list):
     )
     if skipped:
         st.caption(f"有 {skipped} 支持仓因行情/汇率暂时获取不到，未计入。")
+    if stale_count:
+        st.caption(f"其中 {stale_count} 支场外基金/贵金属现货用的是上一披露日净值（非实时），已计入合计。")
 
 
 def _render_max_capital_input(email: str):
@@ -2513,16 +2524,23 @@ def _render_position_rows(position_items: list, _email: str):
             wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
             color = UP_COLOR if wchange >= 0 else DOWN_COLOR
 
+            # 场外基金/上金所现货是T-1净值(见get_stock_realtime里的兜底)，
+            # 不是真实盘中报价——不能套用"3秒刷新+背景一闪"这套暗示"刚刚
+            # 变化"的动画，那是在说谎；数字本身也要标个"T-1"，不然跟真实
+            # 实时行情长得一模一样，用户没法分辨这支的涨跌是不是"今天"的。
+            is_stale = str(wspot.get("数据源", "")).endswith("(T-1)")
+
             flash_key = f"_pos_last_price_{symbol}_{item_market}"
             prev = st.session_state.get(flash_key)
             st.session_state[flash_key] = wspot["最新价"]
             flash_class = ""
-            if prev is not None and prev != wspot["最新价"]:
+            if not is_stale and prev is not None and prev != wspot["最新价"]:
                 flash_class = "price-flash-up" if wspot["最新价"] > prev else "price-flash-down"
 
+            stale_tag = " <span style='font-size:0.65rem;color:var(--fa-muted)'>T-1</span>" if is_stale else ""
             price_html = (
                 f"<div class='{flash_class}' style='text-align:right;border-radius:4px'>"
-                f"<div style='font-weight:600;color:{color}'>{wspot['最新价']:.2f}</div>"
+                f"<div style='font-weight:600;color:{color}'>{wspot['最新价']:.2f}{stale_tag}</div>"
                 f"<div style='font-size:0.72rem;color:var(--fa-muted)'>{_fmt_turnover(wspot.get('成交额'))}</div>"
                 f"</div>"
             )
@@ -2789,8 +2807,15 @@ def _show_add_position_dialog(email: str):
             if c and c.get("price"):
                 st.session_state["_pos_add_amount"] = round(sh * c["price"], 2)
 
+        # 金额的币种是标的所在市场的原始币种，不是人民币——HK股买入金额是
+        # 港币、US股是美元，upsert_position存的cost_total也是原始币种（跟
+        # positions表的currency字段一致）。之前这里无条件写"¥"，港美股用户
+        # 照着标签心算成人民币填进去，会把成本按错误币种存进去，均价/浮盈
+        # 全部跟着错且没法自动发现——这是真实的资金核算bug，不是措辞问题。
+        _CURRENCY_LABEL = {"A": "¥", "HK": "HK$", "US": "US$"}
+        cur_label = _CURRENCY_LABEL.get(confirmed["market"], "¥")
         amount = st.number_input(
-            "买入金额（¥，只记得金额就填这个，股数会自动按现价换算）",
+            f"买入金额（{cur_label}，只记得金额就填这个，股数会自动按现价换算）",
             min_value=0.0, value=0.0, step=100.0, key="_pos_add_amount",
             on_change=_sync_shares_from_amount,
         )
@@ -2801,12 +2826,20 @@ def _show_add_position_dialog(email: str):
         )
         ac1, ac2 = st.columns(2)
         if ac1.button("确认添加", type="primary", use_container_width=True):
-            if shares > 0:
+            if shares > 0 and amount <= 0:
+                # 之前没这道校验——股数填了、金额被清成0或者没跟着联动更新时，
+                # upsert_position会往cost_total里累加0，加权均价被永久拉向0，
+                # 后续这笔仓位的浮盈会显示成离谱的暴涨，且没有任何报错提示
+                # 用户去修正，是个会悄悄污染历史成本数据的真实bug。
+                st.error("买入金额要大于0——股数和金额是联动的，如果手动改过股数，确认一下金额有没有跟着变。")
+            elif shares > 0:
                 upsert_position(email, confirmed["symbol"], confirmed["name"], confirmed["market"], shares, amount)
+                st.session_state.pop("_pos_add_confirmed", None)
+                st.rerun()
             else:
                 add_watch_only(email, confirmed["symbol"], confirmed["name"], market=confirmed["market"])
-            st.session_state.pop("_pos_add_confirmed", None)
-            st.rerun()
+                st.session_state.pop("_pos_add_confirmed", None)
+                st.rerun()
         if ac2.button("返回重新搜索", use_container_width=True):
             # 不调st.rerun()——dialog函数本身是@st.fragment，按钮点击已经会
             # 触发它自己重跑，弹窗留在原地。之前这里调了st.rerun()，会触发
