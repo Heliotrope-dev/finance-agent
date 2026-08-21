@@ -39,10 +39,20 @@ _SECRETS_PATH = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.t
 _MODEL = "deepseek-v4-flash"
 _DEEPSEEK_BASE = "https://api.deepseek.com"
 
-# 每个市场各筛多少只候选交给AI判断——控制AI调用次数和运行时长，不是"候选只有
-# 这么多"，Futu那边符合条件的往往有几百上千只，这里只取排序后最靠前的一批。
-_US_CANDIDATE_CAP = 15
-_HK_CANDIDATE_CAP = 15
+# 候选池规模——用户要求"扩大到各500支"，让候选池统计（下面 _pool_summary）
+# 真实反映大盘水平，不是拿十几只样本硬充"全市场"。Futu 单次最多返回200条，
+# 超过要分页拉（见 _futu_screen_pool）。
+_US_POOL_TARGET = 500
+_HK_POOL_TARGET = 500
+
+# 池子里最靠前的这些才交给AI逐一判断——控制AI调用次数和运行时长，不是对
+# 全部500只跑判断（500只全跑一遍AI单次要几十分钟，不现实也没必要）。因为
+# 池子本身已经按净利润增速降序排，取最前面这批本身就是"增长最快的一批"。
+_US_CANDIDATE_CAP = 20
+_HK_CANDIDATE_CAP = 20
+
+# 最终重点介绍几支——每个市场挑action优先级最高的几支详细展开理由+数据。
+_TOP_PICKS = 3
 
 
 def _load_secrets_into_env():
@@ -92,9 +102,10 @@ def _run_concurrent_with_deadline(items: list, fn, timeout: float, max_workers: 
     return results
 
 
-def _futu_screen(market, quarter, cap_threshold: float, num: int) -> list[dict]:
+def _futu_screen_pool(ctx, market, quarter, cap_threshold: float, target_count: int) -> tuple[list[dict], int]:
     """在 market 全市场范围内按"市值下限 + PE在合理区间(0-50，排除亏损股和
-    极端高估值) + 最近一期净利润同比增速>10%"筛选，按增速降序排，取前 num 只。
+    极端高估值) + 最近一期净利润同比增速>10%"筛选，按增速降序排，分页拉到最多
+    target_count 条（Futu 单次最多返回200条一页，一次拉不完500条要翻页）。
     这三个字段是实测验证过 Futu 账号权限下能用的（VOLUME/换手率这类字段测试
     时报"不支持该过滤字段"，权限或字段类型不对，没有踩着编）。市值字段/PE
     走 SimpleFilter，净利润增速走 FinancialFilter——两者要分开建，混用会报
@@ -104,69 +115,123 @@ def _futu_screen(market, quarter, cap_threshold: float, num: int) -> list[dict]:
     报错"港股和A股不支持最近季报选项"），只能用美股。这里quarter参数由调用方
     按市场传对应支持的枚举。
 
-    单独开一个短连接跑完就关，不复用app.py里_futu_call那条常驻worker路径——
-    这个脚本是独立进程，跟app.py是完全不同的Python进程，天然没法共享同一个
-    连接对象。
+    返回 (候选列表, 全市场实际符合条件总数)——后者用于_pool_summary里如实
+    报告"全市场有多少只符合门槛"，不是编的数字。列表里带上market_val/pe_ttm
+    原始值，供_pool_summary算真实的统计摘要（中位数PE等），不用另外调AI。
     """
+    f_cap = ft.SimpleFilter()
+    f_cap.stock_field = ft.StockField.MARKET_VAL
+    f_cap.filter_min = cap_threshold
+    f_cap.is_no_filter = False
+
+    f_pe = ft.SimpleFilter()
+    f_pe.stock_field = ft.StockField.PE_TTM
+    f_pe.filter_min = 0
+    f_pe.filter_max = 50
+    f_pe.is_no_filter = False
+
+    f_growth = ft.FinancialFilter()
+    f_growth.stock_field = ft.StockField.NET_PROFIX_GROWTH
+    f_growth.filter_min = 10
+    f_growth.is_no_filter = False
+    f_growth.quarter = quarter
+    f_growth.sort = ft.SortDir.DESCEND
+
+    filters = [f_cap, f_pe, f_growth]
+    market_code = "HK" if market == ft.Market.HK else "US"
+    page_size = 200  # 实测确认的单次请求上限，超过会报"请求个数超过限制"
+    items: list[dict] = []
+    all_count = 0
+    begin = 0
+    while len(items) < target_count:
+        try:
+            ret, data = ctx.get_stock_filter(market=market, filter_list=filters, begin=begin, num=page_size)
+        except Exception:
+            break
+        if ret != ft.RET_OK:
+            break
+        _last_page, all_count, ret_list = data
+        if not ret_list:
+            break
+        for item in ret_list:
+            items.append({
+                "symbol": item.stock_code.split(".", 1)[-1],
+                "name": item.stock_name,
+                "market": market_code,
+                "market_val": getattr(item, "market_val", None),
+                "pe_ttm": getattr(item, "pe_ttm", None),
+            })
+        begin += page_size
+        if begin >= all_count:
+            break
+    return items[:target_count], all_count
+
+
+def _pool_summary(pool: list[dict], all_count: int, label: str) -> str:
+    """候选池的真实统计摘要——不是AI编的，直接从Futu返回的原始数据本地算，
+    跟这个项目"技术面信号本地算不靠AI编"的一贯做法一致。"""
+    if not pool:
+        return f"{label}：本次没有拿到有效候选（Futu筛选失败或无符合条件的股票）。"
+    pes = sorted(p["pe_ttm"] for p in pool if p.get("pe_ttm"))
+    caps = sorted(p["market_val"] for p in pool if p.get("market_val"))
+    pe_med = pes[len(pes) // 2] if pes else None
+    cap_med = caps[len(caps) // 2] if caps else None
+    parts = [f"{label}全市场符合筛选门槛（市值达标、估值0-50倍PE、最近盈利增速>10%）的股票共 {all_count} 只"]
+    parts.append(f"本次候选池覆盖其中 {len(pool)} 只")
+    if pe_med:
+        parts.append(f"PE中位数约{pe_med:.1f}倍")
+    if cap_med:
+        parts.append(f"市值中位数约{cap_med / 1e8:.0f}亿")
+    return "，".join(parts) + "。"
+
+
+_ACTION_PRIORITY = {"买入": 0, "持有": 1, "观望": 2, "卖出": 3}
+
+
+def _top_picks(judged: list[dict], market: str, n: int = _TOP_PICKS) -> list[dict]:
+    """每个市场挑action优先级最高的n支重点介绍——judged本身已经按增速降序
+    （候选池原始顺序）排列，list.sort是稳定排序，同优先级内保留这个顺序当
+    tie-break，不是随机挑的。"""
+    pool = [j for j in judged if j["market"] == market]
+    pool.sort(key=lambda j: _ACTION_PRIORITY.get(j["action"], 9))
+    return pool[:n]
+
+
+def screen_hk_us_candidates() -> dict:
     try:
         ctx = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
     except Exception:
-        return []
+        ctx = None
+
+    if ctx is None:
+        return {"us_pool": [], "hk_pool": [], "us_all_count": 0, "hk_all_count": 0, "judged": []}
+
     try:
-        f_cap = ft.SimpleFilter()
-        f_cap.stock_field = ft.StockField.MARKET_VAL
-        f_cap.filter_min = cap_threshold
-        f_cap.is_no_filter = False
-
-        f_pe = ft.SimpleFilter()
-        f_pe.stock_field = ft.StockField.PE_TTM
-        f_pe.filter_min = 0
-        f_pe.filter_max = 50
-        f_pe.is_no_filter = False
-
-        f_growth = ft.FinancialFilter()
-        f_growth.stock_field = ft.StockField.NET_PROFIX_GROWTH
-        f_growth.filter_min = 10
-        f_growth.is_no_filter = False
-        f_growth.quarter = quarter
-        f_growth.sort = ft.SortDir.DESCEND
-
-        ret, data = ctx.get_stock_filter(
-            market=market, filter_list=[f_cap, f_pe, f_growth], begin=0, num=num
+        us_pool, us_all = _futu_screen_pool(
+            ctx, ft.Market.US, ft.FinancialQuarter.MOST_RECENT_QUARTER, 2_000_000_000, _US_POOL_TARGET
         )
-        if ret != ft.RET_OK:
-            return []
-        _last_page, _all_count, ret_list = data
-        market_code = "HK" if market == ft.Market.HK else "US"
-        return [
-            {"symbol": item.stock_code.split(".", 1)[-1], "name": item.stock_name, "market": market_code}
-            for item in ret_list
-        ]
-    except Exception:
-        return []
+        hk_pool, hk_all = _futu_screen_pool(
+            ctx, ft.Market.HK, ft.FinancialQuarter.ANNUAL, 5_000_000_000, _HK_POOL_TARGET
+        )
     finally:
         try:
             ctx.close()
         except Exception:
             pass
 
+    shortlist = us_pool[:_US_CANDIDATE_CAP] + hk_pool[:_HK_CANDIDATE_CAP]
+    judged: list[dict] = []
+    if shortlist:
+        results = _run_concurrent_with_deadline(
+            shortlist, lambda it: _judge_one(it, "screen"), timeout=400, max_workers=5
+        )
+        judged = [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
 
-def screen_hk_us_candidates() -> list[dict]:
-    us = _futu_screen(
-        ft.Market.US, ft.FinancialQuarter.MOST_RECENT_QUARTER,
-        cap_threshold=2_000_000_000, num=_US_CANDIDATE_CAP,
-    )
-    hk = _futu_screen(
-        ft.Market.HK, ft.FinancialQuarter.ANNUAL,
-        cap_threshold=5_000_000_000, num=_HK_CANDIDATE_CAP,
-    )
-    items = us + hk
-    if not items:
-        return []
-    results = _run_concurrent_with_deadline(
-        items, lambda it: _judge_one(it, "screen"), timeout=400, max_workers=5
-    )
-    return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
+    return {
+        "us_pool": us_pool, "hk_pool": hk_pool,
+        "us_all_count": us_all, "hk_all_count": hk_all,
+        "judged": judged,
+    }
 
 
 _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是一位会自己做最终决策的
@@ -313,20 +378,34 @@ def main():
     backfilled = _backfill_due_advice()
     print(f"（已回填 {backfilled} 条到期的历史建议价格）\n")
 
-    results = screen_hk_us_candidates()
-    if not results:
-        print("今天没有拿到任何有效判断（可能是Futu筛选失败或数据源全部失败），本次不生成建议。")
+    data = screen_hk_us_candidates()
+    print(_pool_summary(data["us_pool"], data["us_all_count"], "美股"))
+    print(_pool_summary(data["hk_pool"], data["hk_all_count"], "港股"))
+    print()
+
+    judged = data["judged"]
+    if not judged:
+        print("这次没有从候选池里判断出任何有效结果（可能是Futu筛选失败或AI判断全部失败），本次不生成建议。")
         return
 
-    print(f"==================== 港美股潜力候选（共{len(results)}只） ====================")
-    for e in results:
-        print(_fmt_entry(e))
+    for e in judged:
         tracker.log_advice(
             _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
             e["technical_signal"], e["action"], e["market"], e["name"], source="screen",
         )
 
-    print(f"\n共 {len(results)} 条判断已记录。以上为数据驱动的参考意见，不构成投资建议，请自行判断。")
+    us_top = _top_picks(judged, "US")
+    hk_top = _top_picks(judged, "HK")
+
+    print(f"==================== 最值得关注：美股 Top {len(us_top)} ====================")
+    for e in us_top:
+        print(_fmt_entry(e))
+
+    print(f"==================== 最值得关注：港股 Top {len(hk_top)} ====================")
+    for e in hk_top:
+        print(_fmt_entry(e))
+
+    print(f"（本次共对 {len(judged)} 只候选做了完整判断，全部记录进数据库。以上为数据驱动的参考意见，不构成投资建议，请自行判断。）")
 
 
 if __name__ == "__main__":
