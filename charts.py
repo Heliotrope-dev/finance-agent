@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from theme import UP_COLOR, DOWN_COLOR
+from theme import UP_COLOR, DOWN_COLOR, NEUTRAL_COLOR
 
 
 def _compute_macd(close: pd.Series) -> pd.DataFrame:
@@ -412,5 +412,51 @@ def build_multi_comparison(hist_by_name: dict) -> go.Figure:
         margin=dict(l=10, r=10, t=10, b=10),
         yaxis_title="走势（起点=100）",
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    return fig
+
+
+_DONUT_MAX_SLICES = 8
+
+
+def build_position_donut(holdings: list[dict], total_value_cny: float) -> go.Figure:
+    """持仓占比环形图。holdings: [{"label": "名称（代码）", "value_cny": 折人民币市值}, ...]，
+    调用方（app.py）负责按金额降序排好、汇率折算好——这里不做排序也不做汇率转换，
+    避免图表模块反过来依赖data_sources。配色直接复用_MULTI_COLORS（用户明确要求
+    按手绘草图原样用红绿等颜色，不用另外发明"避开红绿"的调色板，即使跟涨跌红绿
+    语义有重叠也接受）。超过_DONUT_MAX_SLICES个持仓，尾部合并成"其他"用中性灰，
+    避免小额持仓挤占过多颜色/图例空间。总资产放hole中间的annotation里，
+    会跟着图一起响应式缩放，不写在图外的HTML里。"""
+    if len(holdings) > _DONUT_MAX_SLICES:
+        head = holdings[: _DONUT_MAX_SLICES - 1]
+        tail_value = sum(h["value_cny"] for h in holdings[_DONUT_MAX_SLICES - 1 :])
+        rows = head + [{"label": "其他", "value_cny": tail_value}]
+    else:
+        rows = holdings
+
+    labels = [r["label"] for r in rows]
+    values = [r["value_cny"] for r in rows]
+    colors = [
+        NEUTRAL_COLOR if r["label"] == "其他" else _MULTI_COLORS[i % len(_MULTI_COLORS)]
+        for i, r in enumerate(rows)
+    ]
+
+    fig = go.Figure(
+        go.Pie(
+            labels=labels, values=values, hole=0.62,
+            marker=dict(colors=colors, line=dict(color="#fff", width=2)),
+            textinfo="percent", textposition="inside",
+            hovertemplate="%{label}<br>¥%{value:,.0f}（%{percent}）<extra></extra>",
+            sort=False,
+        )
+    )
+    fig.add_annotation(
+        text=f"总资产<br><b style='font-size:1.3em'>¥{total_value_cny:,.0f}</b>",
+        showarrow=False, font=dict(size=13), align="center",
+    )
+    fig.update_layout(
+        height=300,
+        margin=dict(l=10, r=10, t=10, b=10),
+        showlegend=False,
     )
     return fig

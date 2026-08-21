@@ -46,6 +46,7 @@ from data_sources import (
     resolve_symbol_by_name,
     detect_symbol_candidates,
     get_data_source_health,
+    to_cny,
 )
 from analysis import (
     cross_validate, summarize_financials, summarize_news, summarize_index_news, summarize_benchmark,
@@ -59,7 +60,7 @@ from tracker import (
 )
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
-    build_benchmark_comparison, build_return_histogram, build_multi_comparison,
+    build_benchmark_comparison, build_return_histogram, build_multi_comparison, build_position_donut,
 )
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
@@ -2139,6 +2140,51 @@ def _render_index_detail(name: str, code: str, market: str):
         _render_overall_summary(st.session_state[idx_summary_key])
 
 
+def _render_positions_donut(watched: list):
+    """持仓占比环形图。只统计真正持仓(shares>0)，纯关注(shares=0)不占份额。
+    不用@st.fragment(run_every=3)——Plotly图3秒重绘会明显闪烁（见持仓分析
+    方案里的踩坑记录），这块跟着页面正常rerun刷新就够了，不需要独立3秒轮询。
+    汇率/实时价任何一项失败就跳过那一支（不拿0或旧数字硬凑），并在图下方
+    如实提示"部分持仓因数据获取失败未计入"，不悄悄编一个不准的总资产出来。
+    """
+    holding_items = [w for w in watched if (w.get("shares") or 0) > 0]
+    if not holding_items:
+        st.caption("暂无真实持仓——添加持仓时填股数才会计入占比图。")
+        return
+
+    def _fetch_value(item):
+        symbol, market = item["symbol"], item.get("market", "A")
+        try:
+            spot = get_stock_realtime(symbol, market=market)
+            price = spot.get("最新价") if spot else None
+        except Exception:
+            price = None
+        if not price:
+            return None
+        value_cny, _note = to_cny(item["shares"] * price, item.get("currency", "CNY"))
+        return value_cny
+
+    results = _run_concurrent_with_deadline(holding_items, _fetch_value, timeout=6)
+
+    holdings, skipped = [], 0
+    for i, item in enumerate(holding_items):
+        value_cny = results.get(i)
+        if value_cny is None:
+            skipped += 1
+            continue
+        holdings.append({"label": f"{item['name']}（{item['symbol']}）", "value_cny": value_cny})
+
+    if not holdings:
+        st.caption("行情/汇率暂时都获取不到，稍后重试。")
+        return
+
+    holdings.sort(key=lambda h: h["value_cny"], reverse=True)
+    total_value_cny = sum(h["value_cny"] for h in holdings)
+    st.plotly_chart(build_position_donut(holdings, total_value_cny), use_container_width=True, key="_positions_donut")
+    if skipped:
+        st.caption(f"有 {skipped} 支持仓因行情/汇率暂时获取不到，未计入本图。")
+
+
 @st.fragment(run_every=3)
 def _render_watchlist_rows(watched_filtered: list, _email: str):
     """自选股列表本体单独做成 fragment，价格/涨跌幅每3秒自己刷新，效仿长桥的
@@ -2933,8 +2979,15 @@ else:
                     )
 
             if watched:
-                # 用户反馈自选股一般也就几只，市场筛选(全部/A股/港股/美股)没有实际
-                # 必要，反而多一层点击——去掉筛选，统一直接展示全部自选股。
-                _render_watchlist_rows(watched, _email)
+                # 环形图 | 持仓列表，左右各半——环形图不用@st.fragment(run_every=3)
+                # （见_render_positions_donut docstring：Plotly图3秒重绘会闪烁），
+                # 右边列表沿用原来的3秒自动刷新fragment，两边各自独立刷新节奏。
+                donut_col, list_col = st.columns([1, 1])
+                with donut_col:
+                    _render_positions_donut(watched)
+                with list_col:
+                    # 用户反馈自选股一般也就几只，市场筛选(全部/A股/港股/美股)没有实际
+                    # 必要，反而多一层点击——去掉筛选，统一直接展示全部自选股。
+                    _render_watchlist_rows(watched, _email)
 
 
