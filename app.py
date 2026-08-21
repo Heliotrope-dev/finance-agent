@@ -1662,6 +1662,20 @@ def _render_advice_section():
     每次访问都触发一遍完全不现实，也没必要（这类基本面判断一天一次足够新）。
     """
     st.markdown("**AI 投研候选**")
+    # 卡片可点击跳转详情页——复用自选股列表卡片验证过的方案（见
+    # _render_watchlist_rows 的踩坑记录：JS/CSS猜DOM结构点不动，最后用最朴素
+    # 的<a href="?open_symbol=...">整页导航才可靠）。那段CSS只在自选股tab渲染
+    # 时才注入，首页不一定会经过那个函数，这里独立注入一份，不依赖执行顺序。
+    st.markdown(
+        "<style>"
+        "a.wl-card-link, a.wl-card-link:link, a.wl-card-link:visited {"
+        "  text-decoration: none !important; color: inherit !important;"
+        "  display: block; cursor: pointer;"
+        "}"
+        "a.wl-card-link:hover { opacity: 0.85; }"
+        "</style>",
+        unsafe_allow_html=True,
+    )
     st.caption(
         "跟本页其它模块不同：这里 AI 会给出买入/卖出/持有/观望的明确结论（其它模块只摆事实、"
         "不下结论）。筛选逻辑是全市场按市值/估值/最近盈利增速做量化初筛，AI 基于真实财务数据+"
@@ -1691,18 +1705,26 @@ def _render_advice_section():
             color = _ADVICE_ACTION_COLOR.get(action, NEUTRAL_COLOR)
             price = row.get("price_at_advice")
             price_text = f"{price:.2f}" if price else "—"
+            href = (
+                f"?open_symbol={urllib.parse.quote(row.get('symbol',''))}"
+                f"&open_market={urllib.parse.quote(market_key)}"
+                f"&open_name={urllib.parse.quote(row.get('name',''))}"
+                f"{_auth_qs()}"
+            )
             with col:
                 with st.container(border=True):
                     st.markdown(
+                        f"<a class='wl-card-link' href='{href}' target='_self'>"
                         f"<div style='display:flex;justify-content:space-between;align-items:center'>"
                         f"<span style='font-weight:700'>{_esc(row.get('name',''))}</span>"
                         f"<span style='background:{color};color:#fff;border-radius:4px;padding:1px 8px;"
                         f"font-size:0.8rem;font-weight:700'>{_esc(action)}</span></div>"
                         f"<div style='font-size:0.75rem;color:var(--fa-muted)'>{_esc(row.get('symbol',''))} · 现价{price_text}"
-                        f"（置信度：{_esc(parts.get('置信度','—'))}）</div>",
+                        f"（置信度：{_esc(parts.get('置信度','—'))}）</div>"
+                        f"<div style='margin-top:6px'>{_esc(parts.get('理由', ''))}</div>"
+                        f"</a>",
                         unsafe_allow_html=True,
                     )
-                    st.markdown(f"<div style='margin-top:6px'>{_esc(parts.get('理由', ''))}</div>", unsafe_allow_html=True)
                     with st.expander("基本面 / 技术面 / 价格位置"):
                         for sec in ("基本面", "技术面", "价格位置"):
                             if parts.get(sec):
