@@ -409,10 +409,20 @@ def main():
 
 
 if __name__ == "__main__":
+    import sys as _sys
     main()
     # get_stock_realtime_futu 建立的 Futu SDK 连接会开一个非 daemon 线程，main()
     # 跑完所有逻辑之后进程并不会自己退出——实测复现过：日志打印完"共N条判断已
     # 记录"，进程还是挂着一直到外层 timeout 才被杀掉。这里所有该做的事（DB写入/
     # 打印结果）都已经在 main() 里同步完成了，直接强制退出，不等这些残留线程。
+    #
+    # 踩坑记录：os._exit() 不会走 Python 正常退出流程，不会 flush stdio 缓冲区。
+    # stdout 重定向到文件/管道时（这个脚本被 ssh/exec 起来时就是这种情况，不是
+    # 交互式终端）默认是全缓冲而不是行缓冲——实测复现过：advice 表里真实写进了
+    # 35 条记录（判断和入库逻辑全部跑完了），但输出文件里 _pool_summary 和 Top
+    # 榜单那几段 print 内容完全不见踪影，就是缓冲区里的内容被 os._exit 直接
+    # 丢弃了。os._exit 之前必须显式 flush，不能只信任"逻辑跑完了输出就一定在"。
+    _sys.stdout.flush()
+    _sys.stderr.flush()
     import os as _os
     _os._exit(0)
