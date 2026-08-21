@@ -322,3 +322,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # get_stock_realtime_futu 建立的 Futu SDK 连接会开一个非 daemon 线程，main()
+    # 跑完所有逻辑之后进程并不会自己退出——实测复现过：日志打印完"共N条判断已
+    # 记录"，进程还是挂着一直到外层 timeout 才被杀掉。这里所有该做的事（DB写入/
+    # 打印结果）都已经在 main() 里同步完成了，直接强制退出，不等这些残留线程。
+    import os as _os
+    _os._exit(0)
