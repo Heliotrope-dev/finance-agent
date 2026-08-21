@@ -108,8 +108,14 @@ def _breaker_trip(key: str, cooldown: float = 60):
 
 
 def _sina_symbol(symbol: str) -> str:
-    """AkShare 东财接口用纯数字代码，新浪/BaoStock 接口要带交易所前缀。"""
-    return "sh" if symbol.startswith(("6", "9")) else "sz"
+    """AkShare 东财接口用纯数字代码，新浪/BaoStock 接口要带交易所前缀。
+
+    这条判断规则原来只覆盖个股（6/9开头沪市，其它深市），没考虑基金/ETF——
+    上交所的场内基金代码是5开头（510300沪深300ETF、588000科创50ETF这些），
+    原规则把5开头的一律归到"其它→深市"，实际上是沪市的，会用错交易所前缀
+    去查行情，直接查不到。加上"5"之后：沪市＝6/9(个股)+5(基金)，其余归深市，
+    不影响任何已有的个股代码判断（没有深市个股代码是5开头的）。"""
+    return "sh" if symbol.startswith(("5", "6", "9")) else "sz"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -148,13 +154,22 @@ def check_stock_valid(symbol: str) -> tuple[bool, str]:
     600001 这种代码格式完全合法，但公司早就退市了（比如邯郸钢铁，2009年退市），
     直接拿去查行情三个数据源当然都查不到，之前的报错说"稍后再试"容易误导人
     以为是临时故障——这里提前判断清楚，返回准确原因。
+
+    type_="5"（BaoStock对ETF/场内基金的分类）跟"1"（个股）一样放行——这个
+    函数原本只服务"添加持仓"这一个调用点（app.py _resolve_confirmed_symbol），
+    不是给"个股深度分析"用的，用户明确要求ETF/基金也要能添加成持仓，没理由
+    在这里挡住。BaoStock的基础信息表本身对场内基金覆盖不全（比如510300这类
+    上交所基金查不到基础信息，但get_stock_realtime能查到真实行情）——这种
+    "BaoStock不认识"的情况，调用方(_resolve_confirmed_symbol)会再用真实行情
+    查询兜底判断，不能把"没有找到代码"直接当成"这个代码不存在"，这里返回的
+    只是"BaoStock这张表里没有"，不是终审结论。
     """
     info = _stock_basic_info(symbol)
     if not info:
         return False, f"没有找到代码「{symbol}」对应的股票，检查一下是不是输错了。"
     _, name, _ipo, out_date, type_, status = info
-    if type_ != "1":
-        return False, f"「{symbol}」不是个股（可能是指数/基金/其他），暂不支持分析。"
+    if type_ not in ("1", "5"):
+        return False, f"「{symbol}」不是个股/基金（可能是指数或其他类型），暂不支持添加。"
     if status != "1":
         return False, f"「{name}」（{symbol}）已经退市了（退市日期 {out_date or '未知'}），查不到行情数据。"
     return True, name
@@ -777,6 +792,21 @@ _US_NAME_MAP = {
     "铜": "CPER", "copper": "CPER",
 }
 
+# A股场内基金/ETF名称->代码，BaoStock的按名称模糊搜索(search_stock_by_name)
+# 只覆盖个股不含基金，中文名搜不到——手动维护这份最主流宽基/行业ETF的别名表
+# 补上这块。用户反馈"ETF基金搜索搜不到"，排查发现两个独立问题都要修：一是
+# 这里(名称搜索完全没覆盖基金)，二是check_stock_valid原来直接拒绝非个股
+# type、以及_sina_symbol的沪深交易所前缀判断没考虑基金代码(5开头是沪市基金，
+# 原来跟"其它"一起被归到深市，两个bug已在check_stock_valid/_sina_symbol修复)。
+_A_FUND_NAME_MAP = {
+    "沪深300etf": "510300", "沪深300": "510300",
+    "创业板etf": "159915", "创业板": "159915",
+    "科创50etf": "588000", "科创50": "588000",
+    "黄金etf": "518880",
+    "纳指etf": "513100", "纳斯达克100etf": "513100",
+    "中证500etf": "510500", "中证500": "510500",
+}
+
 
 def search_quote_futu(keyword: str) -> list[dict]:
     """Futu 的全市场模糊搜索（get_search_quote），支持中英文/拼音，覆盖全市场股票，
@@ -841,6 +871,12 @@ def detect_symbol_candidates(query: str) -> list[dict]:
         a_matches = []
     if a_matches:
         results.append({"symbol": a_matches[0]["code"], "market": "A", "market_label": "A股"})
+    else:
+        # search_stock_by_name(BaoStock按名称模糊搜索)只覆盖个股，不含ETF/基金，
+        # 名字查不到个股时试一下手动维护的A股基金别名表。
+        a_fund_code = _A_FUND_NAME_MAP.get(q_lower)
+        if a_fund_code:
+            results.append({"symbol": a_fund_code, "market": "A", "market_label": "A股"})
 
     hk_code = _HK_NAME_MAP.get(q_lower)
     if hk_code:

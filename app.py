@@ -47,6 +47,7 @@ from data_sources import (
     detect_symbol_candidates,
     get_data_source_health,
     to_cny,
+    _A_FUND_NAME_MAP,
 )
 from analysis import (
     cross_validate, summarize_financials, summarize_news, summarize_index_news, summarize_benchmark,
@@ -526,7 +527,9 @@ def _resolve_add_symbol(q: str, market_code: str) -> str | None:
     """"新增持仓"用的名称→代码解析，A股之前一直漏了——resolve_symbol_by_name
     只支持HK/US（内部的知名股名单和Futu模糊搜索都没有A股这块），A股market
     传进去必然返回None，退化成直接把"茅台"这种中文名当代码用，当然查不到。
-    这里A股单独先走search_stock_by_name（BaoStock按名称模糊匹配，真支持A股）。
+    这里A股单独先走search_stock_by_name（BaoStock按名称模糊匹配，真支持A股），
+    查不到再试_A_FUND_NAME_MAP——BaoStock按名称搜索只覆盖个股不含ETF/基金，
+    "沪深300ETF"这类名字搜不到，用户反馈过这个问题。
     """
     q = q.strip()
     if market_code == "A":
@@ -536,6 +539,9 @@ def _resolve_add_symbol(q: str, market_code: str) -> str | None:
             matches = []
         if matches:
             return matches[0]["code"]
+        fund_code = _A_FUND_NAME_MAP.get(q.lower())
+        if fund_code:
+            return fund_code
         return q if re.match(r"^\d{6}$", q) else None
     by_name = resolve_symbol_by_name(q, market_code)
     if by_name:
@@ -2602,7 +2608,12 @@ def _resolve_confirmed_symbol(email: str, q: str, market_code: str) -> dict | No
     # 不再一律甩给用户一句含糊的"检查一下代码对不对"。
     if market_code == "A":
         valid, info = check_stock_valid(add_symbol)
-        if not valid:
+        # "没有找到代码"不直接拒绝——BaoStock的基础信息表对场内基金覆盖不全
+        # （比如510300沪深300ETF查不到基础信息，但真实行情是有的），这种情况
+        # 交给下面的get_stock_realtime做终审：查得到真实价格就认，查不到才
+        # 真的算失败。只有"已退市"/"不是个股也不是基金"这两种明确结论才在
+        # 这里直接拒绝，不用再往下查。
+        if not valid and "没有找到代码" not in info:
             st.error(info)
             return None
     try:
