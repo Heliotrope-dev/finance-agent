@@ -55,7 +55,7 @@ from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
     get_accuracy_trend, add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
     add_search_history, get_search_history, get_latest_advice, get_advice_accuracy,
-    get_watchlist_advice,
+    get_watchlist_advice, get_positions, upsert_position, reduce_position, delete_position,
 )
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
@@ -371,7 +371,7 @@ if st.query_params.get("open_symbol"):
     # "行情"分区——整页导航会把session_state清空，"_active_section"记不住
     # 是从哪个分区点进来的，得靠这个参数显式带过来。
     if st.query_params.get("open_from") == "wl":
-        st.session_state["_active_section"] = "自选股"
+        st.session_state["_active_section"] = "持仓"
     st.query_params.clear()
     st.rerun()
 if st.query_params.get("open_index_code"):
@@ -978,11 +978,11 @@ def _render_price_header(symbol: str, market: str):
 
     _watched_now = is_in_watchlist(st.session_state["user_email"], symbol)
     if _watched_now:
-        if st.button("移除自选", key="wl_toggle"):
+        if st.button("取消关注", key="wl_toggle"):
             remove_from_watchlist(st.session_state["user_email"], symbol)
             st.rerun()
     else:
-        if st.button("加入自选", key="wl_toggle"):
+        if st.button("关注", key="wl_toggle"):
             add_to_watchlist(st.session_state["user_email"], symbol, spot.get("名称", symbol), market=market)
             st.rerun()
 
@@ -1819,10 +1819,10 @@ def _render_stock_detail(symbol: str, market: str, name: str):
         "</style>",
         unsafe_allow_html=True,
     )
-    if st.button("←", key=f"detail_back_{symbol}_{market}", type="tertiary", help="返回自选股"):
+    if st.button("←", key=f"detail_back_{symbol}_{market}", type="tertiary", help="返回持仓"):
         for k in ("_detail_symbol", "_detail_market", "_detail_name", "_detail_module"):
             st.session_state.pop(k, None)
-        st.session_state["_active_section"] = "自选股"
+        st.session_state["_active_section"] = "持仓"
         st.rerun()
 
     st.markdown(
@@ -2154,7 +2154,7 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
     跟这个<a>标签是两个独立的DOM元素，互不干扰。
     """
     if not watched_filtered:
-        st.caption("这个分类下暂时没有自选股。")
+        st.caption("这个分类下暂时没有持仓。")
         return
 
     st.caption("每 3 秒自动刷新")
@@ -2279,6 +2279,10 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
             spark_svg = _build_sparkline_svg(closes, spark_color)
             st.session_state[spark_key] = (closes_tuple, spark_color, spark_svg)
 
+        shares = item.get("shares") or 0
+        cost_total = item.get("cost_total") or 0
+        pnl_html = ""
+
         if wspot and wspot.get("最新价"):
             wchange = wspot["最新价"] - wspot.get("昨收", wspot["最新价"])
             wchange_pct = wchange / wspot["昨收"] * 100 if wspot.get("昨收") else 0
@@ -2303,6 +2307,19 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
                 f"padding:3px 7px;border-radius:5px;display:inline-block;min-width:58px;text-align:center'>"
                 f"{wchange_pct:+.2f}%</span></div>"
             )
+
+            # 真正持仓(shares>0)才算市值/浮盈——纯关注(shares=0)不显示这一行，
+            # 跟原来自选股的观感保持一致，不会突然多出一堆"0股"的噪音信息。
+            if shares > 0:
+                market_value = shares * wspot["最新价"]
+                pnl = market_value - cost_total
+                pnl_pct = (pnl / cost_total * 100) if cost_total else 0
+                pnl_color = UP_COLOR if pnl >= 0 else DOWN_COLOR
+                pnl_html = (
+                    f"<div style='text-align:right;font-size:0.72rem;margin-top:2px'>"
+                    f"<span style='color:var(--fa-muted)'>{shares:g}股 · 市值{market_value:,.0f}</span> "
+                    f"<span style='color:{pnl_color}'>{pnl:+,.0f}（{pnl_pct:+.1f}%）</span></div>"
+                )
         else:
             price_html = "<div style='text-align:right;color:var(--fa-muted)'>—</div>"
             badge_html = ""
@@ -2341,11 +2358,11 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
                 f"<div class='fa-flex-row' style='display:flex;align-items:center'>"
                 f"<div style='flex:1.3'>{price_html}</div>"
                 f"<div style='flex:1'>{badge_html}</div>"
-                f"</div></a>",
+                f"</div>{pnl_html}</a>",
                 unsafe_allow_html=True,
             )
-            if del_col.button("×", key=f"wl_del_{symbol}", help="删除自选", type="tertiary"):
-                _confirm_delete_dialog(_email, symbol, item["name"])
+            if del_col.button("×", key=f"wl_del_{symbol}", help="卖出/取消关注", type="tertiary"):
+                _confirm_delete_dialog(_email, item, item_market, wspot.get("最新价") if wspot else None)
 
             adv = _advice_map.get(symbol)
             if adv:
@@ -2365,28 +2382,67 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
                             st.markdown(f"**{sec}**：{_esc(adv_parts[sec])}")
 
 
-@st.dialog("确认删除")
-def _confirm_delete_dialog(email: str, symbol: str, name: str):
-    st.write(f"确定要把「{name}」（{symbol}）从自选股里删除吗？")
+@st.dialog("卖出确认")
+def _confirm_delete_dialog(email: str, item: dict, market: str, cur_price: float | None):
+    """shares=0（纯关注，没有真实持仓）走原来的简单确认删除；shares>0是真的
+    在卖持仓，要展示股数/均价/现价/浮盈，让用户输入卖出股数+成交金额——
+    默认卖出全部、金额按现价估算，用户可以改成真实成交价。
+    """
+    symbol, name = item["symbol"], item["name"]
+    shares = item.get("shares") or 0
+    cost_total = item.get("cost_total") or 0
+
+    if shares <= 0:
+        st.write(f"确定要取消关注「{name}」（{symbol}）吗？")
+        dc1, dc2 = st.columns(2)
+        if dc1.button("确认", type="primary", use_container_width=True):
+            remove_from_watchlist(email, symbol)
+            st.rerun()
+        if dc2.button("取消", use_container_width=True):
+            st.rerun()
+        return
+
+    avg_cost = cost_total / shares
+    st.write(f"**{name}**（{symbol}·{market}）")
+    st.caption(
+        f"持仓 {shares:g} 股 · 均价 {avg_cost:.2f} · 现价 "
+        f"{f'{cur_price:.2f}' if cur_price else '—'}"
+    )
+    if cur_price:
+        pnl = (cur_price - avg_cost) * shares
+        pnl_color = UP_COLOR if pnl >= 0 else DOWN_COLOR
+        st.markdown(f"浮动盈亏：<span style='color:{pnl_color}'>{pnl:+,.2f}</span>", unsafe_allow_html=True)
+
+    sell_shares = st.number_input("卖出股数", min_value=0.0, max_value=float(shares), value=float(shares), step=1.0, key=f"_sell_shares_{symbol}")
+    default_amount = sell_shares * cur_price if cur_price else sell_shares * avg_cost
+    sell_amount = st.number_input(
+        "成交金额（默认按现价估算，可改成真实成交价×股数）", min_value=0.0,
+        value=float(default_amount), step=1.0, key=f"_sell_amount_{symbol}",
+    )
     dc1, dc2 = st.columns(2)
-    if dc1.button("确认删除", type="primary", use_container_width=True):
-        remove_from_watchlist(email, symbol)
-        st.rerun()
+    if dc1.button("确认卖出", type="primary", use_container_width=True):
+        if sell_shares <= 0:
+            st.error("卖出股数要大于0。")
+        else:
+            reduce_position(email, symbol, sell_shares, sell_amount)
+            st.rerun()
     if dc2.button("取消", use_container_width=True):
         st.rerun()
 
 
-def _do_add_watchlist(email: str, q: str, market_code: str) -> bool:
-    """真正执行添加的公共逻辑，搜索弹窗里"添加"按钮和历史记录"再加"按钮共用。
-    成功才记一笔搜索历史（失败的搜索没必要占历史记录的位置）。
+def _resolve_confirmed_symbol(email: str, q: str, market_code: str) -> dict | None:
+    """两阶段添加持仓的第一阶段：只做"这个代码/名字真实存在且能拿到行情"的
+    确认，不落库。返回值直接存进session_state供第二阶段（填股数/金额）用，
+    避免像老版一步到位那样——多市场候选分支rerun一次就把已经填的股数/金额
+    输入框冲掉。成功才记一笔搜索历史（失败的搜索没必要占历史记录的位置）。
     """
     q = q.strip()
     if not q:
-        return False
+        return None
     add_symbol = _resolve_add_symbol(q, market_code)
     if not add_symbol:
         st.error(f"没查到「{q}」的行情——检查一下代码对不对，或者这家公司没上市（比如私营公司本来就没有股票代码）。")
-        return False
+        return None
     # check_stock_valid 只覆盖 A 股（内部走 BaoStock，港美股没有等价数据源）——
     # 能提前区分"代码格式对但公司已退市"和"数据源临时故障"这两种情况，
     # 不再一律甩给用户一句含糊的"检查一下代码对不对"。
@@ -2394,7 +2450,7 @@ def _do_add_watchlist(email: str, q: str, market_code: str) -> bool:
         valid, info = check_stock_valid(add_symbol)
         if not valid:
             st.error(info)
-            return False
+            return None
     try:
         add_spot = get_stock_realtime(add_symbol, market=market_code)
     except Exception:
@@ -2406,17 +2462,41 @@ def _do_add_watchlist(email: str, q: str, market_code: str) -> bool:
             st.error(f"「{q}」的行情暂时获取不到（数据源可能临时抖动），请稍后重试。")
         else:
             st.error(f"没查到「{q}」的行情——检查一下代码对不对，或者这家公司没上市（比如私营公司本来就没有股票代码）。")
-        return False
-    add_to_watchlist(email, add_symbol, add_spot.get("名称", add_symbol), market=market_code)
+        return None
     add_search_history(email, q, market_code)
-    return True
+    return {
+        "symbol": add_symbol, "market": market_code,
+        "name": add_spot.get("名称", add_symbol), "price": add_spot["最新价"],
+    }
 
 
-@st.dialog("添加自选股")
+@st.dialog("添加持仓")
 def _show_add_watchlist_dialog(email: str):
+    confirmed = st.session_state.get("_wl_add_confirmed")
+
+    # 第二阶段：标的已确认，填股数/金额（不填股数=只关注不持仓）
+    if confirmed:
+        st.write(f"**{confirmed['name']}**（{confirmed['symbol']}·{confirmed['market']}） 现价 {confirmed['price']:.2f}")
+        shares = st.number_input("股数（不填=只关注，不算真实持仓）", min_value=0.0, value=0.0, step=1.0, key="_wl_add_shares")
+        default_amount = shares * confirmed["price"]
+        amount = st.number_input("买入金额（默认按现价估算，可改成真实成交金额）", min_value=0.0, value=float(default_amount), step=1.0, key="_wl_add_amount")
+        ac1, ac2 = st.columns(2)
+        if ac1.button("确认添加", type="primary", use_container_width=True):
+            if shares > 0:
+                upsert_position(email, confirmed["symbol"], confirmed["name"], confirmed["market"], shares, amount)
+            else:
+                add_to_watchlist(email, confirmed["symbol"], confirmed["name"], market=confirmed["market"])
+            st.session_state.pop("_wl_add_confirmed", None)
+            st.rerun()
+        if ac2.button("返回重新搜索", use_container_width=True):
+            st.session_state.pop("_wl_add_confirmed", None)
+            st.rerun()
+        return
+
+    # 第一阶段：搜索定标的
     add_query = st.text_input("代码或名称（如 600519 / 腾讯 / 特斯拉）", key="_wl_add_query_dialog")
 
-    if st.button("添加", type="primary", use_container_width=True, key="_wl_add_btn_dialog") and add_query:
+    if st.button("下一步", type="primary", use_container_width=True, key="_wl_add_btn_dialog") and add_query:
         # 不再让用户先选市场——大多数公司名字只在一个市场上市，自动判断就够了
         # （比如"苹果"只有美股）。只有像"阿里巴巴"这种港股美股都有的名字，
         # 才需要用户自己选，见下面的候选按钮。
@@ -2424,7 +2504,9 @@ def _show_add_watchlist_dialog(email: str):
         if not candidates:
             st.error(f"没查到「{add_query}」——试试直接输代码，或者换个更常见的名称。")
         elif len(candidates) == 1:
-            if _do_add_watchlist(email, add_query, candidates[0]["market"]):
+            confirmed = _resolve_confirmed_symbol(email, add_query, candidates[0]["market"])
+            if confirmed:
+                st.session_state["_wl_add_confirmed"] = confirmed
                 st.rerun()
         else:
             st.session_state["_wl_add_candidates"] = candidates
@@ -2440,9 +2522,11 @@ def _show_add_watchlist_dialog(email: str):
                 f"{c['market_label']}（{c['symbol']}）", key=f"_wl_cand_{c['market']}_{c['symbol']}",
                 use_container_width=True,
             ):
-                if _do_add_watchlist(email, cq, c["market"]):
+                confirmed = _resolve_confirmed_symbol(email, cq, c["market"])
+                if confirmed:
                     st.session_state.pop("_wl_add_candidates", None)
                     st.session_state.pop("_wl_add_candidates_query", None)
+                    st.session_state["_wl_add_confirmed"] = confirmed
                     st.rerun()
 
     history = get_search_history(email, limit=10)
@@ -2465,7 +2549,7 @@ def _show_add_watchlist_dialog(email: str):
                     st.error(f"没查到「{h['query']}」的行情。")
 
 
-@st.dialog("自选股对比")
+@st.dialog("持仓对比")
 def _show_compare_dialog(watched: list):
     """build_multi_comparison（charts.py）之前写好了但一直没接界面——这里补上
     唯一缺的入口：勾选几只自选股，起点归一化到100画在一张图上，直接看
@@ -2478,10 +2562,10 @@ def _show_compare_dialog(watched: list):
     参数不一致就不显示旧图，逼用户重新点一次"生成对比图"。
     """
     if len(watched) < 2:
-        st.caption("自选股至少要有2只才能对比，先去加几只吧。")
+        st.caption("持仓至少要有2只才能对比，先去加几只吧。")
         return
 
-    st.caption("勾选2-6只自选股，起点统一归一化到100，直接对比这段时间谁涨得多。")
+    st.caption("勾选2-6只持仓，起点统一归一化到100，直接对比这段时间谁涨得多。")
     options = {f"{w['name']}（{w['symbol']}）": w for w in watched}
     labels = list(options.keys())
     picked_labels = st.multiselect(
@@ -2706,9 +2790,10 @@ else:
                     "包含资讯解读、财务摘要、对比大盘、技术面与消息面交叉验证，"
                     "以及一段综合评分（0-100，越高越偏多头证据、越低越偏空头证据，"
                     "评分依据是各条独立证据链是否互相印证，不是 AI 自己主观看好程度）。\n\n"
-                    "**自选股**\n\n"
-                    "右上角放大镜可以按代码或名称搜索添加，支持按市场筛选，"
-                    "卡片显示迷你走势图和实时涨跌，点卡片进详情页，点 × 删除。\n\n"
+                    "**持仓**\n\n"
+                    "右上角放大镜可以按代码或名称搜索添加，填股数/金额记为真实持仓"
+                    "（不填只是关注），卡片显示迷你走势图、实时涨跌和持仓浮盈，"
+                    "点卡片进详情页，点 × 卖出或取消关注。\n\n"
                     "**历史回看**\n\n"
                     "每次生成「综合数据分析」时会记录当时价格和 AI 判断的方向倾向，"
                     "满 7 天后自动补录当时的价格做对照，统计一个方向一致率——"
@@ -2777,7 +2862,7 @@ else:
         st.session_state.setdefault("_active_section", "首页")
 
         active_section = st.radio(
-            "分区", ["首页", "行情", "自选股"], key="_active_section", horizontal=True, label_visibility="collapsed",
+            "分区", ["首页", "行情", "持仓"], key="_active_section", horizontal=True, label_visibility="collapsed",
         )
 
         if active_section == "首页":
@@ -2806,7 +2891,7 @@ else:
             st.markdown("**热门板块**")
             _render_hot_sectors(mkt_code)
 
-        elif active_section == "自选股":
+        elif active_section == "持仓":
             _email = st.session_state["user_email"]
             watched = get_watchlist(_email)
 
@@ -2828,11 +2913,11 @@ else:
             # 自选股至少2只时才显示"对比"图标，跟搜索图标并排。
             if len(watched) >= 2:
                 title_col, compare_col, search_col = st.columns([10, 1, 1], vertical_alignment="center")
-                if compare_col.button("", icon=":material/show_chart:", key="wl_compare_icon", type="tertiary", help="对比自选股走势"):
+                if compare_col.button("", icon=":material/show_chart:", key="wl_compare_icon", type="tertiary", help="对比持仓走势"):
                     _show_compare_dialog(watched)
             else:
                 title_col, search_col = st.columns([11, 1], vertical_alignment="center")
-            if search_col.button("", icon=":material/search:", key="wl_search_icon", type="tertiary", help="添加自选股"):
+            if search_col.button("", icon=":material/search:", key="wl_search_icon", type="tertiary", help="添加持仓"):
                 _show_add_watchlist_dialog(_email)
 
             if not watched:
@@ -2841,7 +2926,7 @@ else:
                 with mid_empty:
                     st.markdown(
                         "<div style='text-align:center;color:var(--fa-muted);padding:20px 0 10px'>"
-                        "还没有关注任何股票<br>"
+                        "还没有持仓或关注的股票<br>"
                         "<span style='font-size:0.82rem'>点右上角的搜索按钮添加</span>"
                         "</div>",
                         unsafe_allow_html=True,
