@@ -16,6 +16,7 @@ Futu SDK 自带的 get_stock_filter（按市值/PE/盈利增长这些真实指�
 沪/深两个交易所分开筛选后合并成一个候选池（见 screen_candidates）。
 """
 
+import json
 import os
 
 # 必须在任何可能引入 tqdm/streamlit 的 import 之前设置，减少 exec 工具读输出时
@@ -520,6 +521,144 @@ def advise_positions() -> list[dict]:
     return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
 
 
+_PORTFOLIO_SYSTEM = """你是一位理性、保守的投研助理，正在给一位个人投资者做组合层面的整体
+体检——不是评价某一支股票，是评价"这些持仓摆在一起是否健康"，这是单支
+判断给不出的信息（单支判断只知道"这支该不该买"，不知道"买多了会不会
+太集中"）。
+
+要求：
+1. 只能用给定的真实数字做判断（集中度、币种/市场敞口、涨跌贡献、单支AI
+   判断），不能编造任何数字或消息，也不能重复一遍已经给你的数字，要在
+   数字基础上给出解读。
+2. 集中度：如果最大单一持仓或前三大合计占比明显过高（比如单支超过30%、
+   前三合计超过60%这个量级，具体门槛你自己判断但要讲清楚为什么觉得高/
+   不高），要明确指出这是风险，不能因为"这几支基本面都不错"就忽略集中度
+   本身的风险——基本面好和分散度不够是两个独立的问题。
+3. 必须给出具体的操作触发条件，覆盖"补仓/减仓/卖出/调整仓位"这几类，
+   每条都要写成"如果/当XXX，应该XXX"的形式，引用真实数字（仓位占比、
+   汇率点位、价格点位），不能是"注意风险""保持关注"这类空话。这是这份
+   报告存在的核心价值，不能潦草带过。
+4. 如果某支持仓单独判断（会在下面给你）已经是"卖出"，但这份组合分析
+   发现它占比很低不影响大局，或者占比很高值得优先处理，要明确点出这个
+   落差——这是组合层面才能提供的信息，单支判断本身看不到。
+5. 不要求"买入/卖出/持有/观望"四选一的单一结论——这是组合层面的多维度
+   建议，不是单支操作指令，允许同时提到多支持仓的不同处理方式。
+6. 最后必须附一句："仅供参考，不构成投资建议，请自行判断。"
+
+严格按以下格式输出（不要多余寒暄）：
+总体评估：<两三句话，这个组合现在处于什么状态，健康还是有明显问题>
+集中度风险：<引用真实的占比数字，明确指出是否过于集中>
+币种/市场敞口：<引用真实的敞口数字，指出有没有明显失衡>
+需要关注的持仓：<结合单支AI判断，点出哪些持仓值得优先处理，为什么>
+操作建议：<具体的补仓/减仓/卖出/调整仓位触发条件，每条一行，必须可执行>
+"""
+
+
+def advise_portfolio(email: str) -> dict | None:
+    """组合层面的整体体检——跟advise_positions（单支"要不要卖"判断）是两个
+    不同维度，这个函数看的是"这些持仓摆在一起是否健康"（集中度、币种/市场
+    敞口、跟单支判断的衔接），单支判断给不出这类信息。只有真实持仓
+    (shares>0)才计入，纯关注(shares=0)不算仓位、不参与集中度计算。
+
+    本地先把真实数字都算好再喂给AI（集中度/HHI、币种敞口、市场敞口、
+    浮盈浮亏），不让AI自己编数字，这是这个项目一贯的"技术面信号本地算"
+    原则的延伸。价格/汇率任一环节失败就跳过那一支并如实统计，不拿旧数字
+    硬凑。持仓不足2支时集中度分析意义不大（1支必然100%），直接跳过不
+    生成报告，不做没有信息量的判断。
+    """
+    positions = [p for p in tracker.get_positions(email) if (p.get("shares") or 0) > 0]
+    if len(positions) < 2:
+        return None
+
+    rows = []
+    skipped = 0
+    for p in positions:
+        symbol, market = p["symbol"], p.get("market", "A")
+        try:
+            price = ds.get_stock_realtime(symbol, market).get("最新价")
+        except Exception:
+            price = None
+        if not price:
+            skipped += 1
+            continue
+        shares, cost_total, currency = p["shares"], p.get("cost_total") or 0, p.get("currency", "CNY")
+        value_native = shares * price
+        value_cny, _note = ds.to_cny(value_native, currency)
+        cost_cny, _note2 = ds.to_cny(cost_total, currency)
+        if value_cny is None or cost_cny is None:
+            skipped += 1
+            continue
+        rows.append({
+            "symbol": symbol, "name": p.get("name", symbol), "market": market, "currency": currency,
+            "shares": shares, "price": price, "value_cny": value_cny, "cost_cny": cost_cny,
+            "pnl_pct": (value_cny - cost_cny) / cost_cny * 100 if cost_cny else 0,
+        })
+
+    if len(rows) < 2:
+        return None
+
+    total_value_cny = sum(r["value_cny"] for r in rows)
+    for r in rows:
+        r["weight_pct"] = r["value_cny"] / total_value_cny * 100 if total_value_cny else 0
+
+    rows.sort(key=lambda r: r["value_cny"], reverse=True)
+    hhi = sum((r["weight_pct"] / 100) ** 2 for r in rows)
+    top1_pct = rows[0]["weight_pct"]
+    top3_pct = sum(r["weight_pct"] for r in rows[:3])
+
+    by_currency: dict[str, float] = {}
+    by_market: dict[str, float] = {}
+    for r in rows:
+        by_currency[r["currency"]] = by_currency.get(r["currency"], 0) + r["weight_pct"]
+        by_market[r["market"]] = by_market.get(r["market"], 0) + r["weight_pct"]
+
+    single_advice = tracker.get_position_advice(email)
+
+    holdings_lines = []
+    for r in rows:
+        adv = single_advice.get(r["symbol"])
+        adv_action = adv.get("action") if adv else "（尚无单支判断）"
+        holdings_lines.append(
+            f"- {r['name']}（{r['symbol']}·{r['market']}）：占比{r['weight_pct']:.1f}%，"
+            f"浮动盈亏{r['pnl_pct']:+.1f}%，单支AI最近判断：{adv_action}"
+        )
+
+    user_content = (
+        f"组合总资产（折人民币）：¥{total_value_cny:,.0f}，共{len(rows)}支持仓"
+        + (f"（另有{skipped}支因行情/汇率暂时获取不到未计入）" if skipped else "") + "\n\n"
+        f"集中度：最大单一持仓占比{top1_pct:.1f}%，前三大合计占比{top3_pct:.1f}%，"
+        f"HHI指数{hhi:.3f}（0-1，越接近1越集中，0.15以下通常认为分散度尚可）\n\n"
+        f"币种敞口：{'，'.join(f'{c} {w:.1f}%' for c, w in sorted(by_currency.items(), key=lambda x: -x[1]))}\n"
+        f"市场敞口：{'，'.join(f'{m} {w:.1f}%' for m, w in sorted(by_market.items(), key=lambda x: -x[1]))}\n\n"
+        f"各持仓明细：\n" + "\n".join(holdings_lines)
+    )
+
+    resp = _client().chat.completions.create(
+        model=_MODEL,
+        messages=[
+            {"role": "system", "content": _PORTFOLIO_SYSTEM},
+            {"role": "user", "content": user_content},
+        ],
+        # 同judge_stock的踩坑记录：DeepSeek隐藏思考链跟正式输出共用预算。
+        # 这个prompt比judge_stock更复杂（5段结构化输出+要求可执行的触发
+        # 条件），实测8000时finish_reason=length、空内容，调到12000验证通过。
+        max_tokens=12000,
+        temperature=0.3,
+        stream=False,
+    )
+    text = resp.choices[0].message.content or ""
+    if not text.strip():
+        raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
+
+    holdings_json = json.dumps(
+        [{"symbol": r["symbol"], "name": r["name"], "weight_pct": round(r["weight_pct"], 2),
+          "value_cny": round(r["value_cny"], 2), "pnl_pct": round(r["pnl_pct"], 2)} for r in rows],
+        ensure_ascii=False,
+    )
+    tracker.log_portfolio_advice(email, total_value_cny, holdings_json, text)
+    return {"email": email, "total_value_cny": total_value_cny, "analysis_text": text}
+
+
 def _fmt_entry(e: dict) -> str:
     price = f"{e['price']:.2f}" if e.get("price") else "—"
     return f"【{e['action']}】{e['name']}（{e['symbol']}·{e['market']}） 现价{price}\n{e['fundamental_verdict']}\n"
@@ -538,6 +677,20 @@ def main():
             e["technical_signal"], e["action"], e["market"], e["name"], source="position",
         )
     print(f"（持仓判断：{len(position_results)} 只已更新，结果在网站持仓页面查看，不进本条简报正文）\n")
+
+    # 组合分析要覆盖所有注册用户（不是只给_EMAIL这一个固定账号算）——
+    # 用户明确要求过，跟上面单支持仓判断/screen候选只服务_EMAIL这个私人
+    # 脚本账号是两条不同的规则，不要改混了。每个用户各自一次AI调用，
+    # 互相独立，一个失败不影响其他人。
+    portfolio_emails = tracker.get_all_position_emails()
+    portfolio_done = 0
+    for pe in portfolio_emails:
+        try:
+            if advise_portfolio(pe):
+                portfolio_done += 1
+        except Exception as e:
+            print(f"（{pe} 的组合分析失败：{e}）")
+    print(f"（组合分析：{portfolio_done}/{len(portfolio_emails)} 个用户已更新，结果在网站持仓页面查看，不进本条简报正文）\n")
 
     data = screen_candidates()
     print(_pool_summary(data["us_pool"], data["us_all_count"], "美股"))

@@ -57,6 +57,7 @@ from tracker import (
     get_accuracy_trend, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_advice, get_advice_accuracy,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
+    get_latest_portfolio_advice,
 )
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
@@ -2246,6 +2247,52 @@ def _render_positions_donut(positions: list):
         st.caption(f"有 {skipped} 支持仓因行情/汇率暂时获取不到，未计入本图。")
 
 
+_PORTFOLIO_REANALYZE_COOLDOWN = 300  # 5分钟节流——组合分析是1次真实AI调用，不是纯本地计算，不能让用户点着玩
+
+
+def _render_portfolio_advice(email: str, positions: list):
+    """AI组合分析卡片——跟左边"今日收益"不同，这块不是实时刷新的（AI调用
+    有成本，不能每3秒跑一次），只读advisor.py（每工作日17:30跑）写进
+    portfolio_advice表的最近一次结果，另外给一个"立即重新分析"按钮供用户
+    现场触发（组合分析只有1次AI调用，跟单支判断动辄几十次不一样，现场跑
+    得起），加5分钟节流防止连续点击刷爆DeepSeek账户。
+    """
+    holding_count = sum(1 for p in positions if (p.get("shares") or 0) > 0)
+    advice = get_latest_portfolio_advice(email)
+
+    if advice:
+        created = advice["created_at"][:19].replace("T", " ")
+        st.caption(f"更新于 {created}（UTC）")
+        st.markdown(advice["analysis_text"])
+    else:
+        st.caption("AI 组合分析还没生成过。")
+
+    if holding_count < 2:
+        st.caption("持仓不足2支时集中度分析意义不大，暂不生成（1支必然占比100%）。")
+        return
+
+    throttle_key = f"_portfolio_advice_last_{email}"
+    elapsed = time.time() - st.session_state.get(throttle_key, 0)
+    if elapsed < _PORTFOLIO_REANALYZE_COOLDOWN:
+        st.button(f"请稍后再试（{int(_PORTFOLIO_REANALYZE_COOLDOWN - elapsed)}秒冷却）", disabled=True, use_container_width=True)
+        return
+
+    if st.button("立即重新分析", key=f"_portfolio_reanalyze_{email}", use_container_width=True):
+        st.session_state[throttle_key] = time.time()
+        with st.spinner("AI 正在分析组合……"):
+            try:
+                import advisor
+                advisor._load_secrets_into_env()
+                result = advisor.advise_portfolio(email)
+            except Exception as e:
+                st.error(f"分析失败：{e}")
+                return
+        if result is None:
+            st.warning("持仓不足2支，暂不生成组合分析。")
+        else:
+            st.rerun()
+
+
 @st.fragment(run_every=3)
 def _render_position_rows(position_items: list, _email: str):
     """持仓列表本体单独做成 fragment，价格/涨跌幅每3秒自己刷新，效仿长桥的
@@ -3138,7 +3185,6 @@ else:
                 with pnl_col:
                     _render_positions_today_pnl(positions)
                 with ai_col:
-                    # AI组合总评（阶段6）还没接，先占位——不显示假内容。
-                    st.caption("AI 组合分析即将上线。")
+                    _render_portfolio_advice(_email, positions)
 
 
