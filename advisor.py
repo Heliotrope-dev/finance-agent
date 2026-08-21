@@ -1,22 +1,23 @@
-"""投研顾问 —— 每日收盘后跑一遍自选股 + A股候选池，基本面为主、技术面辅助，
-给买卖参考。私有工具，不在 Streamlit 页面里，由 OpenClaw 的 stock-advisor cron
-每个工作日 17:30 触发，走 `venv/bin/python3 advisor.py`，结果打印到 stdout 给
-agent 读了转成微信消息。
+"""投研顾问 —— 每个工作日收盘后扫一遍港美股全市场，用 Futu 的股票筛选器按市值/
+估值/盈利增长挑出候选，基本面为主、技术面辅助，给买卖参考。私有工具，不在
+Streamlit 页面里，由 OpenClaw 的 stock-advisor cron 触发，走
+`venv/bin/python3 advisor.py`，结果打印到 stdout 给 agent 读了转成微信消息。
 
 跟 analysis.py 刻意"只讲事实不下结论"的公开页面定位不同——这里明确要给买卖
 参考，所以判断函数（judge_stock）单独新写，不改 analysis.py 里现成的那几个。
+
+第一版做过自选股+A股候选池，用户反馈不需要自选股这块，目标就是"扫几乎全部
+港美股，挑几个有潜力有机遇的股票参考"——data_sources.py 里原有的港美股"候选池"
+函数（get_index_top_movers 之类）靠的是人气榜/硬编码知名股名单，覆盖面完全
+撑不起"全市场筛选"这个目标，改用 Futu SDK 自带的 get_stock_filter（按市值/PE/
+盈利增长这些真实指标在全市场服务端筛选，不是本地维护的名单），实测 US 市场
+一次筛选能命中一千多只符合条件的股票，HK 三百多只，是真正的全市场覆盖。
 """
 
 import os
 
-# 必须在任何可能引入 tqdm/streamlit 的 import 之前设置：这个脚本是被 OpenClaw
-# 的 exec 工具起来跑的（不是人在终端里看着跑），实测发现 tqdm 的进度条（用 \r
-# 原地刷新，来自 akshare 内部某些批量接口）和 streamlit st.cache_data 在无
-# runtime 环境下打印的大量 WARNING（"No runtime found..."）混在一起，会让 exec
-# 工具那边的输出读取卡住——脚本自己早就跑完退出了，exec 那头却一直显示
-# "activeTool=exec ... blocked_tool_call"，直接 ssh 跑反而没有这个问题，怀疑
-# 是这些控制字符/刷屏内容干扰了 exec 工具的输出解析。禁用 tqdm、把 streamlit
-# 日志静音，从根上减少这类"看着像还在输出、其实没有"的噪音。
+# 必须在任何可能引入 tqdm/streamlit 的 import 之前设置，减少 exec 工具读输出时
+# 的噪音（详见下方 __main__ 里的说明）。
 os.environ.setdefault("TQDM_DISABLE", "1")
 import logging as _logging
 _logging.getLogger("streamlit").setLevel(_logging.ERROR)
@@ -25,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as _futures_wait
 from datetime import datetime, timedelta
 
-import akshare as ak
+import futu as ft
 import toml
 from openai import OpenAI
 
@@ -37,7 +38,11 @@ _EMAIL = "a13989358483@gmail.com"  # 私人工具，固定单用户，不做多�
 _SECRETS_PATH = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
 _MODEL = "deepseek-v4-flash"
 _DEEPSEEK_BASE = "https://api.deepseek.com"
-_CANDIDATE_CAP = 25  # A股全市场初筛候选上限，控制AI调用次数和运行时长
+
+# 每个市场各筛多少只候选交给AI判断——控制AI调用次数和运行时长，不是"候选只有
+# 这么多"，Futu那边符合条件的往往有几百上千只，这里只取排序后最靠前的一批。
+_US_CANDIDATE_CAP = 15
+_HK_CANDIDATE_CAP = 15
 
 
 def _load_secrets_into_env():
@@ -87,18 +92,81 @@ def _run_concurrent_with_deadline(items: list, fn, timeout: float, max_workers: 
     return results
 
 
-def is_a_share_trading_day(date=None) -> bool:
-    """用 akshare 官方交易日历接口判断，不手工维护节假日表——每年不用改代码，
-    这点比 OpenClaw 现成的 trading_cal.py（手工维护的年度节假日 set，只支持
-    HK/US）更省心，A 股节假日跟港股/美股也不是同一套。"""
-    d = date or datetime.now().date()
+def _futu_screen(market, quarter, cap_threshold: float, num: int) -> list[dict]:
+    """在 market 全市场范围内按"市值下限 + PE在合理区间(0-50，排除亏损股和
+    极端高估值) + 最近一期净利润同比增速>10%"筛选，按增速降序排，取前 num 只。
+    这三个字段是实测验证过 Futu 账号权限下能用的（VOLUME/换手率这类字段测试
+    时报"不支持该过滤字段"，权限或字段类型不对，没有踩着编）。市值字段/PE
+    走 SimpleFilter，净利润增速走 FinancialFilter——两者要分开建，混用会报
+    "不支持该过滤字段"（实测确认过）。
+
+    港股和A股的FinancialFilter不支持MOST_RECENT_QUARTER这个quarter选项（实测
+    报错"港股和A股不支持最近季报选项"），只能用美股。这里quarter参数由调用方
+    按市场传对应支持的枚举。
+
+    单独开一个短连接跑完就关，不复用app.py里_futu_call那条常驻worker路径——
+    这个脚本是独立进程，跟app.py是完全不同的Python进程，天然没法共享同一个
+    连接对象。
+    """
     try:
-        cal = ak.tool_trade_date_hist_sina()
-        trade_dates = set(cal["trade_date"].astype(str))
-        return d.isoformat() in trade_dates or d.strftime("%Y-%m-%d") in trade_dates
+        ctx = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
     except Exception:
-        # 接口挂了的兜底：至少排除周末，避免完全跑不起来
-        return d.weekday() < 5
+        return []
+    try:
+        f_cap = ft.SimpleFilter()
+        f_cap.stock_field = ft.StockField.MARKET_VAL
+        f_cap.filter_min = cap_threshold
+        f_cap.is_no_filter = False
+
+        f_pe = ft.SimpleFilter()
+        f_pe.stock_field = ft.StockField.PE_TTM
+        f_pe.filter_min = 0
+        f_pe.filter_max = 50
+        f_pe.is_no_filter = False
+
+        f_growth = ft.FinancialFilter()
+        f_growth.stock_field = ft.StockField.NET_PROFIX_GROWTH
+        f_growth.filter_min = 10
+        f_growth.is_no_filter = False
+        f_growth.quarter = quarter
+        f_growth.sort = ft.SortDir.DESCEND
+
+        ret, data = ctx.get_stock_filter(
+            market=market, filter_list=[f_cap, f_pe, f_growth], begin=0, num=num
+        )
+        if ret != ft.RET_OK:
+            return []
+        _last_page, _all_count, ret_list = data
+        market_code = "HK" if market == ft.Market.HK else "US"
+        return [
+            {"symbol": item.stock_code.split(".", 1)[-1], "name": item.stock_name, "market": market_code}
+            for item in ret_list
+        ]
+    except Exception:
+        return []
+    finally:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+
+
+def screen_hk_us_candidates() -> list[dict]:
+    us = _futu_screen(
+        ft.Market.US, ft.FinancialQuarter.MOST_RECENT_QUARTER,
+        cap_threshold=2_000_000_000, num=_US_CANDIDATE_CAP,
+    )
+    hk = _futu_screen(
+        ft.Market.HK, ft.FinancialQuarter.ANNUAL,
+        cap_threshold=5_000_000_000, num=_HK_CANDIDATE_CAP,
+    )
+    items = us + hk
+    if not items:
+        return []
+    results = _run_concurrent_with_deadline(
+        items, lambda it: _judge_one(it, "screen"), timeout=400, max_workers=5
+    )
+    return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
 
 
 _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是一位会自己做最终决策的
@@ -138,13 +206,10 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
             {"role": "system", "content": _JUDGE_SYSTEM},
             {"role": "user", "content": user_content},
         ],
-        # 800太小——DeepSeek隐藏的reasoning_content跟正式回答共用同一个max_tokens
-        # 预算，这个项目自己就反复踩过这个坑（README"AI分析概率性返回空内容"）。
-        # 调到4000（对齐项目里最复杂的cross_validate）后实测22条里仍有9条
-        # （41%）是空的——这个判断要求综合基本面+成长性+负债+估值+技术面五项
-        # 给结论，比cross_validate那种单一维度的总结更容易触发长思考链，4000
-        # 还是不够，调到8000。即便如此仍可能偶发失败，下面显式检查空内容
-        # 并当作失败处理（不写入一条假的"观望"记录），不能只靠加大数字碰运气。
+        # DeepSeek隐藏的reasoning_content跟正式回答共用同一个max_tokens预算，
+        # 这个项目反复踩过的老坑（README"AI分析概率性返回空内容"）。这个判断
+        # 要求综合基本面+成长性+负债+估值+技术面五项给结论，思考链容易变长，
+        # 实测4000时仍有41%概率返回空内容，调到8000。
         max_tokens=8000,
         temperature=0.3,
         stream=False,
@@ -197,7 +262,7 @@ def _news_summary_text(name: str) -> str:
 
 
 def _judge_one(item: dict, source: str) -> dict | None:
-    symbol, market, name = item["symbol"], item.get("market", "A"), item.get("name", "")
+    symbol, market, name = item["symbol"], item.get("market", "US"), item.get("name", "")
     try:
         price = ds.get_stock_realtime(symbol, market).get("最新价")
     except Exception:
@@ -216,62 +281,6 @@ def _judge_one(item: dict, source: str) -> dict | None:
     }
 
 
-def advise_watchlist() -> list[dict]:
-    items = tracker.get_watchlist(_EMAIL)
-    if not items:
-        return []
-    results = _run_concurrent_with_deadline(
-        items, lambda it: _judge_one(it, "watchlist"), timeout=180, max_workers=4
-    )
-    return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
-
-
-def _st_filtered(df):
-    if df is None or df.empty or "名称" not in df.columns:
-        return df
-    return df[~df["名称"].str.contains("ST", case=False, na=False)]
-
-
-def screen_market_candidates() -> list[dict]:
-    """v1 只做 A 股：热门板块成分股 + 涨停股池拼一个候选池，本地粗筛（剔除
-    ST/*ST）后限量再跑 AI，不对全市场几千只股票跑判断。港股/美股全市场筛选
-    留到 v2——现有全市场扫描函数覆盖面撑不起"挖掘潜力股"这个目标（见
-    data_sources.py 里 get_index_top_movers 的实现：HK 靠人气榜、US 靠硬编码
-    名单），等有更好的数据源再做。
-    """
-    candidates: dict[str, dict] = {}
-
-    try:
-        sectors = ds.get_hot_sectors("A", limit=8)
-        for _, row in sectors.iterrows():
-            try:
-                cons = _st_filtered(ds.get_sector_constituents("A", row["板块"], limit=6))
-                if cons is None:
-                    continue
-                for _, c in cons.iterrows():
-                    candidates[c["代码"]] = {"symbol": c["代码"], "name": c["名称"], "market": "A"}
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    try:
-        pool = _st_filtered(ds.get_limit_pool("up", limit=15))
-        if pool is not None:
-            for _, c in pool.iterrows():
-                candidates.setdefault(c["代码"], {"symbol": c["代码"], "name": c["名称"], "market": "A"})
-    except Exception:
-        pass
-
-    items = list(candidates.values())[:_CANDIDATE_CAP]
-    if not items:
-        return []
-    results = _run_concurrent_with_deadline(
-        items, lambda it: _judge_one(it, "screen"), timeout=400, max_workers=5
-    )
-    return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
-
-
 def _backfill_due_advice() -> int:
     due = tracker.get_due_for_advice_review(_EMAIL)
     if not due:
@@ -279,7 +288,7 @@ def _backfill_due_advice() -> int:
 
     def _fetch_price(row):
         try:
-            return ds.get_stock_realtime(row["symbol"], row.get("market", "A")).get("最新价")
+            return ds.get_stock_realtime(row["symbol"], row.get("market", "US")).get("最新价")
         except Exception:
             return None
 
@@ -301,44 +310,23 @@ def _fmt_entry(e: dict) -> str:
 def main():
     _load_secrets_into_env()
 
-    if not is_a_share_trading_day():
-        print("今天不是A股交易日，跳过本次投研建议。")
-        return
-
     backfilled = _backfill_due_advice()
     print(f"（已回填 {backfilled} 条到期的历史建议价格）\n")
 
-    watch_results = advise_watchlist()
-    screen_results = screen_market_candidates()
-
-    if not watch_results and not screen_results:
-        print("今天没有拿到任何有效判断（可能是数据源全部失败），本次不生成建议。")
+    results = screen_hk_us_candidates()
+    if not results:
+        print("今天没有拿到任何有效判断（可能是Futu筛选失败或数据源全部失败），本次不生成建议。")
         return
 
-    print("=" * 20 + " 自选股 " + "=" * 20)
-    if watch_results:
-        for e in watch_results:
-            print(_fmt_entry(e))
-            tracker.log_advice(
-                _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
-                e["technical_signal"], e["action"], e["market"], e["name"], source="watchlist",
-            )
-    else:
-        print("（自选股判断全部失败或列表为空）")
+    print(f"==================== 港美股潜力候选（共{len(results)}只） ====================")
+    for e in results:
+        print(_fmt_entry(e))
+        tracker.log_advice(
+            _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
+            e["technical_signal"], e["action"], e["market"], e["name"], source="screen",
+        )
 
-    print("=" * 20 + " A股潜力候选 " + "=" * 20)
-    if screen_results:
-        for e in screen_results:
-            print(_fmt_entry(e))
-            tracker.log_advice(
-                _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
-                e["technical_signal"], e["action"], e["market"], e["name"], source="screen",
-            )
-    else:
-        print("（候选池筛选全部失败或没有找到符合条件的候选）")
-
-    total = len(watch_results) + len(screen_results)
-    print(f"\n共 {total} 条判断已记录。以上为数据驱动的参考意见，不构成投资建议，请自行判断。")
+    print(f"\n共 {len(results)} 条判断已记录。以上为数据驱动的参考意见，不构成投资建议，请自行判断。")
 
 
 if __name__ == "__main__":
