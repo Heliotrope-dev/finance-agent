@@ -241,28 +241,44 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
 1. 先看基本面（盈利能力、营收/利润增长趋势、负债水平、估值是否处于合理区间），
    这是判断的主要依据。
 2. 技术面信号只作为买卖时机的辅助确认，不能单独作为理由。
-3. 结论必须是以下四选一：买入 / 卖出 / 持有 / 观望。基本面不过关的，即使技术面
+3. 必须把"价格所处的位置"当成独立于基本面之外的第三个判断维度，不能只看财报
+   数字好不好看就下结论——同样是"基本面好"，现价接近52周高点、或者相对52周
+   低点已经涨了几倍甚至几十倍，跟现价刚从低位启动，风险回报比完全不是一回事：
+   - 现价越接近52周高点、离低点涨幅越大，即使基本面确实改善，也要在理由里
+     明确指出"当前位置已经计入较多乐观预期，追高/继续买入的性价比在下降"，
+     基本面好不能作为无条件买入的理由——参考现实案例：一家基本面很强的公司
+     如果股价已经涨了很多，现在追高不代表还能赚钱。
+   - 现价越接近52周低点、离高点跌幅越大，即使基本面偏弱，也要考虑"是否存在
+     超跌反弹的可能性"，但必须明确这是"博反弹"性质的判断，跟"基本面驱动的
+     买入"要清楚分开说，不能混为一谈——参考现实案例：一家基本面很弱的公司
+     如果已经跌了很多，跌深了本身也可能带来技术性反弹机会，但这跟"这家公司
+     值得长期持有"是两码事。
+   - 价格位置数据是本地算好的真实52周高低点，不是编的，必须引用具体数字
+     （比如"现价较52周高点回撤X%"或"是52周低点的X倍"）。
+4. 结论必须是以下四选一：买入 / 卖出 / 持有 / 观望。基本面不过关的，即使技术面
    好看也不能给买入；数据不足以支撑判断时选观望，不要勉强给结论。
-4. 明确写清楚为什么——依据是财报里的哪一点、技术面的哪个信号，不要空泛地说
-   "综合来看""值得关注"这类没有信息量的话。
-5. 只能用给定的数据做判断，不能编造任何数字或消息。
-6. 最后必须附一句："仅供参考，不构成投资建议，请自行判断。"
+5. 明确写清楚为什么——依据是财报里的哪一点、技术面的哪个信号、价格位置怎么样，
+   不要空泛地说"综合来看""值得关注"这类没有信息量的话。
+6. 只能用给定的数据做判断，不能编造任何数字或消息。
+7. 最后必须附一句："仅供参考，不构成投资建议，请自行判断。"
 
 严格按以下格式输出（不要多余寒暄）：
 结论：[买入/卖出/持有/观望]
 置信度：[高/中/低]
 基本面：<一到两句话>
 技术面：<一句话>
-理由：<两到三句话，具体点出依据>
+价格位置：<一句话，引用52周高低点具体数字>
+理由：<两到三句话，具体点出依据，必须体现价格位置对结论的影响>
 """
 
 
 def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
-                 technical_summary: str, news_summary: str) -> dict:
+                 technical_summary: str, news_summary: str, position_summary: str = "") -> dict:
     user_content = (
         f"股票：{name}（{symbol}，{market}股）\n\n"
         f"财务摘要：\n{financial_summary or '（暂无财务数据）'}\n\n"
         f"技术面信号：{technical_summary or '（数据不足）'}\n\n"
+        f"价格位置（52周区间）：{position_summary or '（数据不足）'}\n\n"
         f"近期新闻：\n{news_summary or '（暂无相关新闻）'}"
     )
     resp = _client().chat.completions.create(
@@ -326,6 +342,51 @@ def _news_summary_text(name: str) -> str:
         return ""
 
 
+def _price_position_text(symbol: str, market: str) -> str:
+    """现价在52周区间里处于什么位置——这是原来这套判断完全缺失的一环：
+    基本面数据只回答"公司好不好"，不回答"现在这个价格有没有把好消息/坏消息
+    过度定价"。用户举的例子很典型：英伟达基本面很强但如果已经涨了很多，
+    追高不一定赚钱；Beyond Meat基本面很弱但跌得足够多也可能有超跌反弹机会。
+    这个函数把"离52周高点回撤多少、比52周低点涨了多少倍"这两个客观数字算
+    出来，明确喂给AI，逼它把"价格位置"当成独立于基本面之外的第三个判断维度，
+    不能光看财报数字好看就无脑给买入。
+
+    单独开一个短连接查get_market_snapshot——跟_futu_screen_pool那个筛选连接
+    是分开的（那个只在screen_hk_us_candidates里开一次，这里是_judge_one并发
+    调用时按需查，各自独立开关不复用，避免跨线程共享同一个连接对象）。
+    """
+    try:
+        ctx = ft.OpenQuoteContext(host="127.0.0.1", port=11111)
+    except Exception:
+        return ""
+    try:
+        code = f"{market}.{symbol}"
+        ret, data = ctx.get_market_snapshot([code])
+        if ret != ft.RET_OK or data is None or data.empty:
+            return ""
+        row = data.iloc[0]
+        cur = row.get("last_price")
+        hi = row.get("highest52weeks_price")
+        lo = row.get("lowest52weeks_price")
+        if not cur or not hi or not lo or hi <= 0 or lo <= 0:
+            return ""
+        from_high_pct = (cur - hi) / hi * 100
+        from_low_x = cur / lo
+        percentile = (cur - lo) / (hi - lo) * 100 if hi > lo else 50
+        return (
+            f"现价{cur:.2f}，52周最高{hi:.2f}（较高点{from_high_pct:+.1f}%），"
+            f"52周最低{lo:.2f}（是低点的{from_low_x:.1f}倍），"
+            f"当前处于52周区间约{percentile:.0f}%分位（越接近100%越接近高点）。"
+        )
+    except Exception:
+        return ""
+    finally:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+
+
 def _judge_one(item: dict, source: str) -> dict | None:
     symbol, market, name = item["symbol"], item.get("market", "US"), item.get("name", "")
     try:
@@ -335,8 +396,9 @@ def _judge_one(item: dict, source: str) -> dict | None:
     fin = _financial_summary_text(symbol, market)
     tech = _technical_summary_text(symbol, market)
     news = _news_summary_text(name or symbol)
+    position = _price_position_text(symbol, market)
     try:
-        verdict = judge_stock(symbol, market, name, fin, tech, news)
+        verdict = judge_stock(symbol, market, name, fin, tech, news, position)
     except Exception as e:
         return {"symbol": symbol, "market": market, "name": name, "error": str(e)}
     return {
