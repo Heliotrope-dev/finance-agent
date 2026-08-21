@@ -54,7 +54,7 @@ from analysis import (
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
     get_accuracy_trend, add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
-    add_search_history, get_search_history,
+    add_search_history, get_search_history, get_latest_advice,
 )
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
@@ -1625,6 +1625,90 @@ def _render_home_map():
     _cv1.html(map_html, height=440)
 
 
+_ADVICE_ACTION_COLOR = {"买入": UP_COLOR, "卖出": DOWN_COLOR, "持有": NEUTRAL_COLOR, "观望": NEUTRAL_COLOR}
+_ADVICE_SECTIONS = ("结论", "置信度", "基本面", "技术面", "价格位置", "理由")
+
+
+def _parse_advice_text(text: str) -> dict:
+    """advisor.py 里 judge_stock() 的输出是固定格式的多段文本（结论/置信度/
+    基本面/技术面/价格位置/理由几段），这里按段名切开，首页卡片只挑"理由"
+    直接展示（信息量最高、篇幅可控），"基本面/技术面/价格位置"放进展开区，
+    不是把整段AI原文糊在首页上——那样篇幅太长，跟首页其它卡片（单行新闻）
+    的信息密度不一致。"""
+    parts: dict[str, str] = {}
+    text = text or ""
+    positions = []
+    for name in _ADVICE_SECTIONS:
+        idx = text.find(f"{name}：")
+        if idx == -1:
+            idx = text.find(f"{name}:")
+        if idx != -1:
+            positions.append((idx, name))
+    positions.sort()
+    for i, (idx, name) in enumerate(positions):
+        start = idx + len(name) + 1
+        end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+        parts[name] = text[start:end].strip()
+    return parts
+
+
+def _render_advice_section():
+    """首页"AI投研候选"——跟其它模块（世界地图/今日资讯）唯一的本质区别：
+    这里明确给买入/卖出/持有/观望结论，其它模块刻意"只摆事实不下结论"。
+    这个差异必须对访客说清楚，不能让人以为整个网站的调性突然变了。
+
+    只读advisor.py（私人cron脚本，工作日17:30跑一次）写进advice表的最近一次
+    结果，首页访问不现场重新跑——重新跑一次要几分钟、几十次AI调用，公开页面
+    每次访问都触发一遍完全不现实，也没必要（这类基本面判断一天一次足够新）。
+    """
+    st.markdown("**AI 投研候选**")
+    st.caption(
+        "跟本页其它模块不同：这里 AI 会给出买入/卖出/持有/观望的明确结论（其它模块只摆事实、"
+        "不下结论）。筛选逻辑是全市场按市值/估值/最近盈利增速做量化初筛，AI 基于真实财务数据+"
+        "技术面+52周价格位置做判断，仅供参考，不构成投资建议，请自行判断。"
+    )
+    try:
+        data = get_latest_advice(limit_per_market=3)
+    except Exception:
+        st.caption("候选数据暂时读取失败。")
+        return
+
+    if not data.get("run_date"):
+        st.caption("还没有生成过投研候选（每个工作日17:30自动更新一次）。")
+        return
+
+    st.caption(f"更新于 {data['run_date']}（每个工作日17:30自动更新）")
+
+    for market_label, market_key in (("美股", "US"), ("港股", "HK")):
+        picks = data.get(market_key) or []
+        if not picks:
+            continue
+        st.markdown(f"*{market_label}*")
+        cols = st.columns(len(picks))
+        for col, row in zip(cols, picks):
+            parts = _parse_advice_text(row.get("fundamental_verdict", ""))
+            action = row.get("action", "观望")
+            color = _ADVICE_ACTION_COLOR.get(action, NEUTRAL_COLOR)
+            price = row.get("price_at_advice")
+            price_text = f"{price:.2f}" if price else "—"
+            with col:
+                with st.container(border=True):
+                    st.markdown(
+                        f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+                        f"<span style='font-weight:700'>{_esc(row.get('name',''))}</span>"
+                        f"<span style='background:{color};color:#fff;border-radius:4px;padding:1px 8px;"
+                        f"font-size:0.8rem;font-weight:700'>{_esc(action)}</span></div>"
+                        f"<div style='font-size:0.75rem;color:var(--fa-muted)'>{_esc(row.get('symbol',''))} · 现价{price_text}"
+                        f"（置信度：{_esc(parts.get('置信度','—'))}）</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(f"<div style='margin-top:6px'>{_esc(parts.get('理由', ''))}</div>", unsafe_allow_html=True)
+                    with st.expander("基本面 / 技术面 / 价格位置"):
+                        for sec in ("基本面", "技术面", "价格位置"):
+                            if parts.get(sec):
+                                st.markdown(f"**{sec}**：{_esc(parts[sec])}")
+
+
 def _render_home_page():
     """首页——世界地图（几个常见指数的实时点位）+ 今日重磅资讯。
 
@@ -1635,6 +1719,9 @@ def _render_home_page():
     """
     st.markdown("**全球指数一览**")
     _render_home_map()
+
+    st.divider()
+    _render_advice_section()
 
     st.divider()
     st.markdown("**今日重磅消息**")

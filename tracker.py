@@ -392,6 +392,49 @@ def get_advice_accuracy(email: str) -> dict:
     return stats
 
 
+_ADVICE_ACTION_PRIORITY = {"买入": 0, "持有": 1, "观望": 2, "卖出": 3}
+
+
+def get_latest_advice(limit_per_market: int = 3) -> dict:
+    """给首页"投研候选"模块用：只读最近一次 advisor.py 跑出来的结果，不现场
+    重新跑（那一次要跑几分钟、几十次AI调用，公开首页每次访问都触发一遍
+    既慢又烧钱）。advice 表没有显式的"批次id"，用"最近一条记录所在的那个
+    自然日"当作一批——advisor.py 一天正常只跑一次，这个近似足够用；就算
+    同一天手动多跑了几次，也只是同一天的记录被合并当一批，不影响正确性。
+
+    只挑source='screen'的记录（这个表目前只有这一种来源，写死是为了以后
+    万一加别的来源时不用改这里的调用方）。按action优先级(买入>持有>观望>
+    卖出)排，跟advisor.py里_top_picks的逻辑保持一致——避免两处各写一套
+    排序规则将来跑偏。
+
+    返回 {"run_date": "YYYY-MM-DD"|None, "US": [...], "HK": [...]}，
+    run_date为None表示还没有任何历史记录（比如cron还没跑过第一次）。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        latest = c.execute(
+            "SELECT created_at FROM advice WHERE source = 'screen' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if latest is None:
+            return {"run_date": None, "US": [], "HK": []}
+        run_date = latest["created_at"][:10]
+        rows = c.execute(
+            "SELECT * FROM advice WHERE source = 'screen' AND created_at LIKE ? ORDER BY created_at",
+            (f"{run_date}%",),
+        ).fetchall()
+    rows = [dict(r) for r in rows]
+
+    result = {"run_date": run_date}
+    for market in ("US", "HK"):
+        pool = sorted(
+            (r for r in rows if r.get("market") == market),
+            key=lambda r: _ADVICE_ACTION_PRIORITY.get(r["action"], 9),
+        )
+        result[market] = pool[:limit_per_market]
+    return result
+
+
 def get_search_history(email: str, limit: int = 10) -> list[dict]:
     init_db()
     with closing(_conn()) as c:
