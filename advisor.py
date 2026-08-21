@@ -8,6 +8,19 @@ agent 读了转成微信消息。
 """
 
 import os
+
+# 必须在任何可能引入 tqdm/streamlit 的 import 之前设置：这个脚本是被 OpenClaw
+# 的 exec 工具起来跑的（不是人在终端里看着跑），实测发现 tqdm 的进度条（用 \r
+# 原地刷新，来自 akshare 内部某些批量接口）和 streamlit st.cache_data 在无
+# runtime 环境下打印的大量 WARNING（"No runtime found..."）混在一起，会让 exec
+# 工具那边的输出读取卡住——脚本自己早就跑完退出了，exec 那头却一直显示
+# "activeTool=exec ... blocked_tool_call"，直接 ssh 跑反而没有这个问题，怀疑
+# 是这些控制字符/刷屏内容干扰了 exec 工具的输出解析。禁用 tqdm、把 streamlit
+# 日志静音，从根上减少这类"看着像还在输出、其实没有"的噪音。
+os.environ.setdefault("TQDM_DISABLE", "1")
+import logging as _logging
+_logging.getLogger("streamlit").setLevel(_logging.ERROR)
+
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as _futures_wait
 from datetime import datetime, timedelta
