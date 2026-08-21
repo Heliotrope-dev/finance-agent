@@ -435,6 +435,28 @@ def get_latest_advice(limit_per_market: int = 3) -> dict:
     return result
 
 
+def get_watchlist_advice(email: str) -> dict:
+    """给自选股列表用：每支持仓股票最新的一条AI判断(source='watchlist')，
+    按symbol取最近一条——跟get_latest_advice(首页候选，全局只有一批"最近
+    一次")不同，这里每个symbol各自独立找"这支股票最近一次判断"，因为自选股
+    是逐支持续跟踪的，不是同一批筛选结果。返回{symbol: row}，没有判断过的
+    symbol不会出现在返回的dict里，调用方用.get(symbol)处理"还没判断过"。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            """
+            SELECT * FROM advice WHERE email = ? AND source = 'watchlist'
+            AND id IN (
+                SELECT MAX(id) FROM advice WHERE email = ? AND source = 'watchlist' GROUP BY symbol
+            )
+            """,
+            (email, email),
+        ).fetchall()
+        return {r["symbol"]: dict(r) for r in rows}
+
+
 def get_search_history(email: str, limit: int = 10) -> list[dict]:
     init_db()
     with closing(_conn()) as c:

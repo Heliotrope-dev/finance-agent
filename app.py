@@ -55,6 +55,7 @@ from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
     get_accuracy_trend, add_to_watchlist, remove_from_watchlist, is_in_watchlist, get_watchlist,
     add_search_history, get_search_history, get_latest_advice, get_advice_accuracy,
+    get_watchlist_advice,
 )
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
@@ -2251,6 +2252,14 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
     else:
         _rows_data = _collect_rows()
 
+    # AI持仓判断——只是本地SQLite读一次(不是每行都查、也不触发AI调用)，
+    # 这个fragment本身每3秒会重跑，一起刷新代价很小。数据来自advisor.py
+    # 每个工作日跑一次的持仓判断(holding=True的judge_stock)，不是现场生成。
+    try:
+        _advice_map = get_watchlist_advice(_email)
+    except Exception:
+        _advice_map = {}
+
     for item, item_market, symbol, wspot, closes in _rows_data:
         spark_color = "#999"
         if wspot and wspot.get("最新价") and wspot.get("昨收"):
@@ -2337,6 +2346,23 @@ def _render_watchlist_rows(watched_filtered: list, _email: str):
             )
             if del_col.button("×", key=f"wl_del_{symbol}", help="删除自选", type="tertiary"):
                 _confirm_delete_dialog(_email, symbol, item["name"])
+
+            adv = _advice_map.get(symbol)
+            if adv:
+                adv_action = adv.get("action", "观望")
+                adv_color = _ADVICE_ACTION_COLOR.get(adv_action, NEUTRAL_COLOR)
+                adv_parts = _parse_advice_text(adv.get("fundamental_verdict", ""))
+                with st.expander(f"AI持仓判断：{adv_action}（{adv.get('created_at','')[:10]}）"):
+                    st.markdown(
+                        f"<span style='background:{adv_color};color:#fff;border-radius:4px;padding:1px 8px;"
+                        f"font-size:0.8rem;font-weight:700'>{_esc(adv_action)}</span> "
+                        f"<span style='font-size:0.75rem;color:var(--fa-muted)'>置信度：{_esc(adv_parts.get('置信度','—'))}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(_esc(adv_parts.get("理由", "")))
+                    for sec in ("基本面", "技术面", "价格位置"):
+                        if adv_parts.get(sec):
+                            st.markdown(f"**{sec}**：{_esc(adv_parts[sec])}")
 
 
 @st.dialog("确认删除")
