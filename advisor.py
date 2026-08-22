@@ -933,16 +933,35 @@ def main():
     # 组合分析要覆盖所有注册用户（不是只给_EMAIL这一个固定账号算）——
     # 用户明确要求过，跟上面单支持仓判断/screen候选只服务_EMAIL这个私人
     # 脚本账号是两条不同的规则，不要改混了。每个用户各自一次AI调用，
-    # 互相独立，一个失败不影响其他人。
+    # 互相独立，一个失败不影响其他人。完整的组合分析文字依然只在网站看，
+    # 但_EMAIL（这个私人脚本自己的账号）的交易信号额外并进微信简报——
+    # 用户明确要求过"交易信号同步到Mac"，选的方案是并进微信推送（微信
+    # 本身在手机/Mac间自动同步，不用另外搭同步机制）。只给_EMAIL这一个
+    # 账号推，不能把别的用户的持仓信号也发进这条私人简报，会泄露别人的
+    # 真实持仓数据。
     portfolio_emails = tracker.get_all_position_emails()
     portfolio_done = 0
+    my_portfolio_result = None
     for pe in portfolio_emails:
         try:
-            if advise_portfolio(pe):
+            result = advise_portfolio(pe)
+            if result:
                 portfolio_done += 1
+                if pe == _EMAIL:
+                    my_portfolio_result = result
         except Exception as e:
             print(f"（{pe} 的组合分析失败：{e}）")
-    print(f"（组合分析：{portfolio_done}/{len(portfolio_emails)} 个用户已更新，结果在网站持仓页面查看，不进本条简报正文）\n")
+    print(f"（组合分析：{portfolio_done}/{len(portfolio_emails)} 个用户已更新，完整分析在网站持仓页面查看）\n")
+
+    if my_portfolio_result and my_portfolio_result.get("signals"):
+        action_signals = [s for s in my_portfolio_result["signals"] if s["action"] != "不动"]
+        print("==================== 持仓交易信号 ====================")
+        if action_signals:
+            for s in action_signals:
+                print(f"{s['name']}：{s['action']} {s['shares']:g}股 · 约¥{s['amount_cny']:,.0f}")
+            print("（仅供参考，需自己去券商手动下单，不会自动执行）\n")
+        else:
+            print("本次维持不动，没有需要操作的标的。\n")
 
     data = screen_candidates()
     print(_pool_summary(data["us_pool"], data["us_all_count"], "美股"))
