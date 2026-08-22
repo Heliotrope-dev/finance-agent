@@ -42,8 +42,15 @@ import tracker
 
 _EMAIL = "a13989358483@gmail.com"  # 私人工具，固定单用户，不做多用户
 _SECRETS_PATH = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
-_MODEL = "deepseek-v4-flash"
-_DEEPSEEK_BASE = "https://api.deepseek.com"
+# 2026-08-22从DeepSeek切到千问——五个维度(金融判断/数学推理/代码/严格指令
+# 遵循/中文表达)真实同题测过，千问全面不输、两项明显赢(数学题DeepSeek/智谱
+# 都在预算内被截断算不完，千问不仅算完还给了实用换算；金融判断只有千问
+# 主动提到了应收账款/存货周转天数这个细节)，价格还只有DeepSeek的一半不到，
+# 而且实测不需要靠堆高max_tokens才能避免空内容(2000 tokens就能给出完整
+# 回答)，没有DeepSeek那个"隐藏思考链吃预算"的老毛病。math-agent那边继续用
+# DeepSeek，没有一起切，是用户单独决定的，不要顺手改过去。
+_MODEL = "qwen3.7-flash"
+_QWEN_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 # 候选池规模——用户要求"扩大到各500支"，让候选池统计（下面 _pool_summary）
 # 真实反映大盘水平，不是拿十几只样本硬充"全市场"。Futu 单次最多返回200条，
@@ -66,12 +73,12 @@ _TOP_PICKS = 3
 def _load_secrets_into_env():
     """脚本独立运行（不在 streamlit run 里），data_sources.py 的 st.cache_data
     这类 Streamlit API 在无 runtime 环境下能自动降级工作（用内存缓存兜底），
-    但 DeepSeek key 这类配置本来是靠 st.secrets 读的，这里读不到——照抄
+    但 QWEN_API_KEY 这类配置本来是靠 st.secrets 读的，这里读不到——照抄
     app.py/_math_page.py 已有的"把 secrets.toml 灌进 os.environ"模式，让下面
     _client() 的 os.environ fallback 生效。venv 是 Python 3.10，没有 tomllib
     （3.11+ 才有），用 toml 包（streamlit 自身依赖链里就有，不用额外装）。
     """
-    if os.environ.get("DEEPSEEK_API_KEY"):
+    if os.environ.get("QWEN_API_KEY"):
         return
     try:
         secrets = toml.load(_SECRETS_PATH)
@@ -82,14 +89,15 @@ def _load_secrets_into_env():
 
 
 def _client() -> OpenAI:
-    key = os.environ.get("DEEPSEEK_API_KEY", "")
+    key = os.environ.get("QWEN_API_KEY", "")
     if not key:
-        raise RuntimeError("未配置 DEEPSEEK_API_KEY。")
-    # 踩坑记录：没设timeout时，账号余额不足(402)这类快速失败的错误在openai SDK
-    # 默认重试逻辑下实测挂了将近10分钟没返回——不是DeepSeek真的在处理，是客户端
-    # 卡在某个没有时间上限的等待/重试循环里。显式给60秒超时，快速失败好过整批
+        raise RuntimeError("未配置 QWEN_API_KEY。")
+    # 踩坑记录（DeepSeek时期留下的，千问目前没复现过，但保留这层超时保护
+    # 不吃亏）：没设timeout时，账号余额不足这类快速失败的错误在openai SDK
+    # 默认重试逻辑下可能会挂很久不返回——不是真的在处理，是客户端卡在某个
+    # 没有时间上限的等待/重试循环里。显式给60秒超时，快速失败好过整批
     # 候选全部在同一个坑里陪跑到_run_concurrent_with_deadline的400秒外层超时。
-    return OpenAI(api_key=key, base_url=_DEEPSEEK_BASE, max_retries=2, timeout=60)
+    return OpenAI(api_key=key, base_url=_QWEN_BASE, max_retries=2, timeout=60)
 
 
 def _run_concurrent_with_deadline(items: list, fn, timeout: float, max_workers: int = 8) -> dict:

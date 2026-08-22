@@ -1,12 +1,14 @@
-"""分析层 —— 用 DeepSeek 做"新闻 vs 财务数据"交叉验证，不直接下买卖结论。"""
+"""分析层 —— 用千问做"新闻 vs 财务数据"交叉验证，不直接下买卖结论。"""
 
 import os
 
 import streamlit as st
 from openai import OpenAI
 
-_DEEPSEEK_BASE = "https://api.deepseek.com"
-_MODEL = "deepseek-v4-flash"
+# 2026-08-22从DeepSeek切到千问——五个维度真实同题测过千问全面不输且更便宜，
+# 详细对比记录见advisor.py同一处改动的注释，这里不重复。
+_QWEN_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+_MODEL = "qwen3.7-flash"
 
 
 def get_secret(key: str) -> str:
@@ -17,10 +19,10 @@ def get_secret(key: str) -> str:
 
 
 def _client() -> OpenAI:
-    key = get_secret("DEEPSEEK_API_KEY")
+    key = get_secret("QWEN_API_KEY")
     if not key:
-        raise RuntimeError("未配置 DEEPSEEK_API_KEY。")
-    return OpenAI(api_key=key, base_url=_DEEPSEEK_BASE, max_retries=2)
+        raise RuntimeError("未配置 QWEN_API_KEY。")
+    return OpenAI(api_key=key, base_url=_QWEN_BASE, max_retries=2)
 
 
 def _stream_chat(system_prompt: str, user_content: str, max_tokens: int = 2000):
@@ -51,6 +53,14 @@ def _stream_chat(system_prompt: str, user_content: str, max_tokens: int = 2000):
         max_tokens=max_tokens,
     )
     for chunk in stream:
+        # 切到千问后实测发现的真实兼容性差异：DeepSeek的流式chunk里choices
+        # 从来不会是空列表，千问偶尔会发一个choices=[]的chunk（大概率是携带
+        # usage统计信息、不带实际内容的收尾chunk）——原来这里直接
+        # chunk.choices[0]会在这种chunk上抛IndexError，导致整个流式生成
+        # 中途崩溃、页面上的AI分析直接报错。空choices的chunk没有内容可
+        # 产出，跳过即可。
+        if not chunk.choices:
+            continue
         delta = chunk.choices[0].delta.content
         if delta:
             yield delta
