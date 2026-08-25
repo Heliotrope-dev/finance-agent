@@ -640,10 +640,42 @@ def _price_position_text(symbol: str, market: str) -> str:
     该函数docstring里2026-08-21的真实故障记录）——跟_futu_screen_pool的
     连接是分开的，_judge_one并发调用时各自独立开关，不跨线程共享连接对象。
     """
-    # Futu的get_market_snapshot要求带交易所前缀的代码(SH.600000/SZ.000858)，
+    # A股不走Futu——账号没有A股行情权限（跟_a_share_candidate_pool同一个
+    # 根因，2026-08-25实测确认），get_market_snapshot对A股代码必然返回
+    # 失败，之前这里静默return ""，导致A股候选的"价格位置"这一整个判断
+    # 维度长期系统性缺失：抽查当天真实judge结果发现，A股观望占比明显
+    # 高于港美股（97% vs 60%左右），逐条看理由文本，AI反复提到"缺失52周
+    # 高低点数据，无法判断价格位置"——不是AI瞎判，是这个数据洞客观上
+    # 让它没法给出比"观望"更有把握的结论。改用AkShare一年日线历史本地
+    # 算最高/最低，不依赖Futu权限。
+    if market == "A":
+        try:
+            end = datetime.now().strftime("%Y-%m-%d")
+            start = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+            hist = ds.get_stock_history(symbol, start, end, market="A")
+        except Exception:
+            hist = None
+        if hist is None or hist.empty or "最高" not in hist.columns or "最低" not in hist.columns:
+            return ""
+        hi = float(hist["最高"].max())
+        lo = float(hist["最低"].min())
+        cur = float(hist.sort_values(hist.columns[0]).iloc[-1]["收盘"]) if "收盘" in hist.columns else None
+        if not cur or not hi or not lo or hi <= 0 or lo <= 0:
+            return ""
+        from_high_pct = (cur - hi) / hi * 100
+        from_low_x = cur / lo
+        percentile = (cur - lo) / (hi - lo) * 100 if hi > lo else 50
+        return (
+            f"现价{cur:.2f}，52周最高{hi:.2f}（较高点{from_high_pct:+.1f}%），"
+            f"52周最低{lo:.2f}（是低点的{from_low_x:.1f}倍），"
+            f"当前处于52周区间约{percentile:.0f}%分位（越接近100%越接近高点）。"
+        )
+
+    # 港股/美股：Futu有正常行情权限，走原路径。
+    # get_market_snapshot要求带交易所前缀的代码(SH.600000/SZ.000858)，
     # 不接受项目里统一用的market_code"A"——按代码开头判断沪/深，
     # 跟data_sources.py _sina_symbol同一套"6/9开头沪市，其它深市"规则。
-    code_prefix = ("SH" if symbol.startswith(("6", "9")) else "SZ") if market == "A" else market
+    code_prefix = market
     code = f"{code_prefix}.{symbol}"
     result = _futu_call_with_timeout(lambda ctx: ctx.get_market_snapshot([code]), timeout=20)
     if result is None:
