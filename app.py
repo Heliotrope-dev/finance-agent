@@ -236,14 +236,12 @@ def _show_login_page():
     )
     _, mid, _ = st.columns([1, 2, 1])
     with mid:
-        # 游客模式：行情/详情页/AI分析/指数/热门板块/AI投研候选这些只读功能
-        # 不需要账号就能看——登录墙挡住的是"个人持仓"（需要一个身份来记
-        # 谁的仓位），不该连带把整个网站也一起锁住。访客点这个按钮直接
-        # 进站，不建账号、不留任何持久化数据。
-        if st.button("先随便看看，不登录", use_container_width=True, key="guest_enter"):
-            st.session_state["guest_mode"] = True
-            st.rerun()
-        st.caption("持仓管理等个人功能需要登录后使用")
+        # 2026-08-25：游客模式入口按用户要求关掉了，安全优先——下面
+        # guest_mode 相关的分支逻辑（第367行的登录墙判断、持仓/关注/AI分析
+        # 历史那几处 if not logged_in 的降级展示）都还留着，只是没有任何
+        # 入口能把 guest_mode 置成 True 了，全站恢复成"不登录什么都看不到"。
+        # 如果以后要重新开放访客浏览，把下面这个按钮加回来就行，不用重写
+        # 其它地方的判断逻辑。
         tab_l, tab_r = st.tabs(["登录", "注册"])
         with tab_l:
             _em = st.text_input("邮箱", key="li_email", placeholder="your@email.com")
