@@ -74,6 +74,16 @@ _US_CANDIDATE_CAP = 25
 _HK_CANDIDATE_CAP = 25
 _A_CANDIDATE_CAP = 25
 
+# 2026-08-25：用户要求"样本大"但又不想让运行时间跟着候选数量线性暴涨
+# （今天刚为了这个把cron超时从900s调到1500s）——加一层初筛：每个市场先
+# 拉一个大得多的候选池(_TRIAGE_POOL_SIZE)，只用财务摘要（不查技术面/
+# 新闻/价格位置，那三样才是真正耗时的部分）快速过一遍AI，一眼看出明显
+# 不行的直接筛掉，剩下的再截到原来的CANDIDATE_CAP走完整判断流程——
+# 完整判断这一步的规模没有变大，只是从"更大的池子里挑出来的更靠谱的
+# CANDIDATE_CAP支"，总耗时理论上只多出初筛这一层的开销（轻量、纯文本、
+# 不碰Futu）。
+_TRIAGE_POOL_SIZE = 100
+
 # 最终重点介绍几支——每个市场挑action优先级最高的几支详细展开理由+数据。
 _TOP_PICKS = 3
 
@@ -363,6 +373,68 @@ def _a_share_candidate_pool(target_count: int) -> tuple[list[dict], int]:
     return items[:target_count], len(items)
 
 
+_TRIAGE_SYSTEM = """你是投研初筛助理，任务是只凭财务摘要快速判断一支股票"值不值得
+花更多时间做深入分析"（深入分析包括技术面、新闻、52周价格位置、多空辩论，
+比这一步昂贵很多）。
+
+这一步的目的是筛掉一眼就能看出明显不行的，不是替代后面的完整判断——
+不确定的、看着有点意思但数据还不够的，一律放行进入深入分析，不要在这一步
+过度谨慎，宁可多放一些进去，也不要因为初筛太严把真正有潜力的标的筛没了。
+
+明显不值得深入分析的例子（不是穷举）：
+- 连续多期持续巨额亏损，且没有任何边际改善的迹象（毛利率/现金流都在恶化）
+- 财务数据缺失或异常到根本没法读出任何有效信息
+- 营收利润双双持续大幅下滑，找不到任何企稳信号
+
+严格按格式输出，不要多余的话：
+值得深入：[是/否]
+理由：<一句话，不超过30字>
+"""
+
+
+def _quick_triage(item: dict) -> dict:
+    """初筛单支——只查财务摘要（纯文本/AkShare，不碰Futu，天然快），
+    用主线模型走一次轻量调用。失败/超时按"放行"处理，不是按"筛掉"处理——
+    初筛机制本身出问题，不该连带损失掉这支股票被完整分析的机会，宁可
+    这一层失效退化成"不初筛"，也不要因为初筛环节的故障静默漏判。"""
+    symbol, market, name = item["symbol"], item.get("market", "US"), item.get("name", "")
+    try:
+        fin = _financial_summary_text(symbol, market)
+        if not fin:
+            return {**item, "_triage_pass": True}
+        resp = _client().chat.completions.create(
+            model=_MODEL,
+            messages=[
+                {"role": "system", "content": _TRIAGE_SYSTEM},
+                {"role": "user", "content": f"股票：{name}（{symbol}）\n\n财务摘要：\n{fin}"},
+            ],
+            max_tokens=150,
+            temperature=0.2,
+            stream=False,
+        )
+        text = resp.choices[0].message.content or ""
+        passed = "值得深入：是" in text or "值得深入:是" in text or ("否" not in text.split("\n", 1)[0])
+        return {**item, "_triage_pass": passed}
+    except Exception:
+        return {**item, "_triage_pass": True}
+
+
+def _triage_pool(pool: list[dict], keep_n: int) -> list[dict]:
+    """对一个市场的候选池跑初筛，返回通过初筛、且截到keep_n条的列表——
+    截断顺序沿用pool原本的顺序（按增速/热度降序排好的），初筛只做"去掉
+    明显不行的"，不改变排序逻辑本身。"""
+    if not pool:
+        return pool
+    results = _run_concurrent_with_deadline(pool, _quick_triage, timeout=180, max_workers=10)
+    # 没在results里出现的下标=这个位置的初筛调用整批超时被drop了，同样按
+    # "放行"处理（原始pool[i]本身，不是results里的值），跟_quick_triage
+    # 内部try/except那条一样的原则：初筛机制故障不该导致这支股票被静默
+    # 漏判，不能因为超时集合被排除在外就悄悄丢了。
+    passed = [results[i] if i in results else pool[i] for i in range(len(pool))
+              if results.get(i, {}).get("_triage_pass", True)]
+    return passed[:keep_n]
+
+
 _ACTION_PRIORITY = {"买入": 0, "持有": 1, "观望": 2, "卖出": 3}
 
 
@@ -387,9 +459,17 @@ def screen_candidates() -> dict:
         ft.Market.HK, ft.FinancialQuarter.ANNUAL, 5_000_000_000, _HK_POOL_TARGET
     )
     # A股不走Futu——账号没有A股行情权限，见_a_share_candidate_pool的docstring。
-    a_pool, a_all = _a_share_candidate_pool(_A_CANDIDATE_CAP)
+    a_pool, a_all = _a_share_candidate_pool(_TRIAGE_POOL_SIZE)
 
-    shortlist = us_pool[:_US_CANDIDATE_CAP] + hk_pool[:_HK_CANDIDATE_CAP] + a_pool[:_A_CANDIDATE_CAP]
+    # 初筛：每个市场先从大得多的池子（_TRIAGE_POOL_SIZE）里筛掉一眼不行的，
+    # 只用财务摘要、不碰Futu，三个市场各自独立筛、互不阻塞对方。筛完再截到
+    # 原来的CANDIDATE_CAP，交给下面昂贵的完整判断（技术面+新闻+价格位置）——
+    # 完整判断这一步的规模没变，总耗时只多出初筛这一层。
+    us_shortlist = _triage_pool(us_pool[:_TRIAGE_POOL_SIZE], _US_CANDIDATE_CAP)
+    hk_shortlist = _triage_pool(hk_pool[:_TRIAGE_POOL_SIZE], _HK_CANDIDATE_CAP)
+    a_shortlist = _triage_pool(a_pool, _A_CANDIDATE_CAP)
+
+    shortlist = us_shortlist + hk_shortlist + a_shortlist
     judged: list[dict] = []
     if shortlist:
         results = _run_concurrent_with_deadline(
