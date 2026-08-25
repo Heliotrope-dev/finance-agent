@@ -241,7 +241,17 @@ def _futu_screen_pool(market, quarter, cap_threshold: float, target_count: int) 
 
 def _pool_summary(pool: list[dict], all_count: int, label: str) -> str:
     """候选池的真实统计摘要——不是AI编的，直接从Futu返回的原始数据本地算，
-    跟这个项目"技术面信号本地算不靠AI编"的一贯做法一致。"""
+    跟这个项目"技术面信号本地算不靠AI编"的一贯做法一致。
+
+    A股不走这套（见_a_share_candidate_pool的docstring：账号没有A股行情
+    权限，候选来源也不是市值/PE/盈利增速的数值筛选），单独给一句如实的
+    说明，不能沿用下面这句"全市场符合筛选门槛"的措辞——那是港美股Futu
+    筛选的真实过程，A股照抄这句等于编了一个没发生过的筛选流程。
+    """
+    if label == "A股":
+        if not pool:
+            return "A股：本次没有拿到有效候选（涨停股池/热门板块数据源可能临时故障）。"
+        return f"A股：候选来自今日涨停股池+热门板块成分股（已剔除ST），共 {len(pool)} 只——不同于港美股的市值/PE/盈利增速数值预筛（Futu账号无A股行情权限），基本面判断交给AI逐支读取真实财报后给出，详见代码注释。"
     if not pool:
         return f"{label}：本次没有拿到有效候选（Futu筛选失败或无符合条件的股票）。"
     pes = sorted(p["pe_ttm"] for p in pool if p.get("pe_ttm"))
@@ -255,6 +265,70 @@ def _pool_summary(pool: list[dict], all_count: int, label: str) -> str:
     if cap_med:
         parts.append(f"市值中位数约{cap_med / 1e8:.0f}亿")
     return "，".join(parts) + "。"
+
+
+def _a_share_candidate_pool(target_count: int) -> tuple[list[dict], int]:
+    """A股候选池——不走_futu_screen_pool。2026-08-25实测发现连的Futu账号
+    没有A股行情权限（get_stock_filter对ft.Market.SH/SZ直接返回"A股市场
+    股票行情权限不足"），screen_candidates()里这部分之前一直静默失败返回
+    空池子，首页A股Top3从来没真正出过数据——跟README"值得一提的踩坑"里
+    记录的"公式检索静默退化"是同一类问题，又中了一次。
+
+    换用AkShare，但不是简单换个数据源做同样的市值/PE/盈利增速数值筛选：
+    ak.stock_zh_a_spot_em()（全市场几千只股票快照）现场实测直接被远端
+    reset连接失败，而且get_index_top_movers的踩坑记录里写过这个接口
+    "之前用过、实测单次要接近2分钟"，项目里早就为了这个原因弃用了它。
+    改用项目里已经验证过快且稳定的两个数据源做候选发现（涨停股池+热门
+    板块成分股，跟get_index_top_movers的A股实现同源）：涨停股是今天最强
+    的动量信号，热门板块成分股补充题材多样性，避免候选全扎堆同一题材。
+    不做PE/市值预筛——基本面判断交给后面AI阶段：_judge_one会调
+    _financial_summary_text读真实财报文本喂给AI，跟这份候选列表要不要
+    带pe_ttm/market_val无关（判断逻辑本来就不依赖候选池自带这两个字段，
+    只用symbol/name/market）。
+    """
+    seen: set[str] = set()
+    items: list[dict] = []
+
+    def _is_st(name: str) -> bool:
+        return "ST" in name.upper()
+
+    try:
+        limit_df = ds.get_limit_pool("up", target_count)
+    except Exception:
+        limit_df = None
+    if limit_df is not None and not limit_df.empty:
+        for _, row in limit_df.iterrows():
+            code, name = str(row.get("代码", "")), str(row.get("名称", ""))
+            if not code or code in seen or _is_st(name):
+                continue
+            seen.add(code)
+            items.append({"symbol": code, "name": name, "market": "A"})
+
+    if len(items) < target_count:
+        try:
+            sectors = ds.get_hot_sectors("A", limit=5)
+        except Exception:
+            sectors = None
+        if sectors is not None and not sectors.empty:
+            for sector_name in sectors["板块"].tolist():
+                if len(items) >= target_count:
+                    break
+                try:
+                    cons = ds.get_sector_constituents("A", sector_name, limit=10)
+                except Exception:
+                    continue
+                if cons is None or cons.empty:
+                    continue
+                for _, row in cons.iterrows():
+                    if len(items) >= target_count:
+                        break
+                    code, name = str(row.get("代码", "")), str(row.get("名称", ""))
+                    if not code or code in seen or _is_st(name):
+                        continue
+                    seen.add(code)
+                    items.append({"symbol": code, "name": name, "market": "A"})
+
+    return items[:target_count], len(items)
 
 
 _ACTION_PRIORITY = {"买入": 0, "持有": 1, "观望": 2, "卖出": 3}
@@ -280,16 +354,8 @@ def screen_candidates() -> dict:
     hk_pool, hk_all = _futu_screen_pool(
         ft.Market.HK, ft.FinancialQuarter.ANNUAL, 5_000_000_000, _HK_POOL_TARGET
     )
-    # A股没有统一的Futu市场代码，沪/深分开筛(各250凑够500)再合并成一个池子。
-    # 市值门槛100亿人民币，量级上大致对应US的20亿美元/HK的50亿港元门槛
-    # （同一个"中大盘"筛选意图，按各市场估值/汇率量级换算，不是精确折算）。
-    sh_pool, sh_all = _futu_screen_pool(
-        ft.Market.SH, ft.FinancialQuarter.ANNUAL, 10_000_000_000, _A_POOL_TARGET // 2
-    )
-    sz_pool, sz_all = _futu_screen_pool(
-        ft.Market.SZ, ft.FinancialQuarter.ANNUAL, 10_000_000_000, _A_POOL_TARGET // 2
-    )
-    a_pool, a_all = sh_pool + sz_pool, sh_all + sz_all
+    # A股不走Futu——账号没有A股行情权限，见_a_share_candidate_pool的docstring。
+    a_pool, a_all = _a_share_candidate_pool(_A_CANDIDATE_CAP)
 
     shortlist = us_pool[:_US_CANDIDATE_CAP] + hk_pool[:_HK_CANDIDATE_CAP] + a_pool[:_A_CANDIDATE_CAP]
     judged: list[dict] = []
