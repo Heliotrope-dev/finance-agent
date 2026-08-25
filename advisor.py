@@ -40,7 +40,6 @@ import charts
 import data_sources as ds
 import tracker
 
-_EMAIL = "a13989358483@gmail.com"  # 私人工具，固定单用户，不做多用户
 _SECRETS_PATH = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
 # 2026-08-22从DeepSeek切到千问——五个维度(金融判断/数学推理/代码/严格指令
 # 遵循/中文表达)真实同题测过，千问全面不输、两项明显赢(数学题DeepSeek/智谱
@@ -86,6 +85,10 @@ def _load_secrets_into_env():
             os.environ.setdefault(k, str(v))
     except FileNotFoundError:
         pass
+
+
+_load_secrets_into_env()
+_EMAIL = os.environ.get("ADVISOR_EMAIL", "")  # 私人工具，固定单用户，不做多用户
 
 
 def _client() -> OpenAI:

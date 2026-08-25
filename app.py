@@ -70,7 +70,7 @@ from auth import (
 )
 from theme import UP_COLOR, DOWN_COLOR, NEUTRAL_COLOR
 
-for _k in ("SUPABASE_URL", "SUPABASE_KEY"):
+for _k in ("SUPABASE_URL", "SUPABASE_KEY", "ADVISOR_EMAIL"):
     if _k not in os.environ:
         try:
             os.environ[_k] = st.secrets[_k]
@@ -1634,7 +1634,7 @@ def _render_home_map():
     _cv1.html(map_html, height=440)
 
 
-_ADVICE_EMAIL = "a13989358483@gmail.com"  # advisor.py 私人脚本写advice表时用的固定账号，跟当前登录访客无关
+_ADVICE_EMAIL = os.environ.get("ADVISOR_EMAIL", "")  # advisor.py 私人脚本写advice表时用的固定账号，跟当前登录访客无关
 _ADVICE_ACTION_COLOR = {"买入": UP_COLOR, "卖出": DOWN_COLOR, "持有": NEUTRAL_COLOR, "观望": NEUTRAL_COLOR}
 _ADVICE_SECTIONS = ("结论", "置信度", "基本面", "技术面", "价格位置", "理由")
 
