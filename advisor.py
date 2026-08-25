@@ -70,9 +70,9 @@ _A_POOL_TARGET = 500  # A股按沪/深两个交易所分别筛，各250凑够500
 # 池子里最靠前的这些才交给AI逐一判断——控制AI调用次数和运行时长，不是对
 # 全部500只跑判断（500只全跑一遍AI单次要几十分钟，不现实也没必要）。因为
 # 池子本身已经按净利润增速降序排，取最前面这批本身就是"增长最快的一批"。
-_US_CANDIDATE_CAP = 20
-_HK_CANDIDATE_CAP = 20
-_A_CANDIDATE_CAP = 20
+_US_CANDIDATE_CAP = 25
+_HK_CANDIDATE_CAP = 25
+_A_CANDIDATE_CAP = 25
 
 # 最终重点介绍几支——每个市场挑action优先级最高的几支详细展开理由+数据。
 _TOP_PICKS = 3
@@ -248,8 +248,18 @@ def _futu_screen_pool(market, quarter, cap_threshold: float, target_count: int) 
         if not ret_list:
             break
         for item in ret_list:
+            symbol = item.stock_code.split(".", 1)[-1]
+            # 美股候选池排除非赞助存托凭证(unsponsored ADR)——2026-08-25真实
+            # 筛出过CWQXY(瑞典地产)、RKGRY(德国防务)、VONOY(德国房企)这类：
+            # 场外流动性差、买卖价差大，不是普通人开美股账户买得到/卖得掉的
+            # "美股"，纯数值筛选(市值/PE/增速)完全过滤不掉这类。OTC市场对
+            # 非赞助Level 1 ADR有个通用命名惯例——5位字母代码、以Y结尾，
+            # 不是100%精确(极少数正常股票码也长这样)，但对这类问题的命中率
+            # 很高，宁可漏判几个也不要把这类流动性陷阱当成推荐标的。
+            if market_code == "US" and len(symbol) == 5 and symbol.isalpha() and symbol.endswith("Y"):
+                continue
             items.append({
-                "symbol": item.stock_code.split(".", 1)[-1],
+                "symbol": symbol,
                 "name": item.stock_name,
                 "market": market_code,
                 "market_val": getattr(item, "market_val", None),
