@@ -56,7 +56,7 @@ from analysis import (
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
     get_accuracy_trend, add_watch_only, is_position_tracked,
-    add_search_history, get_search_history, get_latest_advice, get_advice_accuracy,
+    add_search_history, get_search_history, get_latest_leaderboard, get_advice_accuracy,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
 )
@@ -1699,7 +1699,7 @@ def _render_advice_section():
         unsafe_allow_html=True,
     )
     try:
-        data = get_latest_advice(limit_per_market=3)
+        data = get_latest_leaderboard(limit=10)
     except Exception:
         st.caption("候选数据暂时读取失败。")
         return
@@ -1743,42 +1743,49 @@ def _render_advice_section():
         else:
             st.caption("历史追踪：判断满7天后会自动回填实际价格算方向一致率，现在还没有满足条件的历史记录。")
 
-    for market_label, market_key in (("美股", "US"), ("港股", "HK"), ("A股", "A")):
-        picks = data.get(market_key) or []
-        if not picks:
-            continue
-        st.markdown(f"*{market_label}*")
-        cols = st.columns(len(picks))
-        for col, row in zip(cols, picks):
-            parts = _parse_advice_text(row.get("fundamental_verdict", ""))
-            action = row.get("action", "观望")
-            color = _ADVICE_ACTION_COLOR.get(action, NEUTRAL_COLOR)
-            price = row.get("price_at_advice")
-            price_text = f"{price:.2f}" if price else "—"
-            href = (
-                f"?open_symbol={urllib.parse.quote(row.get('symbol',''))}"
-                f"&open_market={urllib.parse.quote(market_key)}"
-                f"&open_name={urllib.parse.quote(row.get('name',''))}"
-                f"{_auth_qs()}"
+    # 2026-08-25从"每个市场固定Top3"改成三市场混排的综合得分排行榜——用户
+    # 明确要求数量不用锁死、好的自然上榜、某个市场这次没有靠谱标的就不必
+    # 硬凑。单列纵向排布（不是并排的列），排行榜这种"有先后名次"的内容
+    # 天然适合从上到下读，并排列反而弱化了排名信息。
+    _market_label = {"US": "美股", "HK": "港股", "A": "A股"}
+    board = data.get("leaderboard") or []
+    if not board:
+        st.caption("这一批还没有可排名的结果。")
+        return
+    for rank, row in enumerate(board, 1):
+        market_key = row.get("market", "A")
+        parts = _parse_advice_text(row.get("fundamental_verdict", ""))
+        action = row.get("action", "观望")
+        color = _ADVICE_ACTION_COLOR.get(action, NEUTRAL_COLOR)
+        price = row.get("price_at_advice")
+        price_text = f"{price:.2f}" if price else "—"
+        score = row.get("score")
+        href = (
+            f"?open_symbol={urllib.parse.quote(row.get('symbol',''))}"
+            f"&open_market={urllib.parse.quote(market_key)}"
+            f"&open_name={urllib.parse.quote(row.get('name',''))}"
+            f"{_auth_qs()}"
+        )
+        with st.container(border=True):
+            st.markdown(
+                f"<a class='pos-card-link' href='{href}' target='_self'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+                f"<span style='font-weight:700'>#{rank} {_esc(row.get('name',''))}"
+                f"<span style='font-weight:400;color:var(--fa-muted);font-size:0.8rem'> · {_market_label.get(market_key, market_key)}</span></span>"
+                f"<span style='display:flex;align-items:center;gap:6px'>"
+                + (f"<span style='font-size:0.85rem;color:var(--fa-muted)'>{score}分</span>" if score is not None else "")
+                + f"<span style='background:{color};color:#fff;border-radius:4px;padding:1px 8px;"
+                f"font-size:0.8rem;font-weight:700'>{_esc(action)}</span></span></div>"
+                f"<div style='font-size:0.75rem;color:var(--fa-muted)'>{_esc(row.get('symbol',''))} · 现价{price_text}"
+                f"（置信度：{_esc(parts.get('置信度','—'))}）</div>"
+                f"<div style='margin-top:6px'>{_esc(parts.get('理由', ''))}</div>"
+                f"</a>",
+                unsafe_allow_html=True,
             )
-            with col:
-                with st.container(border=True):
-                    st.markdown(
-                        f"<a class='pos-card-link' href='{href}' target='_self'>"
-                        f"<div style='display:flex;justify-content:space-between;align-items:center'>"
-                        f"<span style='font-weight:700'>{_esc(row.get('name',''))}</span>"
-                        f"<span style='background:{color};color:#fff;border-radius:4px;padding:1px 8px;"
-                        f"font-size:0.8rem;font-weight:700'>{_esc(action)}</span></div>"
-                        f"<div style='font-size:0.75rem;color:var(--fa-muted)'>{_esc(row.get('symbol',''))} · 现价{price_text}"
-                        f"（置信度：{_esc(parts.get('置信度','—'))}）</div>"
-                        f"<div style='margin-top:6px'>{_esc(parts.get('理由', ''))}</div>"
-                        f"</a>",
-                        unsafe_allow_html=True,
-                    )
-                    with st.expander("基本面 / 技术面 / 价格位置"):
-                        for sec in ("基本面", "技术面", "价格位置"):
-                            if parts.get(sec):
-                                st.markdown(f"**{sec}**：{_esc(parts[sec])}")
+            with st.expander("基本面 / 技术面 / 价格位置"):
+                for sec in ("基本面", "技术面", "价格位置"):
+                    if parts.get(sec):
+                        st.markdown(f"**{sec}**：{_esc(parts[sec])}")
 
 
 def _render_home_page():

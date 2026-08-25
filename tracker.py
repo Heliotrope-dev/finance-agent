@@ -106,6 +106,10 @@ def init_db():
             )
             """
         )
+        # 老库升级：2026-08-25加的排行榜综合得分，之前建的库没有这一列。
+        _advice_cols = [r[1] for r in c.execute("PRAGMA table_info(advice)").fetchall()]
+        if "score" not in _advice_cols:
+            c.execute("ALTER TABLE advice ADD COLUMN score INTEGER")
 
         # positions：取代 watchlist 表的"持仓分析"数据模型。shares=0 表示"只
         # 关注不持仓"（详情页"关注"按钮走这个状态）。
@@ -551,16 +555,16 @@ def add_search_history(email: str, query: str, market: str = "A"):
 def log_advice(
     email: str, symbol: str, price_at_advice: float, fundamental_verdict: str,
     technical_signal: str, action: str = "观望", market: str = "A", name: str = "",
-    source: str = "position",
+    source: str = "position", score: int | None = None,
 ) -> int:
     init_db()
     with closing(_conn()) as c:
         cur = c.execute(
             "INSERT INTO advice (email, symbol, market, name, created_at, price_at_advice, "
-            "fundamental_verdict, technical_signal, action, source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "fundamental_verdict, technical_signal, action, source, score) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (email, symbol, market, name, datetime.now(timezone.utc).isoformat(), price_at_advice,
-             fundamental_verdict, technical_signal, action, source),
+             fundamental_verdict, technical_signal, action, source, score),
         )
         c.commit()
         return cur.lastrowid
@@ -669,6 +673,34 @@ def get_latest_advice(limit_per_market: int = 3) -> dict:
         )
         result[market] = pool[:limit_per_market]
     return result
+
+
+def get_latest_leaderboard(limit: int = 10) -> dict:
+    """2026-08-25新增：三个市场混排的综合得分排行榜，取代"每个市场固定
+    前3"的老逻辑——用户明确要求"好的就上，不好不出现也没事"，不要求每个
+    市场凑数量。取同一批（最近一次跑advisor.py那天）里score不为空的记录，
+    按score降序排，跨市场统一取前limit条。
+
+    score为空的记录（AI没按格式输出综合得分，或者是老数据这一列本来就是
+    NULL）不参与排行榜——不能默认成0分，那等于把"没解析到分数"当成"最差
+    评级"，是两回事（这条判断本身可能是好的，只是分数解析失败）。这类记录
+    不会出现在榜单里，但原始判断文本还在数据库里，不是被丢弃了。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        latest = c.execute(
+            "SELECT created_at FROM advice WHERE source = 'screen' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if latest is None:
+            return {"run_date": None, "leaderboard": []}
+        run_date = latest["created_at"][:10]
+        rows = c.execute(
+            "SELECT * FROM advice WHERE source = 'screen' AND created_at LIKE ? AND score IS NOT NULL "
+            "ORDER BY score DESC LIMIT ?",
+            (f"{run_date}%", limit),
+        ).fetchall()
+    return {"run_date": run_date, "leaderboard": [dict(r) for r in rows]}
 
 
 def get_position_advice(email: str) -> dict:

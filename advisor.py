@@ -84,8 +84,9 @@ _A_CANDIDATE_CAP = 25
 # 不碰Futu）。
 _TRIAGE_POOL_SIZE = 100
 
-# 最终重点介绍几支——每个市场挑action优先级最高的几支详细展开理由+数据。
-_TOP_PICKS = 3
+# 2026-08-25：三市场混排的综合得分排行榜大小，取代原来"每个市场固定Top3"
+# 的_TOP_PICKS/_top_picks逻辑（已删除，不再有调用方）。
+_LEADERBOARD_SIZE = 10
 
 
 def _load_secrets_into_env():
@@ -425,7 +426,11 @@ def _triage_pool(pool: list[dict], keep_n: int) -> list[dict]:
     明显不行的"，不改变排序逻辑本身。"""
     if not pool:
         return pool
-    results = _run_concurrent_with_deadline(pool, _quick_triage, timeout=180, max_workers=10)
+    # 实测记录（2026-08-25）：100支候选、并发10、180秒超时——180秒打满，
+    # 只有约25支真正跑完初筛，其余全靠fail-open放行凑数，等于没真正筛。
+    # 瓶颈是_financial_summary_text这一步的网络请求（AkShare接口本身的
+    # 延迟/限流退避），不是AI调用本身。加大并发到20、超时放宽到300秒。
+    results = _run_concurrent_with_deadline(pool, _quick_triage, timeout=300, max_workers=20)
     # 没在results里出现的下标=这个位置的初筛调用整批超时被drop了，同样按
     # "放行"处理（原始pool[i]本身，不是results里的值），跟_quick_triage
     # 内部try/except那条一样的原则：初筛机制故障不该导致这支股票被静默
@@ -435,16 +440,14 @@ def _triage_pool(pool: list[dict], keep_n: int) -> list[dict]:
     return passed[:keep_n]
 
 
-_ACTION_PRIORITY = {"买入": 0, "持有": 1, "观望": 2, "卖出": 3}
-
-
-def _top_picks(judged: list[dict], market: str, n: int = _TOP_PICKS) -> list[dict]:
-    """每个市场挑action优先级最高的n支重点介绍——judged本身已经按增速降序
-    （候选池原始顺序）排列，list.sort是稳定排序，同优先级内保留这个顺序当
-    tie-break，不是随机挑的。"""
-    pool = [j for j in judged if j["market"] == market]
-    pool.sort(key=lambda j: _ACTION_PRIORITY.get(j["action"], 9))
-    return pool[:n]
+def _leaderboard(judged: list[dict], n: int = _LEADERBOARD_SIZE) -> list[dict]:
+    """2026-08-25新增：三个市场混排的综合得分排行榜，取代"每个市场固定
+    前3"——用户明确要求数量不用锁死、好的自然上榜、不好的不硬凑。只取有
+    score的条目参与排名（None的排不进去，不是judge_stock没给，就是解析
+    失败，不能当0分处理，见tracker.get_latest_leaderboard同一条注释）。"""
+    scored = [j for j in judged if j.get("score") is not None]
+    scored.sort(key=lambda j: j["score"], reverse=True)
+    return scored[:n]
 
 
 def screen_candidates() -> dict:
@@ -462,12 +465,18 @@ def screen_candidates() -> dict:
     a_pool, a_all = _a_share_candidate_pool(_TRIAGE_POOL_SIZE)
 
     # 初筛：每个市场先从大得多的池子（_TRIAGE_POOL_SIZE）里筛掉一眼不行的，
-    # 只用财务摘要、不碰Futu，三个市场各自独立筛、互不阻塞对方。筛完再截到
-    # 原来的CANDIDATE_CAP，交给下面昂贵的完整判断（技术面+新闻+价格位置）——
-    # 完整判断这一步的规模没变，总耗时只多出初筛这一层。
-    us_shortlist = _triage_pool(us_pool[:_TRIAGE_POOL_SIZE], _US_CANDIDATE_CAP)
-    hk_shortlist = _triage_pool(hk_pool[:_TRIAGE_POOL_SIZE], _HK_CANDIDATE_CAP)
-    a_shortlist = _triage_pool(a_pool, _A_CANDIDATE_CAP)
+    # 只用财务摘要、不碰Futu，筛完再截到原来的CANDIDATE_CAP，交给下面昂贵的
+    # 完整判断（技术面+新闻+价格位置）——完整判断这一步的规模没变。三个市场
+    # 各自的_triage_pool内部已经并发了，但三次调用本身原来是顺序跑的，等于
+    # 白白把三个市场的初筛时间加总——用线程分别起，三个市场的初筛并行进行，
+    # 总耗时约等于最慢那个市场的初筛时间，不是三个市场相加。
+    with ThreadPoolExecutor(max_workers=3) as _triage_ex:
+        _us_fut = _triage_ex.submit(_triage_pool, us_pool[:_TRIAGE_POOL_SIZE], _US_CANDIDATE_CAP)
+        _hk_fut = _triage_ex.submit(_triage_pool, hk_pool[:_TRIAGE_POOL_SIZE], _HK_CANDIDATE_CAP)
+        _a_fut = _triage_ex.submit(_triage_pool, a_pool, _A_CANDIDATE_CAP)
+        us_shortlist = _us_fut.result()
+        hk_shortlist = _hk_fut.result()
+        a_shortlist = _a_fut.result()
 
     shortlist = us_shortlist + hk_shortlist + a_shortlist
     judged: list[dict] = []
@@ -493,6 +502,19 @@ def _extract_action(text: str) -> str:
     改用正则，方括号/全半角冒号/前后空格都容错。"""
     m = re.search(r"结论[：:]\s*[\[【]?\s*(买入|卖出|持有|观望)\s*[\]】]?", text)
     return m.group(1) if m else "观望"
+
+
+def _extract_score(text: str) -> int | None:
+    """解析"综合得分：XX"这一行，跟_extract_action同一个套路——正则容错
+    方括号/全半角冒号/前后空格，解析不到返回None（调用方按"这条没有分数、
+    排行榜排最后"处理，不要默认成0分——0分意味着"不具备任何买入逻辑甚至
+    有卖出信号"，那是一个真实的判断结论，跟"没解析到分数"完全是两回事，
+    默认成0会把解析失败误判成最差评级，污染排行榜。"""
+    m = re.search(r"综合得分[：:]\s*(\d{1,3})", text)
+    if not m:
+        return None
+    score = int(m.group(1))
+    return max(0, min(100, score))
 
 
 _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是一位会自己做最终决策的
@@ -529,10 +551,26 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
    超过X%应考虑止损"），不能只说"控制仓位""注意风险"这类没有具体数字的空话——
    跟持仓判断要求给卖出触发条件是同一个道理，新买入同样需要一个明确的退出
    纪律，不是买了就不管。
-8. 最后必须附一句："仅供参考，不构成投资建议，请自行判断。"
+8. 除了四选一的结论，还要给一个0-100的综合得分，用来跨市场、跨股票统一
+   排名——这个分数不是简单套公式算出来的，是你综合基本面质量、价格位置是否
+   有安全边际、判断的确定性这三者之后给的一个整体印象分，但要符合这个锚点，
+   不同评分人给的分数才能放在一起比较：
+   - 90-100分：基本面扎实且有真实数据支撑（不是猜的），价格位置有明确安全
+     边际，判断确定性高——教科书级别的机会，这个区间应该很少给
+   - 70-89分：基本面不错，但价格位置只是合理、算不上便宜，或者存在一些
+     需要进一步验证的不确定性
+   - 50-69分：中性，基本面和价格位置里至少有一项明显打折扣，或者数据不够
+     支撑更高的信心
+   - 30-49分：明显偏弱，基本面或价格位置有硬伤，只是还没差到该卖出
+   - 0-29分：不具备任何买入逻辑，甚至存在卖出信号
+   分数要跟结论逻辑自洽（比如给"卖出"却打70分以上是不合理的），但不是
+   结论的简单换算——同样是"持有"，基本面扎实只是价格稍贵、和基本面本身
+   就有硬伤，分数应该明显不同。
+9. 最后必须附一句："仅供参考，不构成投资建议，请自行判断。"
 
 严格按以下格式输出（不要多余寒暄）：
 结论：[买入/卖出/持有/观望]
+综合得分：[0-100的整数]
 置信度：[高/中/低]
 基本面：<一到两句话，增长数字要点出是一次性还是结构性>
 技术面：<一句话>
@@ -547,15 +585,15 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
 _HOLDING_ADDENDUM = """
 
 补充要求（这是用户已经持有的持仓，不是新的候选）：
-8. 你的核心任务是回答"继续持有还是应该卖出"，不是"值不值得新买入"——判断
-   基调从"入场时机"切换成"仓位管理"。
-9. 结论如果是"持有"或"观望"，必须给出具体的卖出触发条件，二选一或都给：
-   - 价格触发：具体点位（比如"若跌破52周低点X"或"若涨到接近52周高点X附近
-     可考虑获利了结一部分"）。
-   - 信号触发：具体的基本面或技术面变化（比如"若下一季度营收增速跌破X%"
-     或"若MA5下穿MA20出现死叉"）。
-   不能只写"继续观察""注意风险"这类没有具体触发条件的空话。
-10. 结论是"卖出"时，理由要说清楚是基本面恶化、还是纯粹价格位置过高落袋为安，
+10. 你的核心任务是回答"继续持有还是应该卖出"，不是"值不值得新买入"——判断
+    基调从"入场时机"切换成"仓位管理"。
+11. 结论如果是"持有"或"观望"，必须给出具体的卖出触发条件，二选一或都给：
+    - 价格触发：具体点位（比如"若跌破52周低点X"或"若涨到接近52周高点X附近
+      可考虑获利了结一部分"）。
+    - 信号触发：具体的基本面或技术面变化（比如"若下一季度营收增速跌破X%"
+      或"若MA5下穿MA20出现死叉"）。
+    不能只写"继续观察""注意风险"这类没有具体触发条件的空话。
+12. 结论是"卖出"时，理由要说清楚是基本面恶化、还是纯粹价格位置过高落袋为安，
     两者性质不同，不能混着说。
 """
 
@@ -580,10 +618,10 @@ _BEAR_SYSTEM = """你是一位专业的空头研究员，正在为"这支股票�
 _DEBATE_JUDGE_ADDENDUM = """
 
 补充要求（这次你会看到两份针对同一支股票的对立论证，不是直接看原始数据）：
-11. 你会拿到"多头论证"和"空头论证"两段文字，都是基于同一份真实数据但立场
+13. 你会拿到"多头论证"和"空头论证"两段文字，都是基于同一份真实数据但立场
     相反写的。你的任务是权衡哪一边的论据更站得住脚，不能各打五十大板、和稀泥，
     必须明确表态更认同哪一边、具体是哪一条论据说服了你。
-12. 被你否决的那一方如果有合理的点（比如空头指出的风险确实存在，只是你认为
+14. 被你否决的那一方如果有合理的点（比如空头指出的风险确实存在，只是你认为
     不足以推翻买入逻辑），要在理由里明确提一句承认，不能假装对方论证不存在。
 """
 
@@ -660,7 +698,10 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
     if not text.strip():
         raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
     action = _extract_action(text)
-    return {"action": action, "fundamental_verdict": text, "bull_argument": bull_text, "bear_argument": bear_text}
+    return {
+        "action": action, "score": _extract_score(text), "fundamental_verdict": text,
+        "bull_argument": bull_text, "bear_argument": bear_text,
+    }
 
 
 def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
@@ -689,7 +730,7 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
         # 交给调用方(_judge_one)的except分支处理为失败，跳过这条不记录。
         raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
     action = _extract_action(text)
-    return {"action": action, "fundamental_verdict": text}
+    return {"action": action, "score": _extract_score(text), "fundamental_verdict": text}
 
 
 def _financial_summary_text(symbol: str, market: str) -> str:
@@ -820,7 +861,8 @@ def _judge_one(item: dict, source: str) -> dict | None:
         return {"symbol": symbol, "market": market, "name": name, "error": str(e)}
     return {
         "symbol": symbol, "market": market, "name": name, "price": price,
-        "action": verdict["action"], "fundamental_verdict": verdict["fundamental_verdict"],
+        "action": verdict["action"], "score": verdict.get("score"),
+        "fundamental_verdict": verdict["fundamental_verdict"],
         "technical_signal": tech, "source": source,
     }
 
@@ -1160,9 +1202,12 @@ def advise_portfolio(email: str) -> dict | None:
     return {"email": email, "total_value_cny": total_value_cny, "analysis_text": analysis_text, "signals": signals}
 
 
-def _fmt_entry(e: dict) -> str:
+def _fmt_entry(e: dict, rank: int | None = None) -> str:
     price = f"{e['price']:.2f}" if e.get("price") else "—"
-    return f"【{e['action']}】{e['name']}（{e['symbol']}·{e['market']}） 现价{price}\n{e['fundamental_verdict']}\n"
+    score = e.get("score")
+    score_text = f" · 综合得分{score}" if score is not None else ""
+    prefix = f"#{rank} " if rank is not None else ""
+    return f"{prefix}【{e['action']}】{e['name']}（{e['symbol']}·{e['market']}） 现价{price}{score_text}\n{e['fundamental_verdict']}\n"
 
 
 def main():
@@ -1176,6 +1221,7 @@ def main():
         tracker.log_advice(
             _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
             e["technical_signal"], e["action"], e["market"], e["name"], source="position",
+            score=e.get("score"),
         )
     print(f"（持仓判断：{len(position_results)} 只已更新，结果在网站持仓页面查看，不进本条简报正文）\n")
 
@@ -1227,23 +1273,15 @@ def main():
         tracker.log_advice(
             _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
             e["technical_signal"], e["action"], e["market"], e["name"], source="screen",
+            score=e.get("score"),
         )
 
-    us_top = _top_picks(judged, "US")
-    hk_top = _top_picks(judged, "HK")
-    a_top = _top_picks(judged, "A")
-
-    print(f"==================== 最值得关注：美股 Top {len(us_top)} ====================")
-    for e in us_top:
-        print(_fmt_entry(e))
-
-    print(f"==================== 最值得关注：港股 Top {len(hk_top)} ====================")
-    for e in hk_top:
-        print(_fmt_entry(e))
-
-    print(f"==================== 最值得关注：A股 Top {len(a_top)} ====================")
-    for e in a_top:
-        print(_fmt_entry(e))
+    # 三个市场混排的综合得分排行榜，取代原来"每个市场固定Top3"——好的自然
+    # 排上去，某个市场这次没有靠谱标的就不会被硬凑数量占榜。
+    board = _leaderboard(judged, _LEADERBOARD_SIZE)
+    print(f"==================== 综合得分排行榜 Top {len(board)}（三市场混排） ====================")
+    for i, e in enumerate(board, 1):
+        print(_fmt_entry(e, rank=i))
 
     print(f"（本次共对 {len(judged)} 只候选做了完整判断，全部记录进数据库。以上为数据驱动的参考意见，不构成投资建议，请自行判断。）")
 
