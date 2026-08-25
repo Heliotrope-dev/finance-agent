@@ -51,6 +51,15 @@ _SECRETS_PATH = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.t
 _MODEL = "qwen3.7-flash"
 _QWEN_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
+# 多空辩论跨供应商（2026-08-25）：用户要求辩论的多空双方不能是同一个模型
+# 自己扮演两个角色，换成阿里千问（多头）+ 智谱（空头）两家真正独立的供应商，
+# 可信度上比"同一个模型左右手互搏"更站得住——2026-08-22上面那条记录里
+# 智谱数学题会被截断算不完，但那是"独立完整解题"场景对严谨性要求高；
+# 这里只是写一段有立场的论证（不是最终判断，最终裁决还是回落到_client()/
+# _MODEL这条主线），达不到那个门槛的要求，用在这里没问题。
+_ZHIPU_MODEL = "glm-4-plus"
+_ZHIPU_BASE = "https://open.bigmodel.cn/api/paas/v4"
+
 # 候选池规模——用户要求"扩大到各500支"，让候选池统计（下面 _pool_summary）
 # 真实反映大盘水平，不是拿十几只样本硬充"全市场"。Futu 单次最多返回200条，
 # 超过要分页拉（见 _futu_screen_pool）。
@@ -101,6 +110,19 @@ def _client() -> OpenAI:
     # 没有时间上限的等待/重试循环里。显式给60秒超时，快速失败好过整批
     # 候选全部在同一个坑里陪跑到_run_concurrent_with_deadline的400秒外层超时。
     return OpenAI(api_key=key, base_url=_QWEN_BASE, max_retries=2, timeout=60)
+
+
+def _zhipu_client() -> OpenAI | None:
+    """空头辩论用的独立供应商客户端——没配key或初始化失败时返回None，
+    调用方（_fetch_stance）据此回落到_client()，不让整个辩论功能因为
+    一家供应商的配置问题而全部报废。"""
+    key = os.environ.get("ZHIPU_API_KEY", "")
+    if not key:
+        return None
+    try:
+        return OpenAI(api_key=key, base_url=_ZHIPU_BASE, max_retries=1, timeout=60)
+    except Exception:
+        return None
 
 
 def _run_concurrent_with_deadline(items: list, fn, timeout: float, max_workers: int = 8) -> dict:
@@ -487,9 +509,9 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
     看不到对方的论证，这才是真正各自独立的论据，不是一个抄另一个）。"""
     data_context = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary)
 
-    def _fetch_stance(system_prompt):
-        resp = _client().chat.completions.create(
-            model=_MODEL,
+    def _call_stance(client, model, system_prompt):
+        resp = client.chat.completions.create(
+            model=model,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": data_context}],
             max_tokens=4000,  # 论据比最终判断的六段结构化输出短得多，但同样的空内容坑保底调高一点
             temperature=0.5,  # 辩论双方要有观点区分度，比最终判断的0.3稍高
@@ -500,8 +522,28 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
             raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
         return text
 
+    def _fetch_stance(spec):
+        system_prompt, client, model, is_primary = spec
+        # 空头这边配置了智谱但调用失败（没配key/网络问题/超时）时，回落到
+        # 千问——保证辩论功能本身不会因为一家供应商的问题整个报废，退化成
+        # "两边都用千问"而不是直接跳过这支股票的判断。is_primary标记这一条
+        # 本来就是主线供应商，失败了没有更下游的兜底可回落，直接抛出。
+        if client is None:
+            if is_primary:
+                raise RuntimeError("主线供应商未配置")
+            return _call_stance(_client(), _MODEL, system_prompt)
+        try:
+            return _call_stance(client, model, system_prompt)
+        except Exception:
+            if is_primary:
+                raise
+            return _call_stance(_client(), _MODEL, system_prompt)
+
+    # 多头：阿里千问；空头：智谱——两家真正独立的供应商各自只看原始数据
+    # 单独出论证，互相看不到对方，不是同一个模型左右手互搏。
     stance_results = _run_concurrent_with_deadline(
-        [_BULL_SYSTEM, _BEAR_SYSTEM], _fetch_stance, timeout=60, max_workers=2
+        [(_BULL_SYSTEM, _client(), _MODEL, True), (_BEAR_SYSTEM, _zhipu_client(), _ZHIPU_MODEL, False)],
+        _fetch_stance, timeout=60, max_workers=2,
     )
     if 0 not in stance_results or 1 not in stance_results:
         raise RuntimeError("多空论证生成失败（可能是网络/AI调用超时），跳过这次辩论判断。")
