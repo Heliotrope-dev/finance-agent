@@ -2805,22 +2805,6 @@ def _show_add_position_dialog(email: str):
     # 第二阶段：标的已确认，填股数/金额（不填股数=只关注不持仓）
     if confirmed:
         st.write(f"**{confirmed['name']}**（{confirmed['symbol']}·{confirmed['market']}） 现价 {confirmed['price']:.2f}")
-        # 股数/金额双向联动——用户反馈"只记得买入金额，不知道股数"，改哪个
-        # 都按现价自动换算另一个，不用自己心算。on_change回调改的是对方的
-        # session_state，不会互相触发（Streamlit的on_change只在真实用户交互
-        # 时触发，程序改session_state不会递归触发），不用担心死循环。
-        def _sync_shares_from_amount():
-            c = st.session_state.get("_pos_add_confirmed")
-            amt = st.session_state.get("_pos_add_amount", 0.0)
-            if c and c.get("price"):
-                st.session_state["_pos_add_shares"] = round(amt / c["price"], 4)
-
-        def _sync_amount_from_shares():
-            c = st.session_state.get("_pos_add_confirmed")
-            sh = st.session_state.get("_pos_add_shares", 0.0)
-            if c and c.get("price"):
-                st.session_state["_pos_add_amount"] = round(sh * c["price"], 2)
-
         # 金额的币种是标的所在市场的原始币种，不是人民币——HK股买入金额是
         # 港币、US股是美元，upsert_position存的cost_total也是原始币种（跟
         # positions表的currency字段一致）。之前这里无条件写"¥"，港美股用户
@@ -2828,25 +2812,38 @@ def _show_add_position_dialog(email: str):
         # 全部跟着错且没法自动发现——这是真实的资金核算bug，不是措辞问题。
         _CURRENCY_LABEL = {"A": "¥", "HK": "HK$", "US": "US$"}
         cur_label = _CURRENCY_LABEL.get(confirmed["market"], "¥")
-        amount = st.number_input(
-            f"买入金额（{cur_label}，只记得金额就填这个，股数会自动按现价换算）",
-            min_value=0.0, value=0.0, step=100.0, key="_pos_add_amount",
-            on_change=_sync_shares_from_amount,
-        )
-        shares = st.number_input(
-            "股数（自动按金额÷现价换算，知道准确股数就手动改这里，金额会跟着换算回去）",
-            min_value=0.0, value=0.0, step=1.0, key="_pos_add_shares",
-            on_change=_sync_amount_from_shares,
-        )
-        ac1, ac2 = st.columns(2)
-        if ac1.button("确认添加", type="primary", use_container_width=True):
-            if shares > 0 and amount <= 0:
-                # 之前没这道校验——股数填了、金额被清成0或者没跟着联动更新时，
-                # upsert_position会往cost_total里累加0，加权均价被永久拉向0，
-                # 后续这笔仓位的浮盈会显示成离谱的暴涨，且没有任何报错提示
-                # 用户去修正，是个会悄悄污染历史成本数据的真实bug。
-                st.error("买入金额要大于0——股数和金额是联动的，如果手动改过股数，确认一下金额有没有跟着变。")
-            elif shares > 0:
+
+        # 真实故障记录（2026-08-25）：原来的实现是两个number_input在表单外，
+        # 靠on_change互相同步（改股数自动算金额、反之亦然），"确认添加"是
+        # 普通按钮。生产环境实测踩到过一次：用户填了股数、肉眼看到金额也
+        # 跟着换算出来了，点确认后却按shares<=0落到了add_watch_only()分支，
+        # 数据库里存进去的是shares=0/cost_total=0——按Streamlit的组件模型，
+        # 普通按钮点击和旁边number_input失焦提交是两条独立的前端事件，输入
+        # 又快又紧跟着点确认时，按钮这次rerun携带的可能还是上一次的旧值，
+        # 界面上"看起来算对了"不代表这一次rerun里Python这边真的拿到了新值。
+        # 改用st.form()：表单内部所有输入框的当前值，只在点提交按钮那一刻
+        # 一次性打包发送，不再有"哪个先到"的时序竞争。代价是表单内部件不支持
+        # on_change实时互算，所以放弃"边打字边看到另一个框跟着变"这个效果，
+        # 换成提交后台由代码统一按"填了哪个就用哪个算另一个"来处理。
+        with st.form("_pos_add_form", border=False):
+            st.caption("只填股数或金额其中一个就行，另一个提交后会自动按现价换算。")
+            amount = st.number_input(
+                f"买入金额（{cur_label}）", min_value=0.0, value=0.0, step=100.0, key="_pos_add_amount",
+            )
+            shares = st.number_input(
+                "股数", min_value=0.0, value=0.0, step=1.0, key="_pos_add_shares",
+            )
+            submitted = st.form_submit_button("确认添加", type="primary", use_container_width=True)
+
+        if submitted:
+            # 表单提交时shares/amount是这一刻真实、原子提交的值，不会再是
+            # 竞态下的旧值——这里只需要处理"只填了一个，另一个要补算"。
+            if shares <= 0 and amount > 0:
+                shares = round(amount / confirmed["price"], 4)
+            elif amount <= 0 and shares > 0:
+                amount = round(shares * confirmed["price"], 2)
+
+            if shares > 0:
                 upsert_position(email, confirmed["symbol"], confirmed["name"], confirmed["market"], shares, amount)
                 st.session_state.pop("_pos_add_confirmed", None)
                 st.rerun()
@@ -2854,7 +2851,7 @@ def _show_add_position_dialog(email: str):
                 add_watch_only(email, confirmed["symbol"], confirmed["name"], market=confirmed["market"])
                 st.session_state.pop("_pos_add_confirmed", None)
                 st.rerun()
-        if ac2.button("返回重新搜索", use_container_width=True):
+        if st.button("返回重新搜索", use_container_width=True):
             # 不调st.rerun()——dialog函数本身是@st.fragment，按钮点击已经会
             # 触发它自己重跑，弹窗留在原地。之前这里调了st.rerun()，会触发
             # 全脚本重跑，dialog判定为"这轮脚本没再调用打开它的那行代码"就
