@@ -230,12 +230,20 @@ def _show_login_page():
     st.markdown(
         "<div style='text-align:center;padding:60px 0 24px'>"
         "<div style='font-size:1.5rem;font-weight:600;margin:8px 0 4px'>Invest Agent</div>"
-        "<div style='font-size:0.85rem;color:var(--fa-muted)'>行情 + 财务 + 新闻交叉验证 · 登录后开始使用</div>"
+        "<div style='font-size:0.85rem;color:var(--fa-muted)'>行情 + 财务 + 新闻交叉验证</div>"
         "</div>",
         unsafe_allow_html=True,
     )
     _, mid, _ = st.columns([1, 2, 1])
     with mid:
+        # 游客模式：行情/详情页/AI分析/指数/热门板块/AI投研候选这些只读功能
+        # 不需要账号就能看——登录墙挡住的是"个人持仓"（需要一个身份来记
+        # 谁的仓位），不该连带把整个网站也一起锁住。访客点这个按钮直接
+        # 进站，不建账号、不留任何持久化数据。
+        if st.button("先随便看看，不登录", use_container_width=True, key="guest_enter"):
+            st.session_state["guest_mode"] = True
+            st.rerun()
+        st.caption("持仓管理等个人功能需要登录后使用")
         tab_l, tab_r = st.tabs(["登录", "注册"])
         with tab_l:
             _em = st.text_input("邮箱", key="li_email", placeholder="your@email.com")
@@ -356,7 +364,7 @@ if _stored_token and not st.session_state.get("logged_in"):
             height=1,
         )
 
-if not st.session_state.get("logged_in"):
+if not st.session_state.get("logged_in") and not st.session_state.get("guest_mode"):
     _show_login_page()
     st.stop()
 
@@ -924,10 +932,13 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
             # _display_name（专门为了新闻搜索命中率查BaoStock规范名）刻意
             # 不同——这里不需要那么讲究，直接用spot快照里的名称即可。
             log_name = spot.get("名称", symbol) if spot else symbol
-            log_analysis(
-                st.session_state["user_email"], symbol, float(current_price), ai_text,
-                verdict=verdict, market=market, name=log_name,
-            )
+            # 游客模式没有真实身份，不落库——"历史回看"/一致率追踪本来就是
+            # 挂在账号下的个人功能，游客只看这次分析结果，不生成历史记录。
+            if st.session_state.get("logged_in"):
+                log_analysis(
+                    st.session_state["user_email"], symbol, float(current_price), ai_text,
+                    verdict=verdict, market=market, name=log_name,
+                )
             st.session_state[mod_key] = {"ai_text": ai_text}
         else:
             st.markdown(st.session_state[mod_key]["ai_text"])
@@ -984,15 +995,18 @@ def _render_price_header(symbol: str, market: str):
     hcol2.metric("最低", f"{spot.get('最低', 0):.2f}")
     hcol3.metric("今开", f"{spot.get('今开', 0):.2f}")
 
-    _tracked_now = is_position_tracked(st.session_state["user_email"], symbol)
-    if _tracked_now:
-        if st.button("取消关注", key="pos_toggle"):
-            delete_position(st.session_state["user_email"], symbol)
-            st.rerun()
+    if not st.session_state.get("logged_in"):
+        st.caption("登录后可关注/管理个人持仓")
     else:
-        if st.button("关注", key="pos_toggle"):
-            add_watch_only(st.session_state["user_email"], symbol, spot.get("名称", symbol), market=market)
-            st.rerun()
+        _tracked_now = is_position_tracked(st.session_state["user_email"], symbol)
+        if _tracked_now:
+            if st.button("取消关注", key="pos_toggle"):
+                delete_position(st.session_state["user_email"], symbol)
+                st.rerun()
+        else:
+            if st.button("关注", key="pos_toggle"):
+                add_watch_only(st.session_state["user_email"], symbol, spot.get("名称", symbol), market=market)
+                st.rerun()
 
 
 @st.fragment(run_every=3)
@@ -3009,132 +3023,142 @@ elif st.session_state.get("_sector_detail_name"):
 else:
     with _page_slot.container():
         with st.sidebar:
+            if st.session_state.get("logged_in"):
+                _uemail = st.session_state.get("user_email", "")
+                _uemail_safe = _uemail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                st.markdown(f"<p style='font-size:0.8rem;color:var(--fa-muted)'>{_uemail_safe}</p>", unsafe_allow_html=True)
+                if st.button("退出登录", use_container_width=True):
+                    _tok = st.session_state.pop("_token", None)
+                    if _tok:
+                        _invalidate_token(_tok)
+                    try:
+                        del st.query_params["_auth"]
+                    except Exception:
+                        pass
+                    _cv1.html(
+                        '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");}catch(e){}</script>',
+                        height=1,
+                    )
+                    st.session_state["logged_in"] = False
+                    st.session_state.pop("user_email", None)
+                    st.rerun()
+            else:
+                st.markdown("<p style='font-size:0.8rem;color:var(--fa-muted)'>游客模式浏览中</p>", unsafe_allow_html=True)
+                if st.button("登录 / 注册", use_container_width=True):
+                    st.session_state["guest_mode"] = False
+                    st.rerun()
             _uemail = st.session_state.get("user_email", "")
-            _uemail_safe = _uemail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            st.markdown(f"<p style='font-size:0.8rem;color:var(--fa-muted)'>{_uemail_safe}</p>", unsafe_allow_html=True)
-            if st.button("退出登录", use_container_width=True):
-                _tok = st.session_state.pop("_token", None)
-                if _tok:
-                    _invalidate_token(_tok)
-                try:
-                    del st.query_params["_auth"]
-                except Exception:
-                    pass
-                _cv1.html(
-                    '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");}catch(e){}</script>',
-                    height=1,
-                )
-                st.session_state["logged_in"] = False
-                st.session_state.pop("user_email", None)
-                st.rerun()
 
             st.divider()
             with st.expander("历史回看"):
-                st.caption("每次点开个股「数据分析」时会记录当时价格和方向倾向，"
-                           "满7天后自动补上现在的价格做对照。仅供参考，不是投资建议，"
-                           "过去的方向一致率不代表未来表现。")
-                # get_due_for_review 带了 limit（默认20条），避免这个列表越攒越多；
-                # st.expander 内部代码不论展没展开每次渲染都会跑，之前是for循环
-                # 串行发请求，跟持仓列表(_render_position_rows)遇到过同样的
-                # "越用越慢"问题，这里改成同样用线程池并发取价。
-                #
-                # 排查页面切换卡顿时实测到的真实数据：这一段本身不在任何
-                # @st.fragment里，是主脚本的一部分——意味着"首页/行情/持仓"
-                # 之间随便切一次分区（st.radio触发的是整页rerun，不是fragment
-                # 局部rerun）都会完整重新跑一遍这段代码。用脚本直接测过
-                # get_due_for_review+并发get_stock_realtime这一整套（3条到期
-                # 记录，其中1条港股）：Futu连接需要重连时单批次实测耗时接近
-                # 10秒，即使不需要重连、单纯是行情源本身（腾讯行情接口）的
-                # 网络往返也有1-2秒量级。而这个"到期补录"操作本质是天级颗粒度
-                # 的需求（min_age_days=7），没有必要在用户每次点一下分区切换
-                # 按钮时都重新触发一遍网络请求——这里加一个基于session_state的
-                # 时间节流，同一个会话内最多每 _REVIEW_RECHECK_INTERVAL 秒
-                # 真正跑一次这段逻辑，中间的重新渲染直接跳过、不发请求，
-                # 不影响"7天后自动补录"的功能本身（真正到期的记录不会因为
-                # 跳过几次检查就再也补不上，下一次节流窗口打开时照样会补）。
-                _REVIEW_RECHECK_INTERVAL = 60
-                _review_checked_at = st.session_state.get("_review_checked_at", 0.0)
-                if time.time() - _review_checked_at > _REVIEW_RECHECK_INTERVAL:
-                    due = get_due_for_review(_uemail, min_age_days=7)
-
-                    def _fetch_review_price(item):
-                        try:
-                            spot = get_stock_realtime(item["symbol"], market=item.get("market", "A"))
-                            return item, spot
-                        except Exception:
-                            return item, None
-
-                    if due:
-                        # 实测过：即使节流到每60秒最多跑一次，会话里"第一次"渲染
-                        # 这个分区时还是要真跑一遍——用真实账号数据测过，5条到期
-                        # 记录里有1条港股要等Futu，单这一条就能吃掉10秒左右
-                        # （Futu没连上/需要重连时）。统一截止时间/避免线程堆积的
-                        # 实现细节抽到了共享的_run_concurrent_with_deadline（见它
-                        # 的docstring——那里记录了同一个教训：per-future timeout
-                        # 会被排队顺序绕过，必须用整批统一的deadline），不影响
-                        # "到期没补上的下一个60秒窗口重试"这个原有行为。
-                        review_results = _run_concurrent_with_deadline(due, _fetch_review_price, timeout=3)
-                        for item, spot in review_results.values():
-                            if spot and spot.get("最新价"):
-                                try:
-                                    record_review(item["id"], float(spot["最新价"]))
-                                except Exception:
-                                    continue
-                    st.session_state["_review_checked_at"] = time.time()
-
-                stats = get_accuracy_stats(_uemail)
-                if stats["总数"] > 0:
-                    st.metric(
-                        "方向一致率", f"{stats['一致率']:.0f}%",
-                        help=f"过去 {stats['总数']} 次有方向判断的分析里，{stats['一致数']} 次跟事后价格走势一致",
-                    )
-                    # 按方向/按市场拆开看——笼统一个数字看不出"偏多判断准还是
-                    # 偏空判断准""在哪个市场准"，样本太少（<3条）的分组百分比
-                    # 波动大、参考意义不大，只展示总数够的分组，不硬凑显示。
-                    _breakdown_cols = st.columns(2)
-                    with _breakdown_cols[0]:
-                        st.caption("按方向")
-                        for _v, _s in stats.get("按方向", {}).items():
-                            if _s["总数"] >= 3:
-                                st.markdown(f"{_v}：{_s['一致率']:.0f}%（{_s['总数']}次）")
-                            elif _s["总数"] > 0:
-                                st.markdown(f"{_v}：样本太少（{_s['总数']}次），暂不统计")
-                    with _breakdown_cols[1]:
-                        st.caption("按市场")
-                        _market_label = {"A": "A股", "HK": "港股", "US": "美股"}
-                        for _m, _s in stats.get("按市场", {}).items():
-                            if _s["总数"] >= 3:
-                                st.markdown(f"{_market_label.get(_m, _m)}：{_s['一致率']:.0f}%（{_s['总数']}次）")
-                            elif _s["总数"] > 0:
-                                st.markdown(f"{_market_label.get(_m, _m)}：样本太少（{_s['总数']}次），暂不统计")
-
-                    # 之前这里只有上面那一个孤零零的st.metric——一个总体百分比
-                    # 看不出"这个数字最近是在变好还是变差"。get_accuracy_trend
-                    # 按时间顺序用滑动窗口（默认最近5次）算出一串区间一致率，
-                    # 拼成一条趋势线；样本不够时（不到window+1条）trend是空的，
-                    # 直接不画图，不硬凑一两个点出来意义不大。
-                    _trend = get_accuracy_trend(_uemail, window=5)
-                    if _trend:
-                        st.caption("最近5次一滑动窗口的一致率趋势")
-                        _trend_df = pd.DataFrame(_trend).set_index("日期")[["一致率"]]
-                        st.line_chart(_trend_df, height=160)
+                if not st.session_state.get("logged_in"):
+                    st.caption("登录后可查看个人分析历史与方向一致率追踪。")
                 else:
-                    st.caption("还没有满7天可回看的记录。")
+                    st.caption("每次点开个股「数据分析」时会记录当时价格和方向倾向，"
+                               "满7天后自动补上现在的价格做对照。仅供参考，不是投资建议，"
+                               "过去的方向一致率不代表未来表现。")
+                    # get_due_for_review 带了 limit（默认20条），避免这个列表越攒越多；
+                    # st.expander 内部代码不论展没展开每次渲染都会跑，之前是for循环
+                    # 串行发请求，跟持仓列表(_render_position_rows)遇到过同样的
+                    # "越用越慢"问题，这里改成同样用线程池并发取价。
+                    #
+                    # 排查页面切换卡顿时实测到的真实数据：这一段本身不在任何
+                    # @st.fragment里，是主脚本的一部分——意味着"首页/行情/持仓"
+                    # 之间随便切一次分区（st.radio触发的是整页rerun，不是fragment
+                    # 局部rerun）都会完整重新跑一遍这段代码。用脚本直接测过
+                    # get_due_for_review+并发get_stock_realtime这一整套（3条到期
+                    # 记录，其中1条港股）：Futu连接需要重连时单批次实测耗时接近
+                    # 10秒，即使不需要重连、单纯是行情源本身（腾讯行情接口）的
+                    # 网络往返也有1-2秒量级。而这个"到期补录"操作本质是天级颗粒度
+                    # 的需求（min_age_days=7），没有必要在用户每次点一下分区切换
+                    # 按钮时都重新触发一遍网络请求——这里加一个基于session_state的
+                    # 时间节流，同一个会话内最多每 _REVIEW_RECHECK_INTERVAL 秒
+                    # 真正跑一次这段逻辑，中间的重新渲染直接跳过、不发请求，
+                    # 不影响"7天后自动补录"的功能本身（真正到期的记录不会因为
+                    # 跳过几次检查就再也补不上，下一次节流窗口打开时照样会补）。
+                    _REVIEW_RECHECK_INTERVAL = 60
+                    _review_checked_at = st.session_state.get("_review_checked_at", 0.0)
+                    if time.time() - _review_checked_at > _REVIEW_RECHECK_INTERVAL:
+                        due = get_due_for_review(_uemail, min_age_days=7)
 
-                history = get_history(_uemail, limit=10)
-                for h in history:
-                    verdict_color = {"偏多": UP_COLOR, "偏空": DOWN_COLOR, "中性": NEUTRAL_COLOR}.get(h["verdict"], NEUTRAL_COLOR)
-                    # name/symbol 来自数据源解析出的公司名/代码，跟持仓卡片同一类外部
-                    # 数据，统一补上转义（同一次审查发现持仓卡片那边也漏了）。
-                    line = f"{_esc(h.get('name') or h['symbol'])}（{_esc(h['symbol'])}） {h['created_at'][:10]}"
-                    st.markdown(
-                        f"<div style='font-size:0.78rem;margin:6px 0'>{line}　"
-                        f"<span style='color:{verdict_color}'>{h['verdict']}</span>　"
-                        f"当时{h['price_at_analysis']:.2f}"
-                        + (f" → 现在{h['review_price']:.2f}" if h.get("review_price") else "（未到7天）")
-                        + "</div>",
-                        unsafe_allow_html=True,
-                    )
+                        def _fetch_review_price(item):
+                            try:
+                                spot = get_stock_realtime(item["symbol"], market=item.get("market", "A"))
+                                return item, spot
+                            except Exception:
+                                return item, None
+
+                        if due:
+                            # 实测过：即使节流到每60秒最多跑一次，会话里"第一次"渲染
+                            # 这个分区时还是要真跑一遍——用真实账号数据测过，5条到期
+                            # 记录里有1条港股要等Futu，单这一条就能吃掉10秒左右
+                            # （Futu没连上/需要重连时）。统一截止时间/避免线程堆积的
+                            # 实现细节抽到了共享的_run_concurrent_with_deadline（见它
+                            # 的docstring——那里记录了同一个教训：per-future timeout
+                            # 会被排队顺序绕过，必须用整批统一的deadline），不影响
+                            # "到期没补上的下一个60秒窗口重试"这个原有行为。
+                            review_results = _run_concurrent_with_deadline(due, _fetch_review_price, timeout=3)
+                            for item, spot in review_results.values():
+                                if spot and spot.get("最新价"):
+                                    try:
+                                        record_review(item["id"], float(spot["最新价"]))
+                                    except Exception:
+                                        continue
+                        st.session_state["_review_checked_at"] = time.time()
+
+                    stats = get_accuracy_stats(_uemail)
+                    if stats["总数"] > 0:
+                        st.metric(
+                            "方向一致率", f"{stats['一致率']:.0f}%",
+                            help=f"过去 {stats['总数']} 次有方向判断的分析里，{stats['一致数']} 次跟事后价格走势一致",
+                        )
+                        # 按方向/按市场拆开看——笼统一个数字看不出"偏多判断准还是
+                        # 偏空判断准""在哪个市场准"，样本太少（<3条）的分组百分比
+                        # 波动大、参考意义不大，只展示总数够的分组，不硬凑显示。
+                        _breakdown_cols = st.columns(2)
+                        with _breakdown_cols[0]:
+                            st.caption("按方向")
+                            for _v, _s in stats.get("按方向", {}).items():
+                                if _s["总数"] >= 3:
+                                    st.markdown(f"{_v}：{_s['一致率']:.0f}%（{_s['总数']}次）")
+                                elif _s["总数"] > 0:
+                                    st.markdown(f"{_v}：样本太少（{_s['总数']}次），暂不统计")
+                        with _breakdown_cols[1]:
+                            st.caption("按市场")
+                            _market_label = {"A": "A股", "HK": "港股", "US": "美股"}
+                            for _m, _s in stats.get("按市场", {}).items():
+                                if _s["总数"] >= 3:
+                                    st.markdown(f"{_market_label.get(_m, _m)}：{_s['一致率']:.0f}%（{_s['总数']}次）")
+                                elif _s["总数"] > 0:
+                                    st.markdown(f"{_market_label.get(_m, _m)}：样本太少（{_s['总数']}次），暂不统计")
+
+                        # 之前这里只有上面那一个孤零零的st.metric——一个总体百分比
+                        # 看不出"这个数字最近是在变好还是变差"。get_accuracy_trend
+                        # 按时间顺序用滑动窗口（默认最近5次）算出一串区间一致率，
+                        # 拼成一条趋势线；样本不够时（不到window+1条）trend是空的，
+                        # 直接不画图，不硬凑一两个点出来意义不大。
+                        _trend = get_accuracy_trend(_uemail, window=5)
+                        if _trend:
+                            st.caption("最近5次一滑动窗口的一致率趋势")
+                            _trend_df = pd.DataFrame(_trend).set_index("日期")[["一致率"]]
+                            st.line_chart(_trend_df, height=160)
+                    else:
+                        st.caption("还没有满7天可回看的记录。")
+
+                    history = get_history(_uemail, limit=10)
+                    for h in history:
+                        verdict_color = {"偏多": UP_COLOR, "偏空": DOWN_COLOR, "中性": NEUTRAL_COLOR}.get(h["verdict"], NEUTRAL_COLOR)
+                        # name/symbol 来自数据源解析出的公司名/代码，跟持仓卡片同一类外部
+                        # 数据，统一补上转义（同一次审查发现持仓卡片那边也漏了）。
+                        line = f"{_esc(h.get('name') or h['symbol'])}（{_esc(h['symbol'])}） {h['created_at'][:10]}"
+                        st.markdown(
+                            f"<div style='font-size:0.78rem;margin:6px 0'>{line}　"
+                            f"<span style='color:{verdict_color}'>{h['verdict']}</span>　"
+                            f"当时{h['price_at_analysis']:.2f}"
+                            + (f" → 现在{h['review_price']:.2f}" if h.get("review_price") else "（未到7天）")
+                            + "</div>",
+                            unsafe_allow_html=True,
+                        )
 
             with st.expander("应用指南"):
                 st.markdown(
@@ -3253,72 +3277,87 @@ else:
             _render_hot_sectors(mkt_code)
 
         elif active_section == "持仓":
-            _email = st.session_state["user_email"]
-            positions = get_positions(_email)
-
-            st.markdown(
-                "<style>"
-                "[class*='st-key-pos_search_icon'] button, [class*='st-key-pos_compare_icon'] button,"
-                "[class*='st-key-pos_add_icon'] button {"
-                "  display: flex; align-items: center; justify-content: center;"
-                "  height: 44px; min-height: 44px; width: 44px; min-width: 44px;"
-                "  padding: 0; border-radius: 50% !important;"
-                "}"
-                "[class*='st-key-pos_search_icon'] span[data-testid='stIconMaterial'],"
-                "[class*='st-key-pos_compare_icon'] span[data-testid='stIconMaterial'],"
-                "[class*='st-key-pos_add_icon'] span[data-testid='stIconMaterial'] {"
-                "  font-size: 1.6rem !important;"
-                "}"
-                "</style>",
-                unsafe_allow_html=True,
-            )
-            # 搜索（🔍纯查行情，跳详情页）和添加持仓（➕真正记一笔仓位）是两个
-            # 独立入口，不要合并——之前合并成一个放大镜图标时，点开就是"添加
-            # 持仓"弹窗，没有单纯查一下行情的入口。build_multi_comparison
-            # （charts.py）之前写好了没接界面，这里补上入口：持仓至少2只时才
-            # 显示"对比"图标，三个图标并排。
-            if len(positions) >= 2:
-                title_col, compare_col, search_col, add_col = st.columns([9, 1, 1, 1], vertical_alignment="center")
-                if compare_col.button("", icon=":material/show_chart:", key="pos_compare_icon", type="tertiary", help="对比持仓走势"):
-                    _show_compare_dialog(positions)
-            else:
-                title_col, search_col, add_col = st.columns([10, 1, 1], vertical_alignment="center")
-            if search_col.button("", icon=":material/search:", key="pos_search_icon", type="tertiary", help="搜索"):
-                _show_stock_search_dialog(_email)
-            if add_col.button("", icon=":material/add:", key="pos_add_icon", type="tertiary", help="添加持仓"):
-                _show_add_position_dialog(_email)
-
-            if not positions:
+            if not st.session_state.get("logged_in"):
                 st.write("")
                 _, mid_empty, _ = st.columns([1, 2, 1])
                 with mid_empty:
                     st.markdown(
-                        "<div style='text-align:center;color:var(--fa-muted);padding:20px 0 10px'>"
-                        "还没有持仓或关注的股票<br>"
-                        "<span style='font-size:0.82rem'>点右上角的 + 按钮添加</span>"
+                        "<div style='text-align:center;color:var(--fa-muted);padding:40px 0 10px'>"
+                        "持仓管理是个人功能，需要登录后使用<br>"
+                        "<span style='font-size:0.82rem'>行情/详情页/AI分析等其它功能无需登录即可查看</span>"
                         "</div>",
                         unsafe_allow_html=True,
                     )
+                    if st.button("登录 / 注册", use_container_width=True):
+                        st.session_state["guest_mode"] = False
+                        st.rerun()
+            else:
+                _email = st.session_state["user_email"]
+                positions = get_positions(_email)
 
-            if positions:
-                # 环形图 | 持仓列表，左右各半——环形图不用@st.fragment(run_every=3)
-                # （见_render_positions_donut docstring：Plotly图3秒重绘会闪烁），
-                # 右边列表沿用原来的3秒自动刷新fragment，两边各自独立刷新节奏。
-                donut_col, list_col = st.columns([1, 1])
-                with donut_col:
-                    _render_positions_donut(positions)
-                with list_col:
-                    # 用户反馈持仓一般也就几只，市场筛选(全部/A股/港股/美股)没有实际
-                    # 必要，反而多一层点击——去掉筛选，统一直接展示全部持仓。
-                    _render_position_rows(positions, _email)
+                st.markdown(
+                    "<style>"
+                    "[class*='st-key-pos_search_icon'] button, [class*='st-key-pos_compare_icon'] button,"
+                    "[class*='st-key-pos_add_icon'] button {"
+                    "  display: flex; align-items: center; justify-content: center;"
+                    "  height: 44px; min-height: 44px; width: 44px; min-width: 44px;"
+                    "  padding: 0; border-radius: 50% !important;"
+                    "}"
+                    "[class*='st-key-pos_search_icon'] span[data-testid='stIconMaterial'],"
+                    "[class*='st-key-pos_compare_icon'] span[data-testid='stIconMaterial'],"
+                    "[class*='st-key-pos_add_icon'] span[data-testid='stIconMaterial'] {"
+                    "  font-size: 1.6rem !important;"
+                    "}"
+                    "</style>",
+                    unsafe_allow_html=True,
+                )
+                # 搜索（🔍纯查行情，跳详情页）和添加持仓（➕真正记一笔仓位）是两个
+                # 独立入口，不要合并——之前合并成一个放大镜图标时，点开就是"添加
+                # 持仓"弹窗，没有单纯查一下行情的入口。build_multi_comparison
+                # （charts.py）之前写好了没接界面，这里补上入口：持仓至少2只时才
+                # 显示"对比"图标，三个图标并排。
+                if len(positions) >= 2:
+                    title_col, compare_col, search_col, add_col = st.columns([9, 1, 1, 1], vertical_alignment="center")
+                    if compare_col.button("", icon=":material/show_chart:", key="pos_compare_icon", type="tertiary", help="对比持仓走势"):
+                        _show_compare_dialog(positions)
+                else:
+                    title_col, search_col, add_col = st.columns([10, 1, 1], vertical_alignment="center")
+                if search_col.button("", icon=":material/search:", key="pos_search_icon", type="tertiary", help="搜索"):
+                    _show_stock_search_dialog(_email)
+                if add_col.button("", icon=":material/add:", key="pos_add_icon", type="tertiary", help="添加持仓"):
+                    _show_add_position_dialog(_email)
 
-                st.divider()
-                pnl_col, ai_col = st.columns([1, 1])
-                with pnl_col:
-                    _render_positions_today_pnl(positions)
+                if not positions:
+                    st.write("")
+                    _, mid_empty, _ = st.columns([1, 2, 1])
+                    with mid_empty:
+                        st.markdown(
+                            "<div style='text-align:center;color:var(--fa-muted);padding:20px 0 10px'>"
+                            "还没有持仓或关注的股票<br>"
+                            "<span style='font-size:0.82rem'>点右上角的 + 按钮添加</span>"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+
+                if positions:
+                    # 环形图 | 持仓列表，左右各半——环形图不用@st.fragment(run_every=3)
+                    # （见_render_positions_donut docstring：Plotly图3秒重绘会闪烁），
+                    # 右边列表沿用原来的3秒自动刷新fragment，两边各自独立刷新节奏。
+                    donut_col, list_col = st.columns([1, 1])
+                    with donut_col:
+                        _render_positions_donut(positions)
+                    with list_col:
+                        # 用户反馈持仓一般也就几只，市场筛选(全部/A股/港股/美股)没有实际
+                        # 必要，反而多一层点击——去掉筛选，统一直接展示全部持仓。
+                        _render_position_rows(positions, _email)
+
                     st.divider()
-                    _render_max_capital_input(_email)
-                with ai_col:
-                    _render_portfolio_advice(_email, positions)
+                    pnl_col, ai_col = st.columns([1, 1])
+                    with pnl_col:
+                        _render_positions_today_pnl(positions)
+                        st.divider()
+                        _render_max_capital_input(_email)
+                    with ai_col:
+                        _render_portfolio_advice(_email, positions)
 
 
