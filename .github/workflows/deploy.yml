@@ -15,7 +15,9 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            set -e
             cd /root/finance-agent
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
             systemctl restart finance-agent
             echo "Deployed at $(date)"
