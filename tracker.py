@@ -622,6 +622,48 @@ def record_advice_review(advice_id: int, review_price: float):
         c.commit()
 
 
+_SCORE_BANDS = [(90, 100, "90-100"), (70, 89, "70-89"), (50, 69, "50-69"), (30, 49, "30-49"), (0, 29, "0-29")]
+
+
+def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict:
+    """按综合得分分档统计事后真实收益——参考开源项目TradingAgents(TauricResearch)
+    v0.2.4"结果驱动复盘日志"的思路(2026-08-26)：排行榜的0-100分打分体系上线以来
+    从未被拿去跟事后价格核对过，是这套系统当时最大的可信度缺口(排行榜本身分数
+    是否真的有预测力，完全没验证过)。这里不是自己说分数准不准，是把
+    record_advice_review回填进来的真实事后价格摆出来，按分数区间算平均涨跌幅和
+    上涨比例，让"分数越高是不是真的表现越好"这件事可以被客观检验。
+
+    min_sample：单个分数区间样本数低于这个值时，只报样本数、不算平均收益/胜率
+    ——小样本的极端值很容易被误读成"规律"，与其给一个可能带偏差的数字，不如
+    如实说"数据还不够"，这是这个项目一贯"不编数字"的原则在这里的延伸。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT score, price_at_advice, review_price FROM advice WHERE source = ? "
+            "AND score IS NOT NULL AND review_price IS NOT NULL "
+            "AND price_at_advice IS NOT NULL AND price_at_advice > 0",
+            (source,),
+        ).fetchall()
+    rows = [dict(r) for r in rows]
+
+    bands = []
+    for lo, hi, label in _SCORE_BANDS:
+        band_rows = [r for r in rows if lo <= r["score"] <= hi]
+        n = len(band_rows)
+        if n == 0:
+            bands.append({"band": label, "count": 0, "avg_return_pct": None, "win_rate_pct": None})
+            continue
+        returns = [(r["review_price"] - r["price_at_advice"]) / r["price_at_advice"] * 100 for r in band_rows]
+        entry = {"band": label, "count": n, "avg_return_pct": None, "win_rate_pct": None}
+        if n >= min_sample:
+            entry["avg_return_pct"] = round(sum(returns) / n, 2)
+            entry["win_rate_pct"] = round(sum(1 for x in returns if x > 0) / n * 100, 1)
+        bands.append(entry)
+    return {"total_reviewed": len(rows), "min_sample": min_sample, "bands": bands}
+
+
 def _advice_accuracy_from_rows(rows: list[dict]) -> dict:
     """跟_accuracy_from_rows同样的口径，只是判断"一致"的标准换成action：
     买入=事后应该涨，卖出=事后应该跌；持有/观望不算方向判断，不参与统计。"""

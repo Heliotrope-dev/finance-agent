@@ -56,7 +56,7 @@ from analysis import (
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
     get_accuracy_trend, add_watch_only, is_position_tracked,
-    add_search_history, get_search_history, get_latest_leaderboard, get_advice_accuracy,
+    add_search_history, get_search_history, get_latest_leaderboard, get_advice_accuracy, get_score_band_backtest,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
 )
@@ -1742,6 +1742,32 @@ def _render_advice_section():
             )
         else:
             st.caption("历史追踪：判断满7天后会自动回填实际价格算方向一致率，现在还没有满足条件的历史记录。")
+
+        # 2026-08-26新增：按综合得分分档的事后收益复盘——参考TradingAgents项目
+        # "结果驱动复盘日志"思路，见tracker.get_score_band_backtest的docstring。
+        # 跟上面的方向一致率是两个不同维度：一致率只看买入/卖出方向对不对，
+        # 这里看"分数越高是不是真的表现越好"，是排行榜打分体系本身可信度的
+        # 直接检验，不能被上面那条一致率替代。
+        try:
+            bt = get_score_band_backtest(source="screen")
+        except Exception:
+            bt = {"total_reviewed": 0, "bands": []}
+        if bt.get("total_reviewed"):
+            band_lines = []
+            for b in bt["bands"]:
+                if b["count"] == 0:
+                    continue
+                if b["avg_return_pct"] is None:
+                    band_lines.append(f"{b['band']}分：{b['count']}条（样本不足{bt['min_sample']}条，暂不计算）")
+                else:
+                    band_lines.append(f"{b['band']}分：{b['count']}条，平均涨跌{b['avg_return_pct']:+.1f}%，上涨占比{b['win_rate_pct']:.0f}%")
+            st.caption(
+                f"打分体系复盘：已回填 {bt['total_reviewed']} 条候选的事后价格，按综合得分分档统计——"
+                + "；".join(band_lines)
+                + "。这是检验\"分数是否真的有预测力\"的客观数据，不代表未来表现，样本量还小时数字会有波动。"
+            )
+        else:
+            st.caption("打分体系复盘：综合得分是2026-08-26新加的字段，还没有满7天回填的历史记录，需要积累一段时间才有数据。")
 
     # 2026-08-25从"每个市场固定Top3"改成三市场混排的综合得分排行榜——用户
     # 明确要求数量不用锁死、好的自然上榜、某个市场这次没有靠谱标的就不必
