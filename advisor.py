@@ -823,14 +823,31 @@ def _valuation_text(symbol: str, market: str) -> str:
         if not data:
             return ""
         parts = []
+        thin_sample = False
         for label, unit in (("pe_ttm", "PE(TTM)"), ("pb", "PB")):
             d = data.get(label)
             if not d:
                 continue
-            parts.append(f"{unit} {d['current']:.1f}倍，处于近{d['years']:.0f}年历史分位约{d['percentile']:.0f}%")
+            years = d["years"]
+            # 新股/次新股（比如2026-08-26真实撞到的思格新能，上市才4个月，
+            # 132个交易日）years算出来是0.5这类小数，原来".0f"格式化会把
+            # 0.5四舍五入成"0"（Python银行家舍入），拼出"处于近0年历史
+            # 分位"这种自相矛盾的文本——分位数字本身也是从不到半年的样本里
+            # 算出来的，参考价值天然有限，不能让AI拿着当成跟"近3年"分位
+            # 同等confident的证据来用。年数少于1年时换算成月份表述，并显式
+            # 标注样本短，交给下面的_JUDGE_SYSTEM规则提醒AI据此降低置信度。
+            if years < 1.0:
+                thin_sample = True
+                span_text = f"近{round(years * 12)}个月（样本较短，仅上市{round(years*12)}个月左右）"
+            else:
+                span_text = f"近{years:.1f}年"
+            parts.append(f"{unit} {d['current']:.1f}倍，处于{span_text}历史分位约{d['percentile']:.0f}%")
         if not parts:
             return ""
-        return "，".join(parts) + "（分位越接近100%表示相对自己历史估值区间越贵，越接近0%越便宜）。"
+        note = "分位越接近100%表示相对自己历史估值区间越贵，越接近0%越便宜"
+        if thin_sample:
+            note += "；样本时间较短的分位数据波动性大、参考力度弱于长期分位，判断时要相应降低这条证据的权重，不能当成跟长期分位同等确定的依据"
+        return "，".join(parts) + f"（{note}）。"
 
     # 美股：百度估值接口实测失效（AAPL/BILI等任意代码都404级失败），改用
     # Futu快照的静态PE/PB，跟_price_position_text的美股分支同一个数据源，
