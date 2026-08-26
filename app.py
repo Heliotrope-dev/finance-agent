@@ -54,7 +54,7 @@ from analysis import (
     extract_verdict, analyze_index, summarize_overall, extract_score,
 )
 from tracker import (
-    log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats,
+    log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
     get_accuracy_trend, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_leaderboard, get_advice_accuracy,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
@@ -1989,6 +1989,14 @@ def _render_stock_detail(symbol: str, market: str, name: str):
                 st.session_state[summary_key] = _stream_ai_text(
                     summarize_overall(symbol, section_texts), raise_on_error=False,
                 )
+                # 2026-08-26新增：这个分数原来现算现扔，从来没被存过，没法
+                # 回溯验证准不准——补记到cross模块那次log_analysis刚插入的
+                # 那条记录上（游客模式不落库，跟cross模块的log_analysis同一个
+                # 判断条件）。
+                if st.session_state.get("logged_in"):
+                    _overall_score = extract_score(st.session_state[summary_key])
+                    if _overall_score is not None:
+                        record_overall_score(st.session_state["user_email"], symbol, market, _overall_score)
             except Exception as e:
                 st.session_state[summary_key] = f"汇总失败：{e}"
         _render_overall_summary(st.session_state[summary_key])
@@ -2363,6 +2371,25 @@ def _render_portfolio_advice(email: str, positions: list):
     if advice:
         created = advice["created_at"][:19].replace("T", " ")
         st.caption(f"更新于 {created}（UTC）")
+
+        # 持仓变化检测——2026-08-26真实复现过的bug：用户已经清仓腾讯，但
+        # 这张卡片还在展示几天前生成的分析，文字里具体写着"减仓腾讯40股"，
+        # 用户如果不细看时间戳很容易误以为这是当前建议。这份分析里的股数/
+        # 金额是基于生成那一刻的持仓快照(holdings_json)算的，持仓一旦变化
+        # （加仓/减仓/清仓）这些具体数字就直接过期了——拿当前真实持仓的
+        # symbol集合跟落库时的快照比对，不一致就强提醒，不能沉默展示。
+        try:
+            snapshot_symbols = {h["symbol"] for h in json.loads(advice.get("holdings_json") or "[]")}
+        except Exception:
+            snapshot_symbols = set()
+        current_symbols = {p["symbol"] for p in positions if (p.get("shares") or 0) > 0}
+        if snapshot_symbols and snapshot_symbols != current_symbols:
+            st.warning(
+                "⚠️ 你的持仓自这份分析生成后已经变化（加仓/减仓/清仓），"
+                "下面提到的具体股数/金额操作建议很可能已经过期，不要直接照做——"
+                "建议先看一眼下方持仓列表，再点击下方「立即重新分析」刷新。"
+            )
+
         _render_trade_signals(advice.get("signals_json", ""))
         st.markdown(_render_bold_as_red(advice["analysis_text"]), unsafe_allow_html=True)
     else:

@@ -52,6 +52,15 @@ def init_db():
             c.execute("ALTER TABLE analyses ADD COLUMN market TEXT NOT NULL DEFAULT 'A'")
         if "name" not in cols:
             c.execute("ALTER TABLE analyses ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+        if "score" not in cols:
+            # 2026-08-26新增：AI深度分析页"总结性分析"卡片的0-100综合评分
+            # (analysis.py summarize_overall/extract_score)原来现算现扔，
+            # 从来没被存过——排查用户反馈时发现这个分数没法回溯验证准不准，
+            # 跟verdict字段（有get_accuracy_stats）不是同一回事，补上才能
+            # 开始积累数据。NULL=还没来得及记（老记录/AI没按格式输出分数），
+            # 不能默认成0——见advisor.py _extract_score同一条注释，0分是
+            # "证据高度一致看空"这个真实结论，跟"没解析到"完全是两回事。
+            c.execute("ALTER TABLE analyses ADD COLUMN score INTEGER")
 
         c.execute(
             """
@@ -401,6 +410,26 @@ def log_analysis(
         )
         c.commit()
         return cur.lastrowid
+
+
+def record_overall_score(email: str, symbol: str, market: str, score: int):
+    """给"总结性分析"那个0-100综合评分补记到最近一条analyses记录上——不是新建
+    一行，是UPDATE刚刚log_analysis插入的那条（同一次页面渲染里，cross_validate
+    先跑完调用log_analysis，summarize_overall后跑完再调这个函数，两者间隔
+    只有一次页面渲染的时间，"最近一条"在实际使用场景下不会指错行）。
+
+    SQLite的UPDATE不支持直接ORDER BY+LIMIT，用子查询先选出最新那条id再更新，
+    这是标准写法（不是绕弯，就是SQLite的正常用法）。
+    """
+    with closing(_conn()) as c:
+        c.execute(
+            "UPDATE analyses SET score = ? WHERE id = ("
+            "  SELECT id FROM analyses WHERE email = ? AND symbol = ? AND market = ? "
+            "  ORDER BY created_at DESC LIMIT 1"
+            ")",
+            (score, email, symbol, market),
+        )
+        c.commit()
 
 
 def get_history(email: str, symbol: str | None = None, limit: int = 50) -> list[dict]:

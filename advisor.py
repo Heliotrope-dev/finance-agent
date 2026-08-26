@@ -60,6 +60,12 @@ _QWEN_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _ZHIPU_MODEL = "glm-4-plus"
 _ZHIPU_BASE = "https://open.bigmodel.cn/api/paas/v4"
 
+# 2026-08-26：曾经短暂试过把辩论裁判换成DeepSeek第三方（裁判跟多头选手
+# 同用千问，理论上有偏袒嫌疑），但DeepSeek账号余额被math-agent那边的
+# 日常调用耗光、且团队决定这两个项目都彻底不用DeepSeek了（都切到千问，
+# 详见math-agent仓库2026-08-26那次改动），裁判改回_client()/_MODEL——
+# 见judge_stock_with_debate最后拍板那段。
+
 # 候选池规模——用户要求"扩大到各500支"，让候选池统计（下面 _pool_summary）
 # 真实反映大盘水平，不是拿十几只样本硬充"全市场"。Futu 单次最多返回200条，
 # 超过要分页拉（见 _futu_screen_pool）。
@@ -109,6 +115,47 @@ def _load_secrets_into_env():
 
 _load_secrets_into_env()
 _EMAIL = os.environ.get("ADVISOR_EMAIL", "")  # 私人工具，固定单用户，不做多用户
+
+
+def _is_insufficient_balance_error(exc: Exception) -> bool:
+    """识别"账号欠费/余额不足"这一类错误，跟网络超时/参数错误这些普通失败
+    区分开——2026-08-26排查DeepSeek余额耗尽时真实见过的错误格式是
+    `openai.APIStatusError: Error code: 402 - {'error': {'message':
+    'Insufficient Balance', ...}}`；查阿里云官方错误码文档确认千问
+    (DashScope)这边欠费的特征是HTTP 400、错误码"Arrearage"。两家measure
+    格式不完全一样，都用字符串关键词匹配而不是死抠某个SDK版本的异常属性
+    结构（openai SDK不同版本APIStatusError的body解析方式可能变，字符串
+    表示更稳）。"""
+    text = str(exc)
+    return "Arrearage" in text or "Insufficient Balance" in text or "insufficient_quota" in text.lower()
+
+
+def _check_qwen_balance():
+    """main()一开始就先探测一次千问账号是否欠费——这个脚本几乎所有AI调用
+    (screen候选判断/持仓判断/组合分析)都走千问，一旦欠费，与其让整个流程
+    一步步跑到底、每一步AI调用各自失败又各自被局部try/except吞掉、最后
+    只留下一句含糊的"这次没有从候选池里判断出任何有效结果"（跟Futu筛选
+    失败/AkShare故障长得一模一样，没法区分），不如一开始花一次几乎零成本
+    的探测调用(max_tokens=5)提前问清楚，欠费就直接终止、打印一条不会被
+    误认成别的问题的明确消息，省下后面整趟徒劳的Futu/AkShare/AI调用。
+
+    只拦截"确认是欠费"这一种情况——探测调用本身如果因为网络抖动等其它
+    原因失败，不能因此判定"欠费"进而阻断整次正常运行，静默放行即可，
+    真正的AI调用失败自然会在后面各自的环节暴露。
+    """
+    try:
+        _client().chat.completions.create(
+            model=_MODEL, messages=[{"role": "user", "content": "ping"}], max_tokens=5, stream=False,
+        )
+    except Exception as e:
+        if _is_insufficient_balance_error(e):
+            raise RuntimeError(
+                f"🚨🚨🚨 QWEN_API_KEY 账号余额不足/欠费，投研顾问本次运行直接终止，"
+                f"不再浪费后面的Futu/AkShare/AI调用。请立即到阿里云百炼控制台"
+                f"（https://bailian.console.aliyun.com/?tab=model#/costing-balance）充值。"
+                f"原始错误：{e}"
+            ) from e
+        # 其它失败（网络抖动等）不阻断——真正的调用失败会在后面各环节暴露。
 
 
 def _client() -> OpenAI:
@@ -523,6 +570,11 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
 要求：
 1. 先看基本面（盈利能力、营收/利润增长趋势、负债水平、估值是否处于合理区间），
    这是判断的主要依据。
+   - 如果下方给了"估值"数据（PE/PB及其历史分位），必须具体引用这个数字
+     （比如"PE(TTM)处于近3年历史分位约X%"），不能只说"估值合理"这类空泛
+     评价——分位数据是本地算好的真实值，不是编的；如果这次没给出历史分位、
+     只有静态倍数（美股常见），也要如实说明"缺少相对自身历史的参照"，不能
+     假装有分位数据。
    - 增长数字要甄别质量，不能拿到就直接当结论用：如果营收/净利润同比增速是
      三位数（100%+）这类异常大的数字，要主动判断这更像是低基数效应/一次性
      损益（比如资产处置、政府补贴、汇兑收益、上年同期基数极低）驱动的，还是
@@ -627,10 +679,12 @@ _DEBATE_JUDGE_ADDENDUM = """
 
 
 def _build_judge_user_content(symbol: str, market: str, name: str, financial_summary: str,
-                               technical_summary: str, news_summary: str, position_summary: str) -> str:
+                               technical_summary: str, news_summary: str, position_summary: str,
+                               valuation_summary: str = "") -> str:
     return (
         f"股票：{name}（{symbol}，{market}股）\n\n"
         f"财务摘要：\n{financial_summary or '（暂无财务数据）'}\n\n"
+        f"估值：{valuation_summary or '（暂无估值数据）'}\n\n"
         f"技术面信号：{technical_summary or '（数据不足）'}\n\n"
         f"价格位置（52周区间）：{position_summary or '（数据不足）'}\n\n"
         f"近期新闻：\n{news_summary or '（暂无相关新闻）'}"
@@ -639,11 +693,11 @@ def _build_judge_user_content(symbol: str, market: str, name: str, financial_sum
 
 def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summary: str,
                              technical_summary: str, news_summary: str, position_summary: str = "",
-                             holding: bool = True) -> dict:
+                             valuation_summary: str = "", holding: bool = True) -> dict:
     """带多空辩论的判断——只给持仓用（见上面的成本考量注释）。bull/bear两个
     论证并发生成（互不依赖，同时发也不影响独立性——两边都只能看到原始数据，
     看不到对方的论证，这才是真正各自独立的论据，不是一个抄另一个）。"""
-    data_context = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary)
+    data_context = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary)
 
     def _call_stance(client, model, system_prompt):
         resp = client.chat.completions.create(
@@ -687,6 +741,12 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
 
     final_user_content = f"{data_context}\n\n多头论证：\n{bull_text}\n\n空头论证：\n{bear_text}"
     system_prompt = _JUDGE_SYSTEM + (_HOLDING_ADDENDUM if holding else "") + _DEBATE_JUDGE_ADDENDUM
+
+    # 裁判用_client()/_MODEL(千问)——2026-08-26曾经短暂换成DeepSeek第三方
+    # （理由见上面模块级注释），但团队决定两个项目都彻底不用DeepSeek，改回来。
+    # 裁判跟多头选手同一供应商这个理论上的偏袒问题目前没有更好的解法（智谱
+    # 已经是空头那边独立供应商了，裁判用智谱只是把偏袒方向倒过来，不是真的
+    # 消除），暂时接受这个局限。
     resp = _client().chat.completions.create(
         model=_MODEL,
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": final_user_content}],
@@ -706,8 +766,8 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
 
 def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
                  technical_summary: str, news_summary: str, position_summary: str = "",
-                 holding: bool = False) -> dict:
-    user_content = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary)
+                 valuation_summary: str = "", holding: bool = False) -> dict:
+    user_content = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary)
     system_prompt = _JUDGE_SYSTEM + _HOLDING_ADDENDUM if holding else _JUDGE_SYSTEM
     resp = _client().chat.completions.create(
         model=_MODEL,
@@ -743,6 +803,59 @@ def _financial_summary_text(symbol: str, market: str) -> str:
     return df.head(20).to_string(index=False)
 
 
+def _valuation_text(symbol: str, market: str) -> str:
+    """估值倍数——原来的判断链条完全没有这块：_JUDGE_SYSTEM第一条明明要求
+    "估值是否处于合理区间"，但AI手上其实没有这个数字（候选筛选阶段Futu已经
+    拉过PE_TTM，但只用来筛候选池，筛完就扔，没往后传给判断这一步），等于
+    要求AI回答一个它压根没被喂数据的问题——2026-08-25排查排行榜可信度时
+    发现的真实数据洞。
+
+    A股/港股用百度股市通的近三年历史分位（ds.get_valuation_percentile），
+    不是只给一个孤立的当前倍数，而是回答"相对自己历史贵不贵"。美股同源接口
+    实测挂了（见该函数docstring），改用Futu快照里的静态PE(TTM)/PB兜底，
+    没有历史分位就如实说明，不编一个假分位数糊弄。
+    """
+    if market in ("A", "HK"):
+        try:
+            data = ds.get_valuation_percentile(symbol, market)
+        except Exception:
+            data = {}
+        if not data:
+            return ""
+        parts = []
+        for label, unit in (("pe_ttm", "PE(TTM)"), ("pb", "PB")):
+            d = data.get(label)
+            if not d:
+                continue
+            parts.append(f"{unit} {d['current']:.1f}倍，处于近{d['years']:.0f}年历史分位约{d['percentile']:.0f}%")
+        if not parts:
+            return ""
+        return "，".join(parts) + "（分位越接近100%表示相对自己历史估值区间越贵，越接近0%越便宜）。"
+
+    # 美股：百度估值接口实测失效（AAPL/BILI等任意代码都404级失败），改用
+    # Futu快照的静态PE/PB，跟_price_position_text的美股分支同一个数据源，
+    # 但这里单独开一个连接（跟该函数docstring里"每次调用独立开关"同一个
+    # 原则，不跨线程共享连接对象）。
+    code = f"{market}.{symbol}"
+    result = _futu_call_with_timeout(lambda ctx: ctx.get_market_snapshot([code]), timeout=20)
+    if result is None:
+        return ""
+    ret, data = result
+    if ret != ft.RET_OK or data is None or data.empty:
+        return ""
+    row = data.iloc[0]
+    pe = row.get("pe_ttm_ratio")
+    pb = row.get("pb_ratio")
+    if not pe and not pb:
+        return ""
+    parts = []
+    if pe:
+        parts.append(f"PE(TTM) {pe:.1f}倍")
+    if pb:
+        parts.append(f"PB {pb:.1f}倍")
+    return "，".join(parts) + "（无历史分位数据，百度估值接口对美股暂不可用，只有当前静态倍数，缺少相对自身历史贵贱的参照，判断时要如实体现这个局限）。"
+
+
 def _technical_summary_text(symbol: str, market: str) -> str:
     try:
         end = datetime.now().strftime("%Y%m%d")
@@ -755,15 +868,51 @@ def _technical_summary_text(symbol: str, market: str) -> str:
         return ""
 
 
-def _news_summary_text(name: str) -> str:
-    try:
-        df = ds.get_stock_news(name, limit=5)
-        if df is None or df.empty:
-            return ""
-        col = "标题" if "标题" in df.columns else df.columns[0]
-        return "\n".join(f"- {t}" for t in df[col].head(5))
-    except Exception:
+# 做空/监管/诉讼类关键词——命中就单独标记出来，防止这类真正的黑天鹅信息
+# 被"只展示最近5条"的排序悄悄挤出去（比如最新5条都是股价异动播报，但3天前
+# 有一条监管立案调查被排到第6条，原来的逻辑会直接漏掉）。
+_NEGATIVE_NEWS_KEYWORDS = ["做空", "调查", "诉讼", "立案", "处罚", "退市", "违规", "造假", "问询函", "评级下调", "遭减持", "被减持"]
+
+
+def _news_summary_text(symbol: str, market: str, name: str) -> str:
+    """近期新闻——原来直接调ds.get_stock_news(name)，那个函数的数据源
+    (get_market_news)本质是财新的大盘宏观资讯（美联储利率决议/中东局势
+    这类），不是个股新闻，靠公司名做子串匹配命中率极低，2026-08-25实测
+    对"哔哩哔哩"这种真实候选直接返回空——不是那天没有相关新闻，是这个数据
+    源结构上就不含个股新闻，之前每次判断的"近期新闻"这个维度基本等于没有
+    真正生效过。
+
+    改用app.py _fetch_news_items已经验证过的同一套优先级链路（A股官方
+    公告 > Futu资讯搜索，真按关键词匹配、三个市场通吃 > 财新兜底），不是
+    另起炉灶接一个新数据源——这条链路已经在公开详情页跑了很久，可信。
+    """
+    df = None
+    if market == "A" and symbol:
+        try:
+            df = ds.get_stock_notices(symbol)
+        except Exception:
+            df = None
+    if df is None or df.empty:
+        try:
+            df = ds.get_futu_news(name or symbol, max_count=8)
+        except Exception:
+            df = None
+    if df is None or df.empty:
+        try:
+            df = ds.get_stock_news(name or symbol, limit=8)
+        except Exception:
+            df = None
+    if df is None or df.empty or "新闻标题" not in df.columns:
         return ""
+
+    titles = df["新闻标题"].head(8).tolist()
+    lines = [f"- {t}" for t in titles[:5]]
+    flagged = [t for t in titles if any(k in t for k in _NEGATIVE_NEWS_KEYWORDS)]
+    if flagged:
+        lines.append("⚠️ 命中做空/监管/诉讼类关键词的标题（不论是否在上面最近5条里都要看到）：" + "；".join(flagged))
+    else:
+        lines.append("（已排查做空/监管/诉讼类关键词，未在近期标题中发现）")
+    return "\n".join(lines)
 
 
 def _price_position_text(symbol: str, market: str) -> str:
@@ -846,17 +995,18 @@ def _judge_one(item: dict, source: str) -> dict | None:
     except Exception:
         price = None
     fin = _financial_summary_text(symbol, market)
+    valuation = _valuation_text(symbol, market)
     tech = _technical_summary_text(symbol, market)
-    news = _news_summary_text(name or symbol)
+    news = _news_summary_text(symbol, market, name)
     position = _price_position_text(symbol, market)
     try:
         # 持仓判断走多空辩论版本（更扎实但3倍AI调用），候选池初筛(source=
         # "screen")继续用单次判断——几十支候选一天判断一遍，辩论版本的
         # 调用量级在那个场景下不划算，见judge_stock_with_debate上面的注释。
         if holding:
-            verdict = judge_stock_with_debate(symbol, market, name, fin, tech, news, position, holding=True)
+            verdict = judge_stock_with_debate(symbol, market, name, fin, tech, news, position, valuation, holding=True)
         else:
-            verdict = judge_stock(symbol, market, name, fin, tech, news, position, holding=False)
+            verdict = judge_stock(symbol, market, name, fin, tech, news, position, valuation, holding=False)
     except Exception as e:
         return {"symbol": symbol, "market": market, "name": name, "error": str(e)}
     return {
@@ -1097,7 +1247,7 @@ def advise_portfolio(email: str) -> dict | None:
         return {
             "price_position": _price_position_text(r["symbol"], r["market"]),
             "technical": _technical_summary_text(r["symbol"], r["market"]),
-            "news": _news_summary_text(r["name"] or r["symbol"]),
+            "news": _news_summary_text(r["symbol"], r["market"], r["name"]),
         }
 
     ctx_results = _run_concurrent_with_deadline(rows, _fetch_holding_context, timeout=90, max_workers=5)
@@ -1212,6 +1362,7 @@ def _fmt_entry(e: dict, rank: int | None = None) -> str:
 
 def main():
     _load_secrets_into_env()
+    _check_qwen_balance()
 
     backfilled = _backfill_due_advice()
     print(f"（已回填 {backfilled} 条到期的历史建议价格）\n")

@@ -2257,6 +2257,39 @@ def get_financial_abstract(symbol: str, market: str = "A") -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def get_valuation_percentile(symbol: str, market: str, period: str = "近三年") -> dict:
+    """PE(TTM)/PB 的历史分位——不是给一个孤立的静态倍数（那样没法回答"这个估值
+    算贵还是便宜"），而是用百度股市通的历史序列本地算"现价估值在过去三年自己
+    的区间里处于什么分位"，跟_price_position_text算52周价格分位是同一个思路，
+    只是换成估值维度。
+
+    只支持A股/港股（ak.stock_zh_valuation_baidu / stock_hk_valuation_baidu）。
+    美股同名接口(stock_us_valuation_baidu)2026-08-25实测对AAPL/BILI等任意
+    代码都返回JSONDecodeError（接口本身挂了或被墙，不是参数问题），不强行
+    降级伪造分位数，直接返回空字典——调用方(advisor.py _valuation_text)对
+    美股改用Futu快照里的静态PE/PB兜底，没有历史分位就如实说明，不编。
+    """
+    if market not in ("A", "HK"):
+        return {}
+    fn = ak.stock_zh_valuation_baidu if market == "A" else ak.stock_hk_valuation_baidu
+    result: dict = {}
+    for label, indicator in (("pe_ttm", "市盈率(TTM)"), ("pb", "市净率")):
+        try:
+            df = _with_retry(lambda: fn(symbol=symbol, indicator=indicator, period=period))
+        except Exception:
+            continue
+        if df is None or df.empty or "value" not in df.columns:
+            continue
+        vals = df["value"].dropna()
+        if vals.empty:
+            continue
+        cur = float(vals.iloc[-1])
+        pct = float((vals < cur).mean() * 100)
+        result[label] = {"current": cur, "percentile": pct, "years": round(len(vals) / 250, 1)}
+    return result
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_stock_news(keyword: str, limit: int = 10) -> pd.DataFrame:
     """个股相关新闻——只返回真正提到这家公司的条目，不拿不相关的大盘资讯充数。
