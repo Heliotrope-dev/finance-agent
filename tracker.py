@@ -576,6 +576,38 @@ def get_accuracy_trend(email: str, window: int = 5) -> list[dict]:
     return trend
 
 
+def get_daily_accuracy(email: str, days: int = 91) -> list[dict]:
+    """按天聚合的方向一致率——给"回看"页的日历热力图用。口径跟
+    get_accuracy_stats/get_accuracy_trend保持一致（只算review_price不为空、
+    verdict不是"中性"的记录），区别是这里按created_at的日期分组，每天算
+    一个独立的一致率，而不是总体或滑动窗口。
+
+    91天≈13周，选这个长度是因为日历热力图按"7天一列"排布，13周正好是
+    常见的季度回看窗口，比GitHub贡献图默认的52周更贴合这个工具本身的
+    使用频率（一个人一天顶多分析几只股票，不是每天几十次提交）。
+    """
+    init_db()
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM analyses WHERE email = ? AND review_price IS NOT NULL "
+            "AND verdict != '中性' AND created_at >= ? ORDER BY created_at ASC",
+            (email, since),
+        ).fetchall()
+    rows = [dict(r) for r in rows]
+
+    by_day: dict[str, list[dict]] = {}
+    for r in rows:
+        day = r["created_at"][:10]
+        by_day.setdefault(day, []).append(r)
+
+    return [
+        {"日期": day, **_accuracy_from_rows(day_rows)}
+        for day, day_rows in sorted(by_day.items())
+    ]
+
+
 def add_search_history(email: str, query: str, market: str = "A"):
     """记一笔"添加持仓"时搜过的关键词——给搜索弹窗里的历史记录用，方便
     常用的名字不用每次重新打字。同一个词短时间内重复搜不重复记（去重靠

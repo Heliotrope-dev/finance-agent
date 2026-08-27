@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, wait as _futures_wait
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as _cv1
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from data_sources import (
     _MULTI_INDICES,
@@ -55,7 +55,7 @@ from analysis import (
 )
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
-    get_accuracy_trend, add_watch_only, is_position_tracked,
+    get_accuracy_trend, get_daily_accuracy, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_leaderboard, get_advice_accuracy, get_score_band_backtest,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
@@ -2689,6 +2689,191 @@ def _render_position_rows(position_items: list, _email: str):
                             st.markdown(f"**{sec}**：{_esc(adv_parts[sec])}")
 
 
+def _backfill_due_reviews(email: str):
+    """把到期（满7天）该补录回看价格的分析记录补上——从"历史回看"侧边栏
+    expander里抽出来的独立函数，"回看"主页面和侧边栏摘要都要用同一套
+    节流逻辑，不能各自维护一份容易跑偏。
+
+    节流原因见调用方：get_due_for_review+并发get_stock_realtime这一整套
+    实测过Futu需要重连时接近10秒，而"7天后补录"这个需求是天级颗粒度的，
+    没必要每次切页面都重新触发一遍网络请求，同一个会话内每
+    _REVIEW_RECHECK_INTERVAL 秒最多真正跑一次。
+    """
+    _REVIEW_RECHECK_INTERVAL = 60
+    _review_checked_at = st.session_state.get("_review_checked_at", 0.0)
+    if time.time() - _review_checked_at <= _REVIEW_RECHECK_INTERVAL:
+        return
+    due = get_due_for_review(email, min_age_days=7)
+
+    def _fetch_review_price(item):
+        try:
+            spot = get_stock_realtime(item["symbol"], market=item.get("market", "A"))
+            return item, spot
+        except Exception:
+            return item, None
+
+    if due:
+        review_results = _run_concurrent_with_deadline(due, _fetch_review_price, timeout=3)
+        for item, spot in review_results.values():
+            if spot and spot.get("最新价"):
+                try:
+                    record_review(item["id"], float(spot["最新价"]))
+                except Exception:
+                    continue
+    st.session_state["_review_checked_at"] = time.time()
+
+
+def _render_accuracy_dashboard(email: str):
+    """"回看"页——把原来塞在侧边栏折叠面板里的方向一致率统计，提升成
+    主内容区的独立页面。数据和统计口径完全复用tracker.py已有的
+    get_accuracy_stats/get_accuracy_trend（没有新造轮子），新增的是这个
+    页面本身的呈现方式：把"一个孤零零的百分比"变成一个真正像"过往战绩
+    公开可查"的仪表盘——这是finance-agent"不做黑箱荐股，拿数据说话"这个
+    产品定位最该被看见的地方，不该被折叠面板埋起来。
+
+    新增的日历热力图故意不用红涨绿跌那套配色（UP_COLOR/DOWN_COLOR在这个
+    App里全局代表"价格涨/跌"，这里如果借用会让用户以为热力图在讲价格
+    涨跌，而这里讲的是完全不同的"预测准不准"）。改用同一个UP_COLOR的
+    单一色相、只调深浅（浅→深表示当天有判断且一致率从低到高），跟品牌色
+    保持同源但语义不冲突。
+    """
+    if not st.session_state.get("logged_in"):
+        st.write("")
+        _, mid_empty, _ = st.columns([1, 2, 1])
+        with mid_empty:
+            st.markdown(
+                "<div style='text-align:center;color:var(--fa-muted);padding:40px 0 10px'>"
+                "回看是个人功能，需要登录后使用<br>"
+                "<span style='font-size:0.82rem'>行情/详情页/AI分析等其它功能无需登录即可查看</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("登录 / 注册", use_container_width=True, key="_review_page_login_btn"):
+                st.session_state["guest_mode"] = False
+                st.rerun()
+        return
+
+    st.caption(
+        "每次点开个股「数据分析」时会记录当时价格和方向倾向，满7天后自动补上现在的价格做对照。"
+        "以下全部是历史记录的客观统计，不是投资建议，过去的方向一致率不代表未来表现。"
+    )
+    _backfill_due_reviews(email)
+
+    stats = get_accuracy_stats(email)
+    if stats["总数"] == 0:
+        st.caption("还没有满7天可回看的记录。")
+        return
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric(
+        "总体方向一致率", f"{stats['一致率']:.0f}%",
+        help=f"过去 {stats['总数']} 次有方向判断的分析里，{stats['一致数']} 次跟事后价格走势一致",
+    )
+    _dir_bull = stats.get("按方向", {}).get("偏多", {})
+    _dir_bear = stats.get("按方向", {}).get("偏空", {})
+    m2.metric(
+        "偏多判断一致率",
+        f"{_dir_bull['一致率']:.0f}%" if _dir_bull.get("总数", 0) >= 3 else "样本不足",
+        help=f"{_dir_bull.get('总数', 0)} 次偏多判断" if _dir_bull.get("总数") else None,
+    )
+    m3.metric(
+        "偏空判断一致率",
+        f"{_dir_bear['一致率']:.0f}%" if _dir_bear.get("总数", 0) >= 3 else "样本不足",
+        help=f"{_dir_bear.get('总数', 0)} 次偏空判断" if _dir_bear.get("总数") else None,
+    )
+
+    st.markdown("**按市场拆分**")
+    _market_label = {"A": "A股", "HK": "港股", "US": "美股"}
+    _mkt_stats = stats.get("按市场", {})
+    if _mkt_stats:
+        _mkt_cols = st.columns(len(_mkt_stats))
+        for _col, (_m, _s) in zip(_mkt_cols, _mkt_stats.items()):
+            with _col:
+                if _s["总数"] >= 3:
+                    st.metric(_market_label.get(_m, _m), f"{_s['一致率']:.0f}%", help=f"{_s['总数']} 次")
+                else:
+                    st.metric(_market_label.get(_m, _m), "样本不足", help=f"{_s['总数']} 次")
+
+    st.divider()
+
+    _trend = get_accuracy_trend(email, window=5)
+    if _trend:
+        st.markdown("**最近5次滑动窗口的一致率趋势**")
+        _trend_df = pd.DataFrame(_trend).set_index("日期")[["一致率"]]
+        st.line_chart(_trend_df, height=200)
+
+    st.markdown("**每日回看日历**（近13周，颜色越深代表当天一致率越高，灰色代表当天没有可回看的记录）")
+    _daily = get_daily_accuracy(email, days=91)
+    if not _daily:
+        st.caption("暂无足够的每日数据。")
+    else:
+        _by_date = {d["日期"]: d for d in _daily}
+        _today = datetime.now(timezone.utc).date()
+        _start = _today - timedelta(days=90)
+        _start -= timedelta(days=_start.weekday())  # 对齐到那一周的周一，格子排布整齐
+
+        _dates, _weeks_idx, _weekdays, _rates, _hover = [], [], [], [], []
+        _cursor = _start
+        _week_i = 0
+        while _cursor <= _today:
+            entry = _by_date.get(_cursor.isoformat())
+            _dates.append(_cursor)
+            _weeks_idx.append(_week_i)
+            _weekdays.append(_cursor.weekday())
+            _rates.append(entry["一致率"] if entry else None)
+            _hover.append(
+                f"{_cursor.isoformat()}<br>{entry['一致数']}/{entry['总数']} 一致（{entry['一致率']:.0f}%）"
+                if entry else f"{_cursor.isoformat()}<br>无记录"
+            )
+            if _cursor.weekday() == 6:
+                _week_i += 1
+            _cursor += timedelta(days=1)
+
+        import plotly.graph_objects as go
+
+        _z = [[None] * (_week_i + 1) for _ in range(7)]
+        _text = [[""] * (_week_i + 1) for _ in range(7)]
+        for wi, wd, rate, hv in zip(_weeks_idx, _weekdays, _rates, _hover):
+            _z[wd][wi] = rate if rate is not None else -1
+            _text[wd][wi] = hv
+
+        _fig = go.Figure(
+            go.Heatmap(
+                z=_z, text=_text, hoverinfo="text",
+                colorscale=[
+                    [0.0, "#eee"], [0.001, "#fbe1df"], [0.5, UP_COLOR], [1.0, "#7a0f0f"],
+                ],
+                zmin=-1, zmax=100, showscale=False,
+                xgap=3, ygap=3,
+            )
+        )
+        _fig.update_layout(
+            height=170, margin=dict(l=30, r=10, t=10, b=10),
+            yaxis=dict(
+                tickmode="array", tickvals=[0, 2, 4, 6], ticktext=["一", "三", "五", "日"],
+                autorange="reversed", showgrid=False,
+            ),
+            xaxis=dict(showgrid=False, showticklabels=False),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(_fig, use_container_width=True, key="_accuracy_calendar_heatmap")
+
+    st.divider()
+    st.markdown("**最近记录**")
+    history = get_history(email, limit=20)
+    for h in history:
+        verdict_color = {"偏多": UP_COLOR, "偏空": DOWN_COLOR, "中性": NEUTRAL_COLOR}.get(h["verdict"], NEUTRAL_COLOR)
+        line = f"{_esc(h.get('name') or h['symbol'])}（{_esc(h['symbol'])}） {h['created_at'][:10]}"
+        st.markdown(
+            f"<div style='font-size:0.82rem;margin:8px 0'>{line}　"
+            f"<span style='color:{verdict_color}'>{h['verdict']}</span>　"
+            f"当时{h['price_at_analysis']:.2f}"
+            + (f" → 现在{h['review_price']:.2f}" if h.get("review_price") else "（未到7天）")
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+
 @st.dialog("卖出确认")
 def _confirm_sell_dialog(email: str, item: dict, market: str, cur_price: float | None):
     """shares=0（纯关注，没有真实持仓）走原来的简单确认删除；shares>0是真的
@@ -3098,114 +3283,25 @@ else:
 
             st.divider()
             with st.expander("历史回看"):
+                # 完整的统计/趋势/日历热力图挪到主内容区的独立"回看"分区了
+                # （见_render_accuracy_dashboard）——侧边栏这里只留一个摘要
+                # 数字+跳转入口，不再重复维护一份统计展示代码。补录逻辑
+                # 抽成了_backfill_due_reviews，跟"回看"页共用同一份节流。
                 if not st.session_state.get("logged_in"):
                     st.caption("登录后可查看个人分析历史与方向一致率追踪。")
                 else:
-                    st.caption("每次点开个股「数据分析」时会记录当时价格和方向倾向，"
-                               "满7天后自动补上现在的价格做对照。仅供参考，不是投资建议，"
-                               "过去的方向一致率不代表未来表现。")
-                    # get_due_for_review 带了 limit（默认20条），避免这个列表越攒越多；
-                    # st.expander 内部代码不论展没展开每次渲染都会跑，之前是for循环
-                    # 串行发请求，跟持仓列表(_render_position_rows)遇到过同样的
-                    # "越用越慢"问题，这里改成同样用线程池并发取价。
-                    #
-                    # 排查页面切换卡顿时实测到的真实数据：这一段本身不在任何
-                    # @st.fragment里，是主脚本的一部分——意味着"首页/行情/持仓"
-                    # 之间随便切一次分区（st.radio触发的是整页rerun，不是fragment
-                    # 局部rerun）都会完整重新跑一遍这段代码。用脚本直接测过
-                    # get_due_for_review+并发get_stock_realtime这一整套（3条到期
-                    # 记录，其中1条港股）：Futu连接需要重连时单批次实测耗时接近
-                    # 10秒，即使不需要重连、单纯是行情源本身（腾讯行情接口）的
-                    # 网络往返也有1-2秒量级。而这个"到期补录"操作本质是天级颗粒度
-                    # 的需求（min_age_days=7），没有必要在用户每次点一下分区切换
-                    # 按钮时都重新触发一遍网络请求——这里加一个基于session_state的
-                    # 时间节流，同一个会话内最多每 _REVIEW_RECHECK_INTERVAL 秒
-                    # 真正跑一次这段逻辑，中间的重新渲染直接跳过、不发请求，
-                    # 不影响"7天后自动补录"的功能本身（真正到期的记录不会因为
-                    # 跳过几次检查就再也补不上，下一次节流窗口打开时照样会补）。
-                    _REVIEW_RECHECK_INTERVAL = 60
-                    _review_checked_at = st.session_state.get("_review_checked_at", 0.0)
-                    if time.time() - _review_checked_at > _REVIEW_RECHECK_INTERVAL:
-                        due = get_due_for_review(_uemail, min_age_days=7)
-
-                        def _fetch_review_price(item):
-                            try:
-                                spot = get_stock_realtime(item["symbol"], market=item.get("market", "A"))
-                                return item, spot
-                            except Exception:
-                                return item, None
-
-                        if due:
-                            # 实测过：即使节流到每60秒最多跑一次，会话里"第一次"渲染
-                            # 这个分区时还是要真跑一遍——用真实账号数据测过，5条到期
-                            # 记录里有1条港股要等Futu，单这一条就能吃掉10秒左右
-                            # （Futu没连上/需要重连时）。统一截止时间/避免线程堆积的
-                            # 实现细节抽到了共享的_run_concurrent_with_deadline（见它
-                            # 的docstring——那里记录了同一个教训：per-future timeout
-                            # 会被排队顺序绕过，必须用整批统一的deadline），不影响
-                            # "到期没补上的下一个60秒窗口重试"这个原有行为。
-                            review_results = _run_concurrent_with_deadline(due, _fetch_review_price, timeout=3)
-                            for item, spot in review_results.values():
-                                if spot and spot.get("最新价"):
-                                    try:
-                                        record_review(item["id"], float(spot["最新价"]))
-                                    except Exception:
-                                        continue
-                        st.session_state["_review_checked_at"] = time.time()
-
+                    _backfill_due_reviews(_uemail)
                     stats = get_accuracy_stats(_uemail)
                     if stats["总数"] > 0:
                         st.metric(
                             "方向一致率", f"{stats['一致率']:.0f}%",
                             help=f"过去 {stats['总数']} 次有方向判断的分析里，{stats['一致数']} 次跟事后价格走势一致",
                         )
-                        # 按方向/按市场拆开看——笼统一个数字看不出"偏多判断准还是
-                        # 偏空判断准""在哪个市场准"，样本太少（<3条）的分组百分比
-                        # 波动大、参考意义不大，只展示总数够的分组，不硬凑显示。
-                        _breakdown_cols = st.columns(2)
-                        with _breakdown_cols[0]:
-                            st.caption("按方向")
-                            for _v, _s in stats.get("按方向", {}).items():
-                                if _s["总数"] >= 3:
-                                    st.markdown(f"{_v}：{_s['一致率']:.0f}%（{_s['总数']}次）")
-                                elif _s["总数"] > 0:
-                                    st.markdown(f"{_v}：样本太少（{_s['总数']}次），暂不统计")
-                        with _breakdown_cols[1]:
-                            st.caption("按市场")
-                            _market_label = {"A": "A股", "HK": "港股", "US": "美股"}
-                            for _m, _s in stats.get("按市场", {}).items():
-                                if _s["总数"] >= 3:
-                                    st.markdown(f"{_market_label.get(_m, _m)}：{_s['一致率']:.0f}%（{_s['总数']}次）")
-                                elif _s["总数"] > 0:
-                                    st.markdown(f"{_market_label.get(_m, _m)}：样本太少（{_s['总数']}次），暂不统计")
-
-                        # 之前这里只有上面那一个孤零零的st.metric——一个总体百分比
-                        # 看不出"这个数字最近是在变好还是变差"。get_accuracy_trend
-                        # 按时间顺序用滑动窗口（默认最近5次）算出一串区间一致率，
-                        # 拼成一条趋势线；样本不够时（不到window+1条）trend是空的，
-                        # 直接不画图，不硬凑一两个点出来意义不大。
-                        _trend = get_accuracy_trend(_uemail, window=5)
-                        if _trend:
-                            st.caption("最近5次一滑动窗口的一致率趋势")
-                            _trend_df = pd.DataFrame(_trend).set_index("日期")[["一致率"]]
-                            st.line_chart(_trend_df, height=160)
                     else:
                         st.caption("还没有满7天可回看的记录。")
-
-                    history = get_history(_uemail, limit=10)
-                    for h in history:
-                        verdict_color = {"偏多": UP_COLOR, "偏空": DOWN_COLOR, "中性": NEUTRAL_COLOR}.get(h["verdict"], NEUTRAL_COLOR)
-                        # name/symbol 来自数据源解析出的公司名/代码，跟持仓卡片同一类外部
-                        # 数据，统一补上转义（同一次审查发现持仓卡片那边也漏了）。
-                        line = f"{_esc(h.get('name') or h['symbol'])}（{_esc(h['symbol'])}） {h['created_at'][:10]}"
-                        st.markdown(
-                            f"<div style='font-size:0.78rem;margin:6px 0'>{line}　"
-                            f"<span style='color:{verdict_color}'>{h['verdict']}</span>　"
-                            f"当时{h['price_at_analysis']:.2f}"
-                            + (f" → 现在{h['review_price']:.2f}" if h.get("review_price") else "（未到7天）")
-                            + "</div>",
-                            unsafe_allow_html=True,
-                        )
+                    if st.button("查看完整回看 →", use_container_width=True, key="_goto_review_page"):
+                        st.session_state["_active_section"] = "回看"
+                        st.rerun()
 
             with st.expander("应用指南"):
                 st.markdown(
@@ -3298,7 +3394,7 @@ else:
         st.session_state.setdefault("_active_section", "首页")
 
         active_section = st.radio(
-            "分区", ["首页", "行情", "持仓"], key="_active_section", horizontal=True, label_visibility="collapsed",
+            "分区", ["首页", "行情", "持仓", "回看"], key="_active_section", horizontal=True, label_visibility="collapsed",
         )
 
         if active_section == "首页":
@@ -3411,4 +3507,6 @@ else:
                     with ai_col:
                         _render_portfolio_advice(_email, positions)
 
+        elif active_section == "回看":
+            _render_accuracy_dashboard(_uemail)
 
