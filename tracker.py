@@ -19,7 +19,20 @@ def _conn():
     return sqlite3.connect(_DB_PATH)
 
 
+_db_initialized = False  # 进程级标志位，见init_db()末尾的说明
+
+
 def init_db():
+    # 这个文件里几乎每个读写函数（每次页面渲染大概率会调用好几个）开头都会
+    # 调一次init_db()，而这个函数每次都要开关一次sqlite连接、对好几张表各跑
+    # 一遍PRAGMA table_info做迁移检测——建表语句本身"IF NOT EXISTS"很便宜，
+    # 但这些迁移检测代价不是零，一次页面渲染里被重复触发几十次纯属浪费。
+    # schema在一个进程生命周期里只会变一次（就是这次init_db()真正执行的
+    # 这一遍），后面的调用直接跳过就行；用一个模块级标志位做这个"只跑一次"
+    # 判断，不影响多进程/多worker各自独立初始化。
+    global _db_initialized
+    if _db_initialized:
+        return
     with closing(_conn()) as c:
         # WAL模式：_conn()每次都是新开关一次连接（没有常驻连接池），默认的
         # rollback journal模式下写操作会短暂独占锁、并发读写容易互相等待；
@@ -220,6 +233,7 @@ def init_db():
         # 条件对齐，不留旧名字的数据痕迹。
         c.execute("UPDATE advice SET source = 'position' WHERE source = 'watchlist'")
         c.commit()
+    _db_initialized = True
 
 
 _MARKET_CURRENCY = {"A": "CNY", "HK": "HKD", "US": "USD"}
@@ -275,6 +289,11 @@ def log_position_lot(
     email: str, symbol: str, market: str, action: str, shares: float, amount: float,
     currency: str = "CNY", note: str = "",
 ):
+    # 这个文件里几乎每个读写函数开头都调了init_db()，唯独这个漏了——如果
+    # 进程刚启动、这是第一个碰数据库的调用（比如某个独立脚本只导入tracker
+    # 就直接调用log_position_lot），position_lots表还没建过，会报
+    # "no such table"。
+    init_db()
     with closing(_conn()) as c:
         c.execute(
             "INSERT INTO position_lots (email, symbol, market, action, shares, amount, currency, traded_at, note) "
