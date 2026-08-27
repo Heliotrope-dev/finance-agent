@@ -80,12 +80,22 @@ def _user_exists(email: str) -> bool:
     return len(_sb_get("users", {"email": f"eq.{email}", "select": "email"})) > 0
 
 
+_DUMMY_SALT = "0" * 32  # 邮箱不存在时用来跑一次陪跑哈希，抹平时序差异，见下面的说明
+
+
 def _check_user(email: str, pw: str) -> tuple:
     """返回 (是否登录成功, 失败时的提示信息)。失败次数/锁定时间存在 users 表，跨会话/跨设备生效。"""
     rows = _sb_get("users", {
         "email": f"eq.{email}", "select": "email,password_hash,failed_attempts,locked_until",
     })
     if not rows:
+        # 邮箱不存在时如果直接返回，会比"邮箱存在但密码错"（下面要多跑一次
+        # PBKDF2，100000次迭代不是免费的）明显快很多——错误文案虽然统一成
+        # 了同一句"邮箱或密码不正确"（见下面的注释），但响应时间的差异本身
+        # 就是个侧信道，攻击者掐表就能测出一个邮箱有没有注册过，等于文案层
+        # 面做的防枚举白做了。这里陪跑一次同样成本的哈希运算，把两条路径的
+        # 耗时拉平，不真正用于任何判断。
+        hashlib.pbkdf2_hmac("sha256", pw.encode(), _DUMMY_SALT.encode(), 100000)
         return False, "邮箱或密码不正确"
     row = rows[0]
 

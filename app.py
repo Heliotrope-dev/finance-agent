@@ -257,8 +257,16 @@ def _show_login_page():
                     st.session_state["logged_in"] = True
                     st.session_state["user_email"] = _em
                     st.session_state["_token"] = _tok
+                    # localStorage继续写一份留作兜底/legacy；Cookie才是"下次
+                    # 打开自动登录"真正依赖的那条路径——见下面"记住登录"那段
+                    # 注释，st.context.cookies能在服务端直接读到它，不需要
+                    # 再靠iframe强制刷新页面（那条路已经被浏览器拦掉了）。
                     _cv1.html(
-                        f'<script>try{{window.parent.localStorage.setItem("fa_auth_tok","{_tok}");}}catch(e){{}}</script>',
+                        f"""<script>try{{
+                        window.parent.localStorage.setItem("fa_auth_tok","{_tok}");
+                        var d = new Date(); d.setTime(d.getTime() + 7*24*60*60*1000);
+                        window.parent.document.cookie = "fa_auth_tok={_tok}; expires=" + d.toUTCString() + "; path=/; SameSite=Lax; Secure";
+                        }}catch(e){{}}</script>""",
                         height=1,
                     )
                     st.rerun()
@@ -285,30 +293,31 @@ def _show_login_page():
                         st.error(f"注册失败：{_e}")
 
 
-# ── localStorage 自动登录（关闭浏览器后用书签/快捷方式打开也能恢复）────────────
-# 只在还没登录时注入这个iframe——登录之后每次rerun（尤其分时图20秒自动刷新那种
-# 高频rerun）都重建一次这个iframe纯属浪费，是页面变卡的一个来源。
+# ── 记住登录（Cookie，7天）───────────────────────────────────────────────
+# 之前这里是"读localStorage→塞进URL→800ms后用iframe强制刷新父页面"那一套，
+# 2026-08-28实测在当前Chrome版本下彻底失效：iframe（components.v1.html创建
+# 的沙盒iframe）读写window.parent.localStorage没问题，但
+# window.parent.location.replace(...)会被浏览器当成"沙盒iframe试图导航
+# 顶层页面"直接拦截，控制台报SecurityError——token其实一直是有效的（拿
+# 同一个token单独调用_validate_token()验证过没问题），只是浏览器根本没
+# 机会把它带着发一次新请求给服务器，页面永远卡在登录页。
+#
+# 改用Cookie：写入不需要导航权限，只需要access parent origin（跟
+# localStorage是同一类同源访问权限，已经在用了，不受上面那条限制）；
+# Cookie会由浏览器自动带在*每一次*请求里（包括第一次打开页面的那次
+# HTTP请求），服务端用Streamlit自带的st.context.cookies直接读，完全
+# 不需要JS参与"读取"这一步、也不需要强制刷新——从根上绕开了这个安全
+# 限制，而且比原来的方案更快（省掉了800ms的人为延迟和一次额外的整页
+# 重新加载）。旧的_auth query-param路径保留作为兜底（分享链接/禁用
+# Cookie的场景）。
 if not st.session_state.get("logged_in"):
-    _cv1.html("""
-    <script>
-    (function() {
-        try {
-            var url = new URL(window.parent.location.href);
-            if (!url.searchParams.get('_auth')) {
-                var t = window.parent.localStorage.getItem('fa_auth_tok');
-                if (t) {
-                    url.searchParams.set('_auth', t);
-                    window.parent.history.replaceState(null, '', url.toString());
-                    setTimeout(function() {
-                        if (!new URL(window.parent.location.href).searchParams.get('_auth')) return;
-                        window.parent.location.replace(url.toString());
-                    }, 800);
-                }
-            }
-        } catch(e) {}
-    })();
-    </script>
-    """, height=1)
+    _cookie_token = st.context.cookies.get("fa_auth_tok")
+    if _cookie_token:
+        _auto_email = _validate_token(_cookie_token)
+        if _auto_email:
+            st.session_state["logged_in"] = True
+            st.session_state["user_email"] = _auto_email
+            st.session_state["_token"] = _cookie_token
 
 _stored_token = st.query_params.get("_auth", "") or ""
 if _stored_token and not st.session_state.get("logged_in"):
@@ -317,38 +326,18 @@ if _stored_token and not st.session_state.get("logged_in"):
         st.session_state["logged_in"] = True
         st.session_state["user_email"] = _auto_email
         st.session_state["_token"] = _stored_token
-        # 这里之前有一行 del st.query_params["_auth"]（出发点：校验通过就从
-        # 地址栏删掉token，避免常驻URL）——在math-agent上实测过一模一样的
-        # 写法会出真实的生产问题：st.query_params的修改会触发Streamlit自动
-        # 重跑脚本，而上面"localStorage自动登录"那段JS判断要不要注入的时机
-        # （`if not st.session_state.get("logged_in")`，在脚本更靠前的位置）
-        # 跟这里token校验真正把logged_in置位的时机之间有代码距离，这次由
-        # del触发的额外重跑会让那段JS在某些时序窗口下又判断成"还没登录"，
-        # 重新触发"从localStorage读token→塞进URL→800ms后强制刷新"，造成
-        # 登录后网页陷入固定几秒一次的无限刷新循环。当时选择"不删"解决了
-        # 刷新循环，但代价是token明文常驻地址栏——浏览器历史里留得住，
-        # 也正是当初想避免的问题被绕了回来。
-        #
-        # 复查后改用另一条路：问题根源是"碰 st.query_params 会触发服务端
-        # 重跑"，不是"删掉token"这件事本身有问题。改成纯浏览器端的
-        # history.replaceState 把地址栏里的 _auth 摘掉——这是JS操作，
-        # 不经过Streamlit的状态管理/websocket，不会触发脚本重跑，用的是
-        # 跟上面"localStorage自动登录"那段JS同一类技术（那段是"塞进URL"，
-        # 这里反过来"摘掉"，机制相同、方向相反，都不touch st.query_params）。
-        # 注意这只解决"地址栏/浏览器历史里明文常驻"这一半——点击卡片触发
-        # 这次整页导航的那一次HTTP请求本身仍然带着token发到了服务器，如果
-        # Nginx对这条路径开着完整query string的access log，这一次请求还是
-        # 会被记下来一次；这一半只能在Nginx配置层面（对这个路径的access log
-        # 做query string脱敏）解决，应用代码这层做不到。
         _cv1.html(
-            """<script>
-            try {
+            f"""<script>
+            try {{
+                var tok = {_stored_token!r};
+                var d = new Date(); d.setTime(d.getTime() + 7*24*60*60*1000);
+                window.parent.document.cookie = "fa_auth_tok=" + encodeURIComponent(tok) + "; expires=" + d.toUTCString() + "; path=/; SameSite=Lax; Secure";
                 var url = new URL(window.parent.location.href);
-                if (url.searchParams.get('_auth')) {
+                if (url.searchParams.get('_auth')) {{
                     url.searchParams.delete('_auth');
                     window.parent.history.replaceState(null, '', url.toString());
-                }
-            } catch(e) {}
+                }}
+            }} catch(e) {{}}
             </script>""",
             height=1,
         )
@@ -358,7 +347,7 @@ if _stored_token and not st.session_state.get("logged_in"):
         except Exception:
             pass
         _cv1.html(
-            '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");}catch(e){}</script>',
+            '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");window.parent.document.cookie="fa_auth_tok=; max-age=0; path=/";}catch(e){}</script>',
             height=1,
         )
 
@@ -3094,7 +3083,7 @@ else:
                     except Exception:
                         pass
                     _cv1.html(
-                        '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");}catch(e){}</script>',
+                        '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");window.parent.document.cookie="fa_auth_tok=; max-age=0; path=/";}catch(e){}</script>',
                         height=1,
                     )
                     st.session_state["logged_in"] = False
