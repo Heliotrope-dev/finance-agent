@@ -21,3 +21,12 @@ enableXsrfProtection = true
 
 [browser]
 gatherUsageStats = false
+# Streamlit自己校验WebSocket握手的Origin时，是拿"它以为自己被访问的地址"
+# 去比对浏览器发来的Origin头；不配这两项时它只知道自己监听在127.0.0.1:8503，
+# 跟浏览器实际发来的Origin（经nginx+Cloudflare转发后的公网地址+2053端口）
+# 对不上，判定成"disallowed origin"直接拒绝握手——夜间日志审计在
+# journalctl里实测到了~20次这个拒绝记录，跟"打开页面卡在骨架屏、要重试
+# 十几次才连上WebSocket"这个体验问题吻合。显式告诉它对外的真实地址和
+# 端口，跟浏览器Origin对上，握手就不会被拒。
+serverAddress = "invest.heliotrope.online"
+serverPort = 2053
