@@ -553,15 +553,24 @@ def judge_watchlist() -> list[dict]:
     _build_watchlist()取回来的就是最终要判断的这一批，直接并发跑
     judge_stock。
 
-    timeout=600/max_workers=8：用户明确要求50支必须尽量判断齐全，不能
+    timeout=480/max_workers=10：用户明确要求50支必须尽量判断齐全，不能
     因为跑不完而缺斤短两——实测max_workers=5/timeout=400时，50支要排
     10轮，卡在400秒截止线附近的那几支会被deadline直接掐掉（连开始跑都
-    没有），稳定只出36/50。调大并发到8（跟_backfill_due_advice等其它
-    批量调用点一致的量级）、超时放宽到600秒，这是一天一次的后台任务，
-    不是用户在等的实时请求，多给点时间换完整度划算。"""
+    没有），稳定只出36/50。第一版改成timeout=600/workers=8实测50/50全部
+    跑完，但复核时发现这个改动没考虑cron的总预算——main()里
+    _backfill(60s)+advise_positions(250s)+screen_candidates(triage 300s+
+    judge 400s=700s)这几段已经固定占用1010秒，OpenClaw那个cron的超时
+    上限是1500秒（见_TRIAGE_POOL_SIZE附近注释，2026-08-25才从900s调
+    上来的），600秒会让总耗时冲到1610秒，比预算还多，等于我为了让
+    watchlist这一小块齐全，把WeChat简报正文（screen_candidates那部分）
+    一起拖进超时被杀掉的风险区——本末倒置。改成并发拉到10（缩短实际
+    墙钟时间，而不是靠拉长截止线硬扛）、超时收到480秒，总预算
+    60+250+480+700=1490秒，压着1500秒的线但还留了一点余量；
+    advise_portfolio()这段本身没有整体超时保护，是这个项目更早就有的
+    独立风险，不是这次改动引入的，这里没有一并处理。"""
     watchlist = _build_watchlist()
     results = _run_concurrent_with_deadline(
-        watchlist, lambda it: _judge_one(it, "watchlist"), timeout=600, max_workers=8
+        watchlist, lambda it: _judge_one(it, "watchlist"), timeout=480, max_workers=10
     )
     return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
 
