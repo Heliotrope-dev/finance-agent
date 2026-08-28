@@ -650,17 +650,33 @@ def log_advice(
         return cur.lastrowid
 
 
-def get_due_for_advice_review(email: str, min_age_days: int = 7, limit: int = 20) -> list[dict]:
-    """同 get_due_for_review 的逻辑，找出该回填实际价格的历史建议（只看当前用户）。"""
+def get_due_for_advice_review(
+    email: str, min_age_days: int = 7, limit: int = 20, source: str | None = None,
+) -> list[dict]:
+    """同 get_due_for_review 的逻辑，找出该回填实际价格的历史建议（只看当前用户）。
+
+    source: 不同来源的建议该等多久才回填价格，标准不一样——position/screen是
+    "这次判断能不能扛得住一段时间"，默认7天；watchlist（固定观察池，每天都
+    重新判断一遍）是"次日核对"，调用方会传source='watchlist'、min_age_days=1
+    单独查，不跟另外两个来源混在一次查询里（不然没法对同一批due记录分别用
+    不同的回填时间窗）。传None时不按source过滤，是老调用点的行为，不动。
+    """
     init_db()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=min_age_days)).isoformat()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
-        rows = c.execute(
-            "SELECT * FROM advice WHERE email = ? AND review_price IS NULL AND created_at <= ? "
-            "ORDER BY created_at ASC LIMIT ?",
-            (email, cutoff, limit),
-        ).fetchall()
+        if source:
+            rows = c.execute(
+                "SELECT * FROM advice WHERE email = ? AND source = ? AND review_price IS NULL "
+                "AND created_at <= ? ORDER BY created_at ASC LIMIT ?",
+                (email, source, cutoff, limit),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM advice WHERE email = ? AND review_price IS NULL AND created_at <= ? "
+                "ORDER BY created_at ASC LIMIT ?",
+                (email, cutoff, limit),
+            ).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -797,7 +813,7 @@ def get_latest_advice(limit_per_market: int = 3) -> dict:
     return result
 
 
-def get_latest_leaderboard(limit: int = 10) -> dict:
+def get_latest_leaderboard(limit: int = 10, source: str = "screen") -> dict:
     """2026-08-25新增：三个市场混排的综合得分排行榜，取代"每个市场固定
     前3"的老逻辑——用户明确要求"好的就上，不好不出现也没事"，不要求每个
     市场凑数量。取同一批（最近一次跑advisor.py那天）里score不为空的记录，
@@ -807,20 +823,25 @@ def get_latest_leaderboard(limit: int = 10) -> dict:
     NULL）不参与排行榜——不能默认成0分，那等于把"没解析到分数"当成"最差
     评级"，是两回事（这条判断本身可能是好的，只是分数解析失败）。这类记录
     不会出现在榜单里，但原始判断文本还在数据库里，不是被丢弃了。
+
+    source：2026-08-28新增参数——首页"推荐股排行榜"改用固定观察池后，
+    source='watchlist'跟原来的'screen'（全市场扫描，仍然喂私人微信简报）
+    是两套独立的每日批次，不能混在一起按score排——参数化而不是复制一份
+    函数，两边的查询逻辑完全一样，只是source不同。
     """
     init_db()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
         latest = c.execute(
-            "SELECT created_at FROM advice WHERE source = 'screen' ORDER BY created_at DESC LIMIT 1"
+            "SELECT created_at FROM advice WHERE source = ? ORDER BY created_at DESC LIMIT 1", (source,),
         ).fetchone()
         if latest is None:
             return {"run_date": None, "leaderboard": []}
         run_date = latest["created_at"][:10]
         rows = c.execute(
-            "SELECT * FROM advice WHERE source = 'screen' AND created_at LIKE ? AND score IS NOT NULL "
+            "SELECT * FROM advice WHERE source = ? AND created_at LIKE ? AND score IS NOT NULL "
             "ORDER BY score DESC LIMIT ?",
-            (f"{run_date}%", limit),
+            (source, f"{run_date}%", limit),
         ).fetchall()
     return {"run_date": run_date, "leaderboard": [dict(r) for r in rows]}
 

@@ -1688,7 +1688,13 @@ def _render_advice_section():
         unsafe_allow_html=True,
     )
     try:
-        data = get_latest_leaderboard(limit=10)
+        # source="watchlist"：2026-08-28改用固定规模但每天用真实热度/涨跌幅
+        # 榜重新取一遍的观察池（美股20/港股20/A股10，见advisor.py的
+        # _build_watchlist），取代原来"全市场量化初筛"的screen——用户明确
+        # 要求首页这块要能天天复现、事后可核对，不是每天看着完全不一样的
+        # 候选。原来的screen_candidates()仍然在跑，只是不再喂首页，继续
+        # 只进私人微信简报。
+        data = get_latest_leaderboard(limit=5, source="watchlist")
     except Exception:
         st.caption("候选数据暂时读取失败。")
         return
@@ -1704,8 +1710,9 @@ def _render_advice_section():
     with st.expander("说明", expanded=False):
         st.caption(
             "跟本页其它模块不同：这里 AI 会给出买入/卖出/持有/观望的明确结论（其它模块只摆事实、"
-            "不下结论）。筛选逻辑是全市场按市值/估值/最近盈利增速做量化初筛，AI 基于真实财务数据+"
-            "技术面+52周价格位置做判断，仅供参考，不构成投资建议，请自行判断。"
+            "不下结论）。观察池是美股/港股/A股里当天最热门的约50支股票（按真实热度/涨跌幅榜取，"
+            "不是固定名单，每天会变），AI 基于真实财务数据+技术面+52周价格位置逐支判断，次日核对"
+            "一次涨跌方向对不对，仅供参考，不构成投资建议，请自行判断。"
         )
         st.caption(f"更新于 {data['run_date']}（每个工作日17:30自动更新）")
 
@@ -1716,21 +1723,21 @@ def _render_advice_section():
         # 账号（这个模块的数据来源是私人cron脚本，不是当前登录访客本人的判断
         # 记录，所以这里查的是那个固定账号，不是st.session_state里的当前用户）。
         try:
-            acc = get_advice_accuracy(_ADVICE_EMAIL)
+            acc_all = get_advice_accuracy(_ADVICE_EMAIL)
+            # 只看watchlist来源——position/screen还在用7天回填窗口，跟这里
+            # "次日核对"的口径混在一起算会把数字算错，见get_advice_accuracy
+            # 的"按来源"拆分（tracker.py）。
+            acc = acc_all.get("按来源", {}).get("watchlist", {"总数": 0})
         except Exception:
             acc = {"总数": 0}
         if acc.get("总数"):
             rate = acc["一致率"]
-            by_market = "、".join(
-                f"{m} {s['一致率']:.0f}%（{s['总数']}次）" for m, s in acc.get("按市场", {}).items() if s.get("总数")
-            )
             st.caption(
-                f"历史追踪：已回看 {acc['总数']} 次判断（7天后按事后价格核对方向），一致率 {rate:.0f}%"
-                + (f"，按市场拆分：{by_market}" if by_market else "")
-                + "——这是历史记录的客观统计，不代表未来表现。"
+                f"历史追踪：已回看 {acc['总数']} 次判断（次日按事后价格核对方向），一致率 {rate:.0f}%"
+                "——这是历史记录的客观统计，不代表未来表现。"
             )
         else:
-            st.caption("历史追踪：判断满7天后会自动回填实际价格算方向一致率，现在还没有满足条件的历史记录。")
+            st.caption("历史追踪：判断满1天后会自动回填实际价格算方向一致率，现在还没有满足条件的历史记录。")
 
         # 2026-08-26新增：按综合得分分档的事后收益复盘——参考TradingAgents项目
         # "结果驱动复盘日志"思路，见tracker.get_score_band_backtest的docstring。
@@ -1738,7 +1745,7 @@ def _render_advice_section():
         # 这里看"分数越高是不是真的表现越好"，是排行榜打分体系本身可信度的
         # 直接检验，不能被上面那条一致率替代。
         try:
-            bt = get_score_band_backtest(source="screen")
+            bt = get_score_band_backtest(source="watchlist")
         except Exception:
             bt = {"total_reviewed": 0, "bands": []}
         if bt.get("total_reviewed"):
@@ -2403,7 +2410,7 @@ def _render_portfolio_advice(email: str, positions: list):
         current_symbols = {p["symbol"] for p in positions if (p.get("shares") or 0) > 0}
         if snapshot_symbols and snapshot_symbols != current_symbols:
             st.warning(
-                "⚠️ 你的持仓自这份分析生成后已经变化（加仓/减仓/清仓），"
+                "你的持仓自这份分析生成后已经变化（加仓/减仓/清仓），"
                 "下面提到的具体股数/金额操作建议很可能已经过期，不要直接照做——"
                 "建议先看一眼下方持仓列表，再点击下方「立即重新分析」刷新。"
             )
@@ -3518,7 +3525,7 @@ else:
                     "</style>",
                     unsafe_allow_html=True,
                 )
-                # 搜索（🔍纯查行情，跳详情页）和添加持仓（➕真正记一笔仓位）是两个
+                # 搜索（纯查行情，跳详情页）和添加持仓（真正记一笔仓位）是两个
                 # 独立入口，不要合并——之前合并成一个放大镜图标时，点开就是"添加
                 # 持仓"弹窗，没有单纯查一下行情的入口。build_multi_comparison
                 # （charts.py）之前写好了没接界面，这里补上入口：持仓至少2只时才

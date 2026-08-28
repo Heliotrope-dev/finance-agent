@@ -94,6 +94,55 @@ _TRIAGE_POOL_SIZE = 100
 # 的_TOP_PICKS/_top_picks逻辑（已删除，不再有调用方）。
 _LEADERBOARD_SIZE = 10
 
+# 2026-08-28：首页"推荐股排行榜"用的观察池——用户明确要求"不是定死，是
+# 随着热度排行榜变化的"：每天用真实的热度/涨跌幅榜重新取一遍前20美股/
+# 20港股/10A股，不是写死的名单。港股/A股用get_index_top_movers（内部已经
+# 有"热度榜挂了退回涨跌幅榜"的兜底，见该函数docstring），美股没有真正的
+# 热度榜数据源（见get_us_famous_movers的docstring），退而求其次用
+# _US_FAMOUS_CODES这份知名股名单按当天涨跌幅重新排序，好歹能做到"名单本身
+# 不变但每天的排名会变"。就算某支股票今天从热度榜掉出去了，前一天给它的
+# 判断依然要在到期后正常回填价格算对错（见_backfill_due_advice/
+# get_due_for_advice_review，回填逻辑按advice表里已有的行走，不依赖这支
+# 股票还在不在当天的观察池里）。
+_WATCHLIST_TARGET_SIZE = {"US": 20, "HK": 20, "A": 10}
+
+
+def _build_watchlist() -> list[dict]:
+    """三个市场各自的get_index_top_movers独立跑，用_run_concurrent_with_deadline
+    包一层超时——实测港股那条路径（东财人气榜接口）故障时不是干脆报错，是
+    整个请求挂住不返回（底层requests调用没设超时，_with_retry的重试/退避
+    压根等不到第一次调用失败），如果不加这层保护，某天港股那边一卡，会把
+    "每天17:30必须跑完"的整条cron拖死。三个市场互不依赖，并发跑，一个卡住
+    不影响另外两个market正常出结果——某个市场这次超时/失败，观察池那天就
+    少这个市场的股票，不是空手硬凑，也不该让整个watchlist流程陪着一起卡死。
+    """
+    def _fetch(market_n):
+        market, n = market_n
+        return ds.get_index_top_movers(market, limit=n)
+
+    results = _run_concurrent_with_deadline(
+        list(_WATCHLIST_TARGET_SIZE.items()), _fetch, timeout=45, max_workers=3,
+    )
+    items = []
+    for market, df in ((m, results.get(i)) for i, (m, _n) in enumerate(_WATCHLIST_TARGET_SIZE.items())):
+        if df is None or df.empty:
+            continue
+        for _, r in df.iterrows():
+            items.append({"symbol": str(r["代码"]), "market": market, "name": r.get("名称", "") or ""})
+    return items
+
+
+# 首页排行榜只展示前5——用户明确要求"十个太多了就五个好了"，跟_LEADERBOARD_
+# SIZE（私人WeChat简报里全市场扫描那份榜单，仍然是10）分开维护，不共用一个
+# 常量，两份榜单的受众和取舍标准不一样。
+_WATCHLIST_LEADERBOARD_SIZE = 5
+
+# 观察池每天都会重新判断一遍（不是"判断一次以后就不动了"），所以事后校验
+# 没必要等7天——次日核对足够，用户明确要求"次日验证、再给新预测"这个每日
+# 循环。跟持仓/全市场扫描那两个source沿用的7天窗口分开（那两个场景是"这次
+# 判断能不能扛得住一段时间"，跟这里"每天一个新判断"的定位不同）。
+_WATCHLIST_REVIEW_MIN_AGE_DAYS = 1
+
 
 def _load_secrets_into_env():
     """脚本独立运行（不在 streamlit run 里），data_sources.py 的 st.cache_data
@@ -150,7 +199,7 @@ def _check_qwen_balance():
     except Exception as e:
         if _is_insufficient_balance_error(e):
             raise RuntimeError(
-                f"🚨🚨🚨 QWEN_API_KEY 账号余额不足/欠费，投研顾问本次运行直接终止，"
+                f"紧急：QWEN_API_KEY 账号余额不足/欠费，投研顾问本次运行直接终止，"
                 f"不再浪费后面的Futu/AkShare/AI调用。请立即到阿里云百炼控制台"
                 f"（https://bailian.console.aliyun.com/?tab=model#/costing-balance）充值。"
                 f"原始错误：{e}"
@@ -497,6 +546,21 @@ def _leaderboard(judged: list[dict], n: int = _LEADERBOARD_SIZE) -> list[dict]:
     return scored[:n]
 
 
+def judge_watchlist() -> list[dict]:
+    """每天用真实热度/涨跌幅榜重新取一批约50支热门股（_build_watchlist），
+    给首页"推荐股排行榜"用——跟screen_candidates()不同，这里不需要
+    _futu_screen_pool/_triage_pool那一整套"从几千支里筛出候选"的流程，
+    _build_watchlist()取回来的就是最终要判断的这一批，直接并发跑
+    judge_stock。规模（约50支）跟screen_candidates筛完的shortlist
+    （通常几十支）相近，沿用同样的timeout/并发度（见screen_candidates里
+    _judge_one那次调用的注释）。"""
+    watchlist = _build_watchlist()
+    results = _run_concurrent_with_deadline(
+        watchlist, lambda it: _judge_one(it, "watchlist"), timeout=400, max_workers=5
+    )
+    return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
+
+
 def screen_candidates() -> dict:
     # 每个市场各自的_futu_screen_pool内部已经用_futu_call_with_timeout做了
     # 超时保护（每页最多等30秒），不需要在这里再维护一个跨两个市场共用的
@@ -604,24 +668,34 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
    跟持仓判断要求给卖出触发条件是同一个道理，新买入同样需要一个明确的退出
    纪律，不是买了就不管。
 8. 除了四选一的结论，还要给一个0-100的综合得分，用来跨市场、跨股票统一
-   排名——这个分数不是简单套公式算出来的，是你综合基本面质量、价格位置是否
-   有安全边际、判断的确定性这三者之后给的一个整体印象分，但要符合这个锚点，
-   不同评分人给的分数才能放在一起比较：
-   - 90-100分：基本面扎实且有真实数据支撑（不是猜的），价格位置有明确安全
-     边际，判断确定性高——教科书级别的机会，这个区间应该很少给
-   - 70-89分：基本面不错，但价格位置只是合理、算不上便宜，或者存在一些
-     需要进一步验证的不确定性
-   - 50-69分：中性，基本面和价格位置里至少有一项明显打折扣，或者数据不够
-     支撑更高的信心
-   - 30-49分：明显偏弱，基本面或价格位置有硬伤，只是还没差到该卖出
-   - 0-29分：不具备任何买入逻辑，甚至存在卖出信号
-   分数要跟结论逻辑自洽（比如给"卖出"却打70分以上是不合理的），但不是
-   结论的简单换算——同样是"持有"，基本面扎实只是价格稍贵、和基本面本身
-   就有硬伤，分数应该明显不同。
+   排名。为了让不同评分人给出的分数真的能放在一起比较，不是各凭印象打分，
+   综合得分必须由下面四个维度分别打分后加总得到，不能跳过拆解直接给一个
+   总分：
+   - 基本面质量（0-40分）：盈利能力、增长的真实性（结构性改善还是一次性
+     因素驱动）、负债水平、所处行业周期位置。40分附近=数据扎实、增长可
+     持续、负债健康；20分附近=有明显硬伤或数据不足以下判断；0分附近=基本面
+     正在恶化。
+   - 价格位置安全边际（0-30分）：现价相对52周高低点的位置，结合估值历史
+     分位——有分位数据时必须按分位打分，只有静态倍数（没有历史分位）时最高
+     不超过20分，因为缺了"相对自己历史贵不贵"这个参照，打不出高确定性的分。
+     30分附近=明确低位+估值处于历史低分位；15分附近=位置中性；0分附近=接近
+     52周高点或估值明显偏贵。
+   - 技术面确认（0-15分）：技术面信号是否支持基本面结论、有没有背离。
+     15分=技术面与基本面同向确认；7分附近=信号中性或数据不足；0分=技术面
+     跟基本面结论明显背离，应该在理由里明确写出背离在哪。
+   - 数据确定性（0-15分）：财务/估值/新闻/技术面这四类数据是不是都拿到了、
+     互相是否印证——缺一类就要扣分，不能假装齐全。15分=四类数据齐全且互相
+     印证；0分=数据严重缺失，判断基本靠猜。
+   四项分数必须在"维度打分"里逐项列出来，综合得分原则上等于四项之和；如果
+   四项加总跟你的整体判断有出入，允许再做不超过±5分的微调，但必须在"理由"
+   里说明为什么调（比如"四项之和72，但新闻里有一条未被上面数据覆盖的重大
+   负面消息，下调5分"），不能四项加完之后随意大改，那样拆解打分就失去意义。
+   分数要跟结论逻辑自洽（比如给"卖出"却打70分以上是不合理的）。
 9. 最后必须附一句："仅供参考，不构成投资建议，请自行判断。"
 
 严格按以下格式输出（不要多余寒暄）：
 结论：[买入/卖出/持有/观望]
+维度打分：基本面X/40 · 价格位置X/30 · 技术面X/15 · 数据确定性X/15
 综合得分：[0-100的整数]
 置信度：[高/中/低]
 基本面：<一到两句话，增长数字要点出是一次性还是结构性>
@@ -926,7 +1000,7 @@ def _news_summary_text(symbol: str, market: str, name: str) -> str:
     lines = [f"- {t}" for t in titles[:5]]
     flagged = [t for t in titles if any(k in t for k in _NEGATIVE_NEWS_KEYWORDS)]
     if flagged:
-        lines.append("⚠️ 命中做空/监管/诉讼类关键词的标题（不论是否在上面最近5条里都要看到）：" + "；".join(flagged))
+        lines.append("注意：命中做空/监管/诉讼类关键词的标题（不论是否在上面最近5条里都要看到）：" + "；".join(flagged))
     else:
         lines.append("（已排查做空/监管/诉讼类关键词，未在近期标题中发现）")
     return "\n".join(lines)
@@ -1035,7 +1109,18 @@ def _judge_one(item: dict, source: str) -> dict | None:
 
 
 def _backfill_due_advice() -> int:
-    due = tracker.get_due_for_advice_review(_EMAIL)
+    # position/screen沿用7天窗口（默认min_age_days），watchlist每天都出新
+    # 判断，单独用1天窗口——不能合并成一次不带source过滤的查询，那样watchlist
+    # 也会被7天窗口卡住，第二天该有的"次日核对"就出不来了（见
+    # get_due_for_advice_review的source参数注释）。
+    due = (
+        tracker.get_due_for_advice_review(_EMAIL, source="position")
+        + tracker.get_due_for_advice_review(_EMAIL, source="screen")
+        + tracker.get_due_for_advice_review(
+            _EMAIL, min_age_days=_WATCHLIST_REVIEW_MIN_AGE_DAYS,
+            limit=sum(_WATCHLIST_TARGET_SIZE.values()) * 2, source="watchlist",
+        )
+    )
     if not due:
         return 0
 
@@ -1425,6 +1510,29 @@ def main():
             print("（仅供参考，需自己去券商手动下单，不会自动执行）\n")
         else:
             print("本次维持不动，没有需要操作的标的。\n")
+
+    # 固定观察池（首页"推荐股排行榜"用）——放在screen_candidates()前面跑，
+    # 后者是全市场扫描，耗时最长也最容易因为Futu限流/超时失败，watchlist
+    # 判断量小（约50支热门股，每天用热度/涨跌幅榜重新取），先跑完先落库，
+    # 不会因为后面screen_candidates出问题而连累首页这块每天都要更新的数据。
+    watchlist_judged = judge_watchlist()
+    for e in watchlist_judged:
+        tracker.log_advice(
+            _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
+            e["technical_signal"], e["action"], e["market"], e["name"], source="watchlist",
+            score=e.get("score"),
+        )
+    watchlist_board = _leaderboard(watchlist_judged, _WATCHLIST_LEADERBOARD_SIZE)
+    print(f"（热门观察池：{len(watchlist_judged)} 支已更新，首页推荐股排行榜取前{len(watchlist_board)}）\n")
+    # 用户明确要求这份排行榜同步到微信（OpenClaw读取本脚本stdout转发的那条
+    # 简报）——跟下面screen_candidates那份"综合得分排行榜"用同样的章节格式/
+    # 同一个_fmt_entry，保持简报里两份榜单的排版一致。
+    print(f"==================== 首页推荐股排行榜 Top {len(watchlist_board)}（热门观察池） ====================")
+    if watchlist_board:
+        for i, e in enumerate(watchlist_board, 1):
+            print(_fmt_entry(e, rank=i))
+    else:
+        print("（本次观察池判断全部失败或都没有有效得分，跳过。）\n")
 
     data = screen_candidates()
     print(_pool_summary(data["us_pool"], data["us_all_count"], "美股"))
