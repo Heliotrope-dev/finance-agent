@@ -67,8 +67,32 @@ def build_context(email: str | None) -> str:
     算好（用户还没打第一个字之前），不用每轮对话都重新查一遍数据库。
     """
     import tracker
+    import data_sources as ds
 
     parts = []
+
+    # 三个市场的核心指数快照+首页世界地图那几个国际指数——用户明确反馈过
+    # "问恒生科技指数最新数据答不上来，网站'行情'页明明就有"，说明这类
+    # 公开行情数据也得算进"所有数据"里，不能只顾着账号相关的数据。
+    try:
+        idx_lines = []
+        for market in ("A", "HK", "US"):
+            for row in ds.get_multi_index_snapshot(market):
+                idx_lines.append(
+                    f"  {row.get('名称')}（{market}）最新{row.get('最新')}，涨跌幅{row.get('涨跌幅'):.2f}%"
+                )
+        if idx_lines:
+            parts.append("三个市场核心指数快照：\n" + "\n".join(idx_lines))
+    except Exception:
+        pass
+
+    try:
+        gidx = ds.get_global_indices()
+        if gidx:
+            lines = [f"  {name}：最新{v.get('最新')}，涨跌幅{v.get('涨跌幅'):.2f}%" for name, v in gidx.items()]
+            parts.append("首页世界地图上的国际指数：\n" + "\n".join(lines))
+    except Exception:
+        pass
 
     try:
         board = tracker.get_latest_leaderboard(limit=5, source="watchlist")
