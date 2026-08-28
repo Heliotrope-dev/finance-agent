@@ -91,16 +91,35 @@ def build_context(email: str | None) -> str:
         positions = tracker.get_positions(email)
         held = [p for p in positions if (p.get("shares") or 0) > 0]
         if held:
+            # 每支持仓都带上AI最新一次的买入/卖出/持有/观望判断——用户明确
+            # 要求"所有数据"、不用自己再手动说一遍持仓情况，这里连AI对
+            # 每支持仓的最新参考意见也一并给，问"我该不该卖XX"能直接答。
+            pos_advice = tracker.get_position_advice(email)
+
             def _fmt_pos(p):
                 shares = p["shares"]
                 avg_cost = (p.get("cost_total") or 0) / shares if shares else 0
+                adv = pos_advice.get(p["symbol"])
+                adv_text = f"，AI最新参考：{adv['action']}" if adv else ""
                 return (
                     f"  {p.get('name') or p.get('symbol')}（{p.get('symbol')}·{p.get('market')}）"
-                    f"持有{shares:g}股，平均成本约{avg_cost:.2f}{p.get('currency', 'CNY')}"
+                    f"持有{shares:g}股，平均成本约{avg_cost:.2f}{p.get('currency', 'CNY')}{adv_text}"
                 )
             parts.append("用户当前持仓：\n" + "\n".join(_fmt_pos(p) for p in held))
         else:
             parts.append("用户当前没有持仓记录。")
+    except Exception:
+        pass
+
+    try:
+        pf = tracker.get_latest_portfolio_advice(email)
+        if pf and pf.get("analysis_text"):
+            excerpt = pf["analysis_text"][:400]
+            parts.append(
+                f"用户最近一次组合分析（{pf.get('created_at', '')[:10]}，总市值约"
+                f"{pf.get('total_value_cny') or '—'}元）摘要：\n{excerpt}"
+                + ("…（后面还有，用户问细节时如实说这段是摘要）" if len(pf["analysis_text"]) > 400 else "")
+            )
     except Exception:
         pass
 
