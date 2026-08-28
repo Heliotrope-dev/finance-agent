@@ -53,6 +53,7 @@ from analysis import (
     cross_validate, summarize_financials, summarize_news, summarize_index_news, summarize_benchmark,
     extract_verdict, analyze_index, summarize_overall, extract_score,
 )
+from assistant import build_context as build_assistant_context, stream_reply as stream_assistant_reply
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
     get_accuracy_trend, get_daily_accuracy, add_watch_only, is_position_tracked,
@@ -595,6 +596,28 @@ def _esc(s) -> str:
     if s is None:
         return ""
     return html.escape(str(s), quote=True)
+
+
+def _chat_bubble(role: str, text: str) -> str:
+    """AI咨询浮窗用的聊天气泡——用户明确要求跟主流AI聊天产品一致的经典
+    样式：用户消息靠右、蓝底白字；AI回复靠左、白底黑字，不带任何头像图标
+    （st.chat_message自带的默认头像是卡通小图标，跟"不许有emoji/装饰图标"
+    的要求冲突，改成纯HTML拼这个气泡，不用chat_message）。
+    用户消息走_esc转义（用户输入不可信，防XSS）；AI回复不转义、原样走
+    markdown渲染——AI输出的**加粗**这类格式化要保留，且是本模块自己生成的
+    内容，不是外部抓取的不可信文本。
+    """
+    is_user = role == "user"
+    align = "flex-end" if is_user else "flex-start"
+    bg = "#2563eb" if is_user else "#f0f1f3"
+    color = "#fff" if is_user else "#1a1a1a"
+    body = _esc(text) if is_user else text
+    return (
+        f"<div style='display:flex;justify-content:{align};margin:6px 2px'>"
+        f"<div style='max-width:82%;padding:8px 13px;border-radius:16px;background:{bg};"
+        f"color:{color};font-size:0.88rem;line-height:1.5;white-space:pre-wrap;word-break:break-word'>"
+        f"{body}</div></div>"
+    )
 
 
 def _safe_href(url) -> str:
@@ -1808,6 +1831,76 @@ def _render_advice_section():
                 for sec in ("基本面", "技术面", "价格位置"):
                     if parts.get(sec):
                         st.markdown(f"**{sec}**：{_esc(parts[sec])}")
+
+
+def _render_ai_assistant():
+    """右下角"AI 咨询"悬浮按钮——不管在哪个分区都常驻显示，点开是个能聊天的
+    浮窗，能看到用户自己的持仓/回看历史（登录后）+ 首页推荐股排行榜这类
+    全站公开数据（游客也能看到），回答"这个网站怎么用/这个数字什么意思"
+    这类问题不用用户自己去翻。
+
+    实现思路：用st.popover而不是自己拿HTML/JS搭一个浮层——popover是
+    Streamlit原生组件，不用操心sandboxed iframe/跨frame通信这些坑（这个
+    项目在登录态那块已经踩过components.v1.html iframe的坑，见_BRIDGE_JS
+    相关历史记录）。触发按钮本身用CSS钉在右下角固定位置——Streamlit给
+    带key的组件容器自动加`st-key-<key>`这个class（持仓卡片搜索/添加按钮
+    已经在用同一个技巧，见_render_position_rows附近的CSS），不用去猜
+    Streamlit内部生成的DOM结构。
+    """
+    st.markdown(
+        "<style>"
+        ".st-key-ai_assistant_popover{position:fixed;bottom:24px;right:24px;z-index:9999;}"
+        f".st-key-ai_assistant_popover button{{"
+        f"border-radius:50%!important;width:68px;height:68px;padding:0!important;"
+        f"background:{UP_COLOR}!important;border-color:{UP_COLOR}!important;"
+        f"box-shadow:0 3px 16px rgba(0,0,0,0.35);font-weight:800;font-size:1.05rem;"
+        f"}}"
+        f".st-key-ai_assistant_popover button p{{color:#fff!important;font-size:1.05rem!important;font-weight:800!important;}}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+    with st.popover("AI", key="ai_assistant_popover"):
+        st.markdown("**AI 咨询**")
+        st.caption("可以问这个网站怎么用、你自己的持仓/历史记录，仅供参考，不构成投资建议。")
+
+        email = st.session_state.get("user_email") if st.session_state.get("logged_in") else None
+        if "_assistant_messages" not in st.session_state:
+            st.session_state["_assistant_messages"] = []
+        # 上下文只在浮窗打开后第一次算，同一个会话里复用——持仓/历史记录
+        # 这类数据变化不快，没必要每发一条消息都重新查一遍数据库；
+        # 用户明确要求"重新开一次对话"才需要最新数据可以接受这个折衷。
+        if "_assistant_context" not in st.session_state:
+            try:
+                st.session_state["_assistant_context"] = build_assistant_context(email)
+            except Exception:
+                st.session_state["_assistant_context"] = "（数据加载失败，先聊网站怎么用的问题）"
+
+        # 不用st.chat_message——它自带的默认头像是个卡通小图标，用户明确要求
+        # 整个网站不许出现任何emoji/装饰性图标，且要求跟GPT一致的"用户蓝气泡/
+        # AI白气泡"经典聊天条样式，改成自己拼HTML气泡，不带任何头像。
+        bubble_box = st.container(height=320)
+        with bubble_box:
+            for m in st.session_state["_assistant_messages"]:
+                st.markdown(_chat_bubble(m["role"], m["content"]), unsafe_allow_html=True)
+
+        prompt = st.chat_input("问点什么...")
+        if prompt:
+            st.session_state["_assistant_messages"].append({"role": "user", "content": prompt})
+            with bubble_box:
+                st.markdown(_chat_bubble("user", prompt), unsafe_allow_html=True)
+                placeholder = st.empty()
+                reply = ""
+                try:
+                    for chunk in stream_assistant_reply(
+                        st.session_state["_assistant_messages"], st.session_state["_assistant_context"],
+                    ):
+                        reply += chunk
+                        placeholder.markdown(_chat_bubble("assistant", reply + " ▌"), unsafe_allow_html=True)
+                    placeholder.markdown(_chat_bubble("assistant", reply), unsafe_allow_html=True)
+                except Exception as e:
+                    reply = f"回答失败：{e}"
+                    placeholder.markdown(_chat_bubble("assistant", reply), unsafe_allow_html=True)
+            st.session_state["_assistant_messages"].append({"role": "assistant", "content": reply})
 
 
 def _render_home_page():
@@ -3576,4 +3669,6 @@ else:
 
         elif active_section == "回看":
             _render_accuracy_dashboard(_uemail)
+
+        _render_ai_assistant()
 
