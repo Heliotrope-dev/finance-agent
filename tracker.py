@@ -831,6 +831,14 @@ def get_latest_leaderboard(limit: int = 10, source: str = "screen") -> dict:
     source='watchlist'跟原来的'screen'（全市场扫描，仍然喂私人微信简报）
     是两套独立的每日批次，不能混在一起按score排——参数化而不是复制一份
     函数，两边的查询逻辑完全一样，只是source不同。
+
+    同一支股票当天可能有不止一条记录（观察池每天固定但热度榜会变，同一支
+    股票理论上不会同一次运行里出现两次，但如果cron当天意外重跑过、或者
+    调试时手动多跑了几次，同一天会攒出好几条不同分数的记录）——之前这里
+    没去重，直接按分数排，会导致同一支股票占了排行榜里好几个名次（用户
+    截图发现"小米集团"同时出现在#1和#3）。改成先按symbol取当天最新一条
+    （MAX(id)，id自增等价于按时间取最新），再排分数，跟get_position_advice
+    "每个symbol取最近一条"是同一个模式。
     """
     init_db()
     with closing(_conn()) as c:
@@ -842,9 +850,15 @@ def get_latest_leaderboard(limit: int = 10, source: str = "screen") -> dict:
             return {"run_date": None, "leaderboard": []}
         run_date = latest["created_at"][:10]
         rows = c.execute(
-            "SELECT * FROM advice WHERE source = ? AND created_at LIKE ? AND score IS NOT NULL "
-            "ORDER BY score DESC LIMIT ?",
-            (source, f"{run_date}%", limit),
+            """
+            SELECT * FROM advice WHERE source = ? AND created_at LIKE ? AND score IS NOT NULL
+            AND id IN (
+                SELECT MAX(id) FROM advice WHERE source = ? AND created_at LIKE ? AND score IS NOT NULL
+                GROUP BY symbol
+            )
+            ORDER BY score DESC LIMIT ?
+            """,
+            (source, f"{run_date}%", source, f"{run_date}%", limit),
         ).fetchall()
     return {"run_date": run_date, "leaderboard": [dict(r) for r in rows]}
 
