@@ -228,10 +228,13 @@ def init_db():
             FROM watchlist
             """
         )
-        # advice表里source='watchlist'是"持仓分析"上线之前的旧标签，
-        # 统一改成'position'，跟log_advice新默认值/get_position_advice的查询
-        # 条件对齐，不留旧名字的数据痕迹。
-        c.execute("UPDATE advice SET source = 'position' WHERE source = 'watchlist'")
+        # 2026-08-21曾经在这里加过一条"UPDATE advice SET source='position'
+        # WHERE source='watchlist'"，清理"持仓分析"上线前advice表里的旧
+        # source标签——2026-08-28给"推荐股排行榜"重新用了'watchlist'这个
+        # 值（跟这张watchlist表同名但完全是另一回事），那条一次性迁移语句
+        # 因为每次进程启动都无条件重跑，把新功能刚写进去的数据当场吃掉，
+        # 排查了很久才找到。删掉了——以后不要再对advice.source做基于字符串
+        # 值的无条件UPDATE，新老含义容易撞名。
         c.commit()
     _db_initialized = True
 

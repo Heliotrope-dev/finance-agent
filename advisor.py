@@ -551,12 +551,17 @@ def judge_watchlist() -> list[dict]:
     给首页"推荐股排行榜"用——跟screen_candidates()不同，这里不需要
     _futu_screen_pool/_triage_pool那一整套"从几千支里筛出候选"的流程，
     _build_watchlist()取回来的就是最终要判断的这一批，直接并发跑
-    judge_stock。规模（约50支）跟screen_candidates筛完的shortlist
-    （通常几十支）相近，沿用同样的timeout/并发度（见screen_candidates里
-    _judge_one那次调用的注释）。"""
+    judge_stock。
+
+    timeout=600/max_workers=8：用户明确要求50支必须尽量判断齐全，不能
+    因为跑不完而缺斤短两——实测max_workers=5/timeout=400时，50支要排
+    10轮，卡在400秒截止线附近的那几支会被deadline直接掐掉（连开始跑都
+    没有），稳定只出36/50。调大并发到8（跟_backfill_due_advice等其它
+    批量调用点一致的量级）、超时放宽到600秒，这是一天一次的后台任务，
+    不是用户在等的实时请求，多给点时间换完整度划算。"""
     watchlist = _build_watchlist()
     results = _run_concurrent_with_deadline(
-        watchlist, lambda it: _judge_one(it, "watchlist"), timeout=400, max_workers=5
+        watchlist, lambda it: _judge_one(it, "watchlist"), timeout=600, max_workers=8
     )
     return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
 

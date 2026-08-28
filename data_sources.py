@@ -2249,12 +2249,19 @@ def get_financial_abstract(symbol: str, market: str = "A") -> pd.DataFrame:
     """
     try:
         if market == "HK":
-            return _with_retry(lambda: ak.stock_financial_hk_analysis_indicator_em(symbol=symbol, indicator="年度"))
-        if market == "US":
-            return _with_retry(lambda: ak.stock_financial_us_analysis_indicator_em(symbol=symbol, indicator="年报"))
-        return _with_retry(lambda: ak.stock_financial_abstract(symbol=symbol))
+            df = _with_retry(lambda: ak.stock_financial_hk_analysis_indicator_em(symbol=symbol, indicator="年度"))
+        elif market == "US":
+            df = _with_retry(lambda: ak.stock_financial_us_analysis_indicator_em(symbol=symbol, indicator="年报"))
+        else:
+            df = _with_retry(lambda: ak.stock_financial_abstract(symbol=symbol))
     except Exception:
         return pd.DataFrame()
+    # 东财原始数据里有些指标（比如没有过并购的公司的"商誉"）某些期数就是
+    # None——这是真实的"这项不适用/未披露"，不是取数失败，但None被
+    # st.dataframe/.to_string()原样显示成字面的"None"三个字母，用户会
+    # 以为是bug。统一换成"—"（这个项目里"没有数据"的通用占位符，别处
+    # 一直这么用），显示给用户和喂给AI的文本口径保持一致，不用改两处。
+    return df.fillna("—")
 
 
 @st.cache_data(ttl=600, show_spinner=False)

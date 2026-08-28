@@ -1695,7 +1695,7 @@ def _render_advice_section():
     结果，首页访问不现场重新跑——重新跑一次要几分钟、几十次AI调用，公开页面
     每次访问都触发一遍完全不现实，也没必要（这类基本面判断一天一次足够新）。
     """
-    st.markdown("**AI 投研候选**")
+    st.markdown("**推荐股排行榜**")
     # 卡片可点击跳转详情页——复用持仓列表卡片验证过的方案（见
     # _render_position_rows 的踩坑记录：JS/CSS猜DOM结构点不动，最后用最朴素
     # 的<a href="?open_symbol=...">整页导航才可靠）。那段CSS只在持仓tab渲染
@@ -1723,7 +1723,7 @@ def _render_advice_section():
         return
 
     if not data.get("run_date"):
-        st.caption("还没有生成过投研候选（每个工作日17:30自动更新一次）。")
+        st.caption("还没有生成过推荐股排行榜（每个工作日17:30自动更新一次）。")
         return
 
     # 说明文字/更新时间/历史一致率折进一个默认收起的expander——不再在模块
