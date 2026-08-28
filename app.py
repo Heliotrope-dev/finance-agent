@@ -1861,7 +1861,6 @@ def _render_ai_assistant():
     )
     with st.popover("AI", key="ai_assistant_popover"):
         st.markdown("**AI 咨询**")
-        st.caption("可以问这个网站怎么用、你自己的持仓/历史记录，仅供参考，不构成投资建议。")
 
         email = st.session_state.get("user_email") if st.session_state.get("logged_in") else None
         if "_assistant_messages" not in st.session_state:
