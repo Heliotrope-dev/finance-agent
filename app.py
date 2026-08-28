@@ -2807,7 +2807,7 @@ def _render_accuracy_dashboard(email: str):
             unsafe_allow_html=True,
         )
         st.markdown(
-            f"<div style='text-align:center;font-size:0.92rem;margin-top:4px'>💡 {_insight}</div>",
+            f"<div style='text-align:center;font-size:0.92rem;margin-top:4px'>{_insight}</div>",
             unsafe_allow_html=True,
         )
 
