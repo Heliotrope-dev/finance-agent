@@ -6,6 +6,7 @@
 表现，只是历史记录的客观统计，避免误导。
 """
 
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -132,6 +133,25 @@ def init_db():
         _advice_cols = [r[1] for r in c.execute("PRAGMA table_info(advice)").fetchall()]
         if "score" not in _advice_cols:
             c.execute("ALTER TABLE advice ADD COLUMN score INTEGER")
+
+        # 老库升级：2026-08-29——Fable 5复核指出，四个维度打分（"维度打分：
+        # 基本面X/40 · 价格位置X/30 · 技术面X/15 · 数据确定性X/15"）只活在
+        # fundamental_verdict这段自由文本里，从没被结构化提取过，导致
+        # get_score_band_backtest永远只能回测"综合得分"这一个黑箱数字，
+        # 没法回答"到底是哪个维度真的有预测力"。补上四个独立列，log_advice
+        # 写入时会自动从fundamental_verdict里正则提取（extract_score_
+        # breakdown），解析不出来就存NULL（不强行凑数字）。这里只补列，
+        # 历史数据的回填是独立跑的一次性脚本，不在这个migration里做
+        # （init_db每次进程启动都会跑一遍，回填这种一次性操作不该跟常规
+        # 迁移逻辑绑在一起，容易在未来忘记这里还留着一次性代码）。
+        if "score_fundamental" not in _advice_cols:
+            c.execute("ALTER TABLE advice ADD COLUMN score_fundamental INTEGER")
+        if "score_price_position" not in _advice_cols:
+            c.execute("ALTER TABLE advice ADD COLUMN score_price_position INTEGER")
+        if "score_technical" not in _advice_cols:
+            c.execute("ALTER TABLE advice ADD COLUMN score_technical INTEGER")
+        if "score_data_certainty" not in _advice_cols:
+            c.execute("ALTER TABLE advice ADD COLUMN score_data_certainty INTEGER")
 
         # positions：取代 watchlist 表的"持仓分析"数据模型。shares=0 表示"只
         # 关注不持仓"（详情页"关注"按钮走这个状态）。
@@ -635,19 +655,55 @@ def add_search_history(email: str, query: str, market: str = "A"):
         c.commit()
 
 
+def extract_score_breakdown(text: str) -> dict:
+    """从AI判断原文里解析"维度打分：基本面X/40 · 价格位置X/30 · 技术面X/15 ·
+    数据确定性X/15"这一行，拆成四个独立数字——advisor.py的_JUDGE_SYSTEM
+    prompt里要求AI必须输出这一行，但之前从没被结构化提取过，只是混在
+    fundamental_verdict这段自由文本里，导致get_score_band_backtest永远
+    只能回测"综合得分"这一个黑箱数字，没法回答"到底哪个维度真的有预测力"
+    （2026-08-29 Fable 5复核指出的缺口）。
+
+    每个子分数独立解析、独立返回None（不是整行解析失败就全部放弃）——
+    某天AI输出格式稍微跑偏、少写了一项，不该因为这一项连累另外三项也
+    解析不出来。允许"X/40"里的"X"是"—"或空（AI偶尔会用占位符表示这项
+    没法打分），这种情况该子项返回None，不当0分处理，跟这个项目一贯
+    "解析不出来不代表0分"的原则一致。
+    """
+    result = {"fundamental": None, "price_position": None, "technical": None, "data_certainty": None}
+    m = re.search(r"维度打分[：:]([^\n]+)", text)
+    if not m:
+        return result
+    line = m.group(1)
+    patterns = {
+        "fundamental": r"基本面\s*(\d+)\s*/\s*40",
+        "price_position": r"价格位置\s*(\d+)\s*/\s*30",
+        "technical": r"技术面\s*(\d+)\s*/\s*15",
+        "data_certainty": r"数据确定性\s*(\d+)\s*/\s*15",
+    }
+    for key, pat in patterns.items():
+        pm = re.search(pat, line)
+        if pm:
+            result[key] = int(pm.group(1))
+    return result
+
+
 def log_advice(
     email: str, symbol: str, price_at_advice: float, fundamental_verdict: str,
     technical_signal: str, action: str = "观望", market: str = "A", name: str = "",
     source: str = "position", score: int | None = None,
 ) -> int:
     init_db()
+    breakdown = extract_score_breakdown(fundamental_verdict)
     with closing(_conn()) as c:
         cur = c.execute(
             "INSERT INTO advice (email, symbol, market, name, created_at, price_at_advice, "
-            "fundamental_verdict, technical_signal, action, source, score) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "fundamental_verdict, technical_signal, action, source, score, "
+            "score_fundamental, score_price_position, score_technical, score_data_certainty) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (email, symbol, market, name, datetime.now(timezone.utc).isoformat(), price_at_advice,
-             fundamental_verdict, technical_signal, action, source, score),
+             fundamental_verdict, technical_signal, action, source, score,
+             breakdown["fundamental"], breakdown["price_position"],
+             breakdown["technical"], breakdown["data_certainty"]),
         )
         c.commit()
         return cur.lastrowid
@@ -706,32 +762,107 @@ def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict
     min_sample：单个分数区间样本数低于这个值时，只报样本数、不算平均收益/胜率
     ——小样本的极端值很容易被误读成"规律"，与其给一个可能带偏差的数字，不如
     如实说"数据还不够"，这是这个项目一贯"不编数字"的原则在这里的延伸。
+
+    2026-08-29新增"按市场"拆分（返回字典多一个"按市场"键）：Fable 5复核
+    时指出，A股观察池选股口径是涨停股池（当天已经涨停10%/20%的股票），
+    跟港美股"人气榜/知名蓝筹"完全不是同一类总体——A股涨停股次日走势更多
+    是"情绪面剩余动能能不能延续"，跟基本面质量的相关性天然弱，如果三个
+    市场混在同一批分数区间里回测，A股这类跟基本面无关的噪音会污染"这套
+    打分体系到底有没有预测力"这个问题的检验结果。总体的bands还保留（有
+    些场景就是想看整体），但同时也按市场各自独立算一遍，方便对照。
     """
+    def _compute_bands(rows: list[dict]) -> list[dict]:
+        bands = []
+        for lo, hi, label in _SCORE_BANDS:
+            band_rows = [r for r in rows if lo <= r["score"] <= hi]
+            n = len(band_rows)
+            if n == 0:
+                bands.append({"band": label, "count": 0, "avg_return_pct": None, "win_rate_pct": None})
+                continue
+            returns = [(r["review_price"] - r["price_at_advice"]) / r["price_at_advice"] * 100 for r in band_rows]
+            entry = {"band": label, "count": n, "avg_return_pct": None, "win_rate_pct": None}
+            if n >= min_sample:
+                entry["avg_return_pct"] = round(sum(returns) / n, 2)
+                entry["win_rate_pct"] = round(sum(1 for x in returns if x > 0) / n * 100, 1)
+            bands.append(entry)
+        return bands
+
     init_db()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
         rows = c.execute(
-            "SELECT score, price_at_advice, review_price FROM advice WHERE source = ? "
+            "SELECT score, market, price_at_advice, review_price FROM advice WHERE source = ? "
             "AND score IS NOT NULL AND review_price IS NOT NULL "
             "AND price_at_advice IS NOT NULL AND price_at_advice > 0",
             (source,),
         ).fetchall()
     rows = [dict(r) for r in rows]
 
-    bands = []
-    for lo, hi, label in _SCORE_BANDS:
-        band_rows = [r for r in rows if lo <= r["score"] <= hi]
-        n = len(band_rows)
-        if n == 0:
-            bands.append({"band": label, "count": 0, "avg_return_pct": None, "win_rate_pct": None})
+    by_market = {
+        m: {"total_reviewed": len(mrows), "bands": _compute_bands(mrows)}
+        for m in sorted(set(r.get("market", "A") for r in rows))
+        for mrows in [[r for r in rows if r.get("market", "A") == m]]
+    }
+    return {
+        "total_reviewed": len(rows), "min_sample": min_sample,
+        "bands": _compute_bands(rows), "按市场": by_market,
+    }
+
+
+_DIMENSION_COLUMNS = {
+    "基本面质量": "score_fundamental",
+    "价格位置安全边际": "score_price_position",
+    "技术面确认": "score_technical",
+    "数据确定性": "score_data_certainty",
+}
+
+
+def get_dimension_predictive_value(source: str = "watchlist", min_sample: int = 6) -> dict:
+    """回答Fable 5复核提出的核心问题："综合得分里四个维度，到底是哪个真的
+    对预测有贡献，哪个只是看起来严谨？"——get_score_band_backtest只能回测
+    "综合得分"这一个加总后的数字，没法拆开看，这个函数用extract_score_
+    breakdown回填出来的四个独立列，把每个维度单独拿出来验证。
+
+    做法：每个维度分别按"这个维度这次打分是不是在该维度中位数以上"把样本
+    分成高分组/低分组，对比两组的事后平均涨跌幅——不用更复杂的相关系数/
+    回归（样本量现在还很小，算出来的相关系数本身就不可靠，容易给人"看起来
+    精确"但其实是噪音的错觉），高低分组对比这种最朴素的办法，在小样本下
+    更不容易被过度解读，跟这个项目一贯"宁可少给结论也不编"的原则一致。
+    单个维度里某次判断没解析出这个维度的分数（extract_score_breakdown
+    返回None的情况）就不计入这个维度的统计，不当0分处理。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            f"SELECT {', '.join(_DIMENSION_COLUMNS.values())}, price_at_advice, review_price "
+            "FROM advice WHERE source = ? AND review_price IS NOT NULL "
+            "AND price_at_advice IS NOT NULL AND price_at_advice > 0",
+            (source,),
+        ).fetchall()
+    rows = [dict(r) for r in rows]
+
+    result = {}
+    for label, col in _DIMENSION_COLUMNS.items():
+        valid = [r for r in rows if r.get(col) is not None]
+        n = len(valid)
+        if n < min_sample:
+            result[label] = {"count": n, "min_sample": min_sample, "note": "样本不够，暂不计算"}
             continue
-        returns = [(r["review_price"] - r["price_at_advice"]) / r["price_at_advice"] * 100 for r in band_rows]
-        entry = {"band": label, "count": n, "avg_return_pct": None, "win_rate_pct": None}
-        if n >= min_sample:
-            entry["avg_return_pct"] = round(sum(returns) / n, 2)
-            entry["win_rate_pct"] = round(sum(1 for x in returns if x > 0) / n * 100, 1)
-        bands.append(entry)
-    return {"total_reviewed": len(rows), "min_sample": min_sample, "bands": bands}
+        valid.sort(key=lambda r: r[col])
+        mid = n // 2
+        low_group, high_group = valid[:mid], valid[mid:]
+
+        def _avg_return(group):
+            returns = [(r["review_price"] - r["price_at_advice"]) / r["price_at_advice"] * 100 for r in group]
+            return round(sum(returns) / len(returns), 2)
+
+        result[label] = {
+            "count": n,
+            "低分组": {"count": len(low_group), "avg_return_pct": _avg_return(low_group)},
+            "高分组": {"count": len(high_group), "avg_return_pct": _avg_return(high_group)},
+        }
+    return result
 
 
 def _advice_accuracy_from_rows(rows: list[dict]) -> dict:
