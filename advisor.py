@@ -19,6 +19,21 @@ Futu SDK 自带的 get_stock_filter（按市值/PE/盈利增长这些真实指�
 import json
 import os
 import re
+import sys
+
+# 2026-08-28踩的坑：这个脚本是被OpenClaw的cron当shell命令跑起来的（不是
+# 交互式终端），Python在这种非tty环境下默认给stdout用"全缓冲"而不是"行
+# 缓冲"——所有print()内容全部攒在内存缓冲区里，直到脚本快结束时才一次性
+# 冲出来。这本身不影响脚本自己的逻辑（结尾os._exit前有显式flush，见
+# __main__），但OpenClaw自己有一层"这个shell命令是不是卡住了"的监控，
+# 盯的是"这个exec调用有没有输出"，不是"跑了多久"——真实故障：2026-08-28
+# 17:30那次投研顾问，脚本本身在正常judge_watchlist（跑了大约9分钟），但
+# 因为全缓冲一个字节都没输出，OpenClaw在869秒完全看不到进度后判定"卡死"，
+# 直接把整个agent run杀了（AbortError: agent run aborted），当天微信简报
+# 没发出去，不是脚本真的卡住或跑超时，是外层监控被"看起来卡住"骗了。改成
+# 行缓冲，脚本里原有的那些print（"已回填X条""持仓判断X只已更新"...）会
+# 实时冲出来，让外层监控全程看得到进度，不会再误判。
+sys.stdout.reconfigure(line_buffering=True)
 
 # 必须在任何可能引入 tqdm/streamlit 的 import 之前设置，减少 exec 工具读输出时
 # 的噪音（详见下方 __main__ 里的说明）。
@@ -28,8 +43,11 @@ _logging.getLogger("streamlit").setLevel(_logging.ERROR)
 
 import queue as _queue
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed as _as_completed
 from concurrent.futures import wait as _futures_wait
+from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from datetime import datetime, timedelta
 
 import futu as ft
@@ -95,16 +113,19 @@ _TRIAGE_POOL_SIZE = 100
 _LEADERBOARD_SIZE = 10
 
 # 2026-08-28：首页"推荐股排行榜"用的观察池——用户明确要求"不是定死，是
-# 随着热度排行榜变化的"：每天用真实的热度/涨跌幅榜重新取一遍前20美股/
-# 20港股/10A股，不是写死的名单。港股/A股用get_index_top_movers（内部已经
-# 有"热度榜挂了退回涨跌幅榜"的兜底，见该函数docstring），美股没有真正的
-# 热度榜数据源（见get_us_famous_movers的docstring），退而求其次用
-# _US_FAMOUS_CODES这份知名股名单按当天涨跌幅重新排序，好歹能做到"名单本身
-# 不变但每天的排名会变"。就算某支股票今天从热度榜掉出去了，前一天给它的
-# 判断依然要在到期后正常回填价格算对错（见_backfill_due_advice/
-# get_due_for_advice_review，回填逻辑按advice表里已有的行走，不依赖这支
-# 股票还在不在当天的观察池里）。
-_WATCHLIST_TARGET_SIZE = {"US": 20, "HK": 20, "A": 10}
+# 随着热度排行榜变化的"：每天用真实的热度/涨跌幅榜重新取一遍前60美股/
+# 40港股/20A股（合计120支，2026-08-28从20/20/10=50支扩容），不是写死的
+# 名单。港股/A股用get_index_top_movers（内部已经有"热度榜挂了退回涨跌幅榜"
+# 的兜底，见该函数docstring），美股没有真正的热度榜数据源（见
+# get_us_famous_movers的docstring），退而求其次用_US_FAMOUS_CODES这份知名
+# 股名单按当天涨跌幅重新排序，好歹能做到"名单本身不变但每天的排名会变"。
+# 扩容到120支后_US_FAMOUS_CODES/_HK_FAMOUS_CODES这两份兜底名单也各自补了
+# 股票，保证就算热度榜/Futu都不可用，兜底路径也有足够的股票数覆盖目标
+# 规模（见这两份名单各自的"2026-08-28"注释）。就算某支股票今天从热度榜
+# 掉出去了，前一天给它的判断依然要在到期后正常回填价格算对错（见
+# _backfill_due_advice/get_due_for_advice_review，回填逻辑按advice表里
+# 已有的行走，不依赖这支股票还在不在当天的观察池里）。
+_WATCHLIST_TARGET_SIZE = {"US": 60, "HK": 40, "A": 20}
 
 
 def _build_watchlist() -> list[dict]:
@@ -232,24 +253,51 @@ def _zhipu_client() -> OpenAI | None:
         return None
 
 
-def _run_concurrent_with_deadline(items: list, fn, timeout: float, max_workers: int = 8) -> dict:
+def _run_concurrent_with_deadline(
+    items: list, fn, timeout: float, max_workers: int = 8, progress_label: str = "",
+) -> dict:
     """跟 app.py 里同名函数逻辑一致的小拷贝——那个函数本身不依赖 Streamlit
     state，但定义在 app.py 里，这个脚本不方便 import 整个 app.py（会连带跑
     Streamlit 页面配置代码），抄一份轻量独立版本，语义和踩坑记录见 app.py
     原版的 docstring：统一 deadline（从 submit 那一刻算起，不是逐个
     future.result(timeout=N)），避免总耗时失控。
+
+    progress_label：2026-08-28新增——不传就是原来的行为（用wait()一次性等，
+    中间不打印）。传了的话改用as_completed逐个消费，每完成10个就打印一行
+    进度。这是给这批股票数量比较多、单批judge可能要跑很久的调用点用的：
+    真实故障是OpenClaw那边有个"这个shell命令是不是卡住了"的监控，只看
+    "这个exec调用有没有输出"，跟脚本自己的deadline没关系——一批judge如果
+    跑十几分钟中间一个字都不打印，会被外层监控误判成卡死直接杀掉整个进程
+    （2026-08-28 17:30那次投研顾问真实故障，见sys.stdout.reconfigure那条
+    注释）。加了单支热门股观察池扩到120支之后单批judge时间更长，风险更高，
+    这里补上周期性输出，不能只指望调用方自己在批次前后各打一行。
     """
     results: dict[int, object] = {}
     if not items:
         return results
     ex = ThreadPoolExecutor(max_workers=min(max_workers, len(items)))
     futures = {ex.submit(fn, item): i for i, item in enumerate(items)}
-    done, _not_done = _futures_wait(list(futures.keys()), timeout=timeout)
-    for fut in done:
+    if not progress_label:
+        done, _not_done = _futures_wait(list(futures.keys()), timeout=timeout)
+        for fut in done:
+            try:
+                results[futures[fut]] = fut.result()
+            except Exception:
+                pass
+    else:
+        deadline = time.time() + timeout
+        done_count = 0
         try:
-            results[futures[fut]] = fut.result()
-        except Exception:
-            pass
+            for fut in _as_completed(list(futures.keys()), timeout=timeout):
+                try:
+                    results[futures[fut]] = fut.result()
+                except Exception:
+                    pass
+                done_count += 1
+                if done_count % 10 == 0 or time.time() >= deadline:
+                    print(f"（{progress_label}：{done_count}/{len(items)} 完成…）")
+        except _FuturesTimeoutError:
+            print(f"（{progress_label}：{done_count}/{len(items)} 完成，到达{timeout:g}秒截止线，未完成的这批不再等）")
     ex.shutdown(wait=False, cancel_futures=True)
     return results
 
@@ -547,31 +595,28 @@ def _leaderboard(judged: list[dict], n: int = _LEADERBOARD_SIZE) -> list[dict]:
 
 
 def judge_watchlist() -> list[dict]:
-    """每天用真实热度/涨跌幅榜重新取一批约50支热门股（_build_watchlist），
-    给首页"推荐股排行榜"用——跟screen_candidates()不同，这里不需要
-    _futu_screen_pool/_triage_pool那一整套"从几千支里筛出候选"的流程，
-    _build_watchlist()取回来的就是最终要判断的这一批，直接并发跑
-    judge_stock。
+    """每天用真实热度/涨跌幅榜重新取一批热门股（_build_watchlist，规模见
+    _WATCHLIST_TARGET_SIZE），给首页"推荐股排行榜"用——跟screen_candidates()
+    不同，这里不需要_futu_screen_pool/_triage_pool那一整套"从几千支里筛出
+    候选"的流程，_build_watchlist()取回来的就是最终要判断的这一批，直接
+    并发跑judge_stock。
 
-    timeout=480/max_workers=13：用户明确要求50支必须尽量判断齐全，不能
-    因为跑不完而缺斤短两——实测max_workers=5/timeout=400时，50支要排
-    10轮，卡在400秒截止线附近的那几支会被deadline直接掐掉（连开始跑都
-    没有），稳定只出36/50。第一版改成timeout=600/workers=8实测50/50全部
-    跑完，但复核时发现这个改动没考虑cron的总预算——main()里
-    _backfill(60s)+advise_positions(250s)+screen_candidates(triage 300s+
-    judge 400s=700s)这几段已经固定占用1010秒，OpenClaw那个cron的超时
-    上限是1500秒（见_TRIAGE_POOL_SIZE附近注释，2026-08-25才从900s调
-    上来的），600秒会让总耗时冲到1610秒，比预算还多，等于我为了让
-    watchlist这一小块齐全，把WeChat简报正文（screen_candidates那部分）
-    一起拖进超时被杀掉的风险区——本末倒置。改成靠加大并发（缩短实际墙钟
-    时间，而不是靠拉长截止线硬扛）来换完整度，超时收着480秒不动，总预算
-    60+250+480+700=1490秒，压着1500秒的线但还留了一点余量；workers=10
-    实测495秒43/50（内部480秒截止线到点，还剩7支没轮到），调到13进一步
-    压缩墙钟时间；advise_portfolio()这段本身没有整体超时保护，是这个
-    项目更早就有的独立风险，不是这次改动引入的，这里没有一并处理。"""
+    2026-08-28的真实故障纠偏：这个函数早先调过几轮timeout/max_workers，
+    当时以为瓶颈是"要在cron的1500秒总预算内跑完"，但17:30那次真实故障
+    （见sys.stdout.reconfigure那条注释）查出来根本不是超时预算问题——
+    是OpenClaw自己的"这个shell命令是不是卡住了"监控只看有没有输出，
+    advisor.py全程一个字不打印导致869秒静默后被误判成卡死杀掉，跟脚本
+    实际跑了多久没关系。真正的修复是sys.stdout.reconfigure(line_buffering
+    =True) + _run_concurrent_with_deadline的progress_label参数（每完成10个
+    打一行进度），只要中间持续有输出，这个函数本身可以跑得比较久也不会被
+    误杀。搞清楚这点之后，workers/timeout就不用再为了"赶预算"束手束脚，
+    改成给足够的并发（20）和宽松的超时上限（900秒，正常情况下用不到，只是
+    兜底），换判断完整度。"""
     watchlist = _build_watchlist()
+    print(f"（观察池取到{len(watchlist)}支，开始逐支AI判断…）")
     results = _run_concurrent_with_deadline(
-        watchlist, lambda it: _judge_one(it, "watchlist"), timeout=480, max_workers=13
+        watchlist, lambda it: _judge_one(it, "watchlist"), timeout=900, max_workers=20,
+        progress_label="观察池AI判断进度",
     )
     return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
 
@@ -589,6 +634,7 @@ def screen_candidates() -> dict:
     )
     # A股不走Futu——账号没有A股行情权限，见_a_share_candidate_pool的docstring。
     a_pool, a_all = _a_share_candidate_pool(_TRIAGE_POOL_SIZE)
+    print(f"（候选池拉取完成：美股{len(us_pool)}/港股{len(hk_pool)}/A股{len(a_pool)}，开始初筛…）")
 
     # 初筛：每个市场先从大得多的池子（_TRIAGE_POOL_SIZE）里筛掉一眼不行的，
     # 只用财务摘要、不碰Futu，筛完再截到原来的CANDIDATE_CAP，交给下面昂贵的
@@ -605,10 +651,12 @@ def screen_candidates() -> dict:
         a_shortlist = _a_fut.result()
 
     shortlist = us_shortlist + hk_shortlist + a_shortlist
+    print(f"（初筛完成：{len(shortlist)}支进入完整判断，开始逐支AI分析…）")
     judged: list[dict] = []
     if shortlist:
         results = _run_concurrent_with_deadline(
-            shortlist, lambda it: _judge_one(it, "screen"), timeout=400, max_workers=5
+            shortlist, lambda it: _judge_one(it, "screen"), timeout=400, max_workers=5,
+            progress_label="全市场候选AI判断进度",
         )
         judged = [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
 
@@ -698,9 +746,12 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
    - 技术面确认（0-15分）：技术面信号是否支持基本面结论、有没有背离。
      15分=技术面与基本面同向确认；7分附近=信号中性或数据不足；0分=技术面
      跟基本面结论明显背离，应该在理由里明确写出背离在哪。
-   - 数据确定性（0-15分）：财务/估值/新闻/技术面这四类数据是不是都拿到了、
-     互相是否印证——缺一类就要扣分，不能假装齐全。15分=四类数据齐全且互相
-     印证；0分=数据严重缺失，判断基本靠猜。
+   - 数据确定性（0-15分）：财务/新闻/技术面这三类数据是不是都拿到了、互相
+     是否印证——缺一类就要扣分，不能假装齐全。15分=三类数据齐全且互相
+     印证；0分=数据严重缺失，判断基本靠猜。**"没有估值历史分位数据"这一点
+     不算在这个维度里**——美股这类结构性缺分位数据的市场，"价格位置"那一项
+     已经因为这个原因把上限压到了20/30分，这里不能因为同一个缺口再扣一次，
+     不然同一件事被罚了两次分，跨市场比较会失真。
    四项分数必须在"维度打分"里逐项列出来，综合得分原则上等于四项之和；如果
    四项加总跟你的整体判断有出入，允许再做不超过±5分的微调，但必须在"理由"
    里说明为什么调（比如"四项之和72，但新闻里有一条未被上面数据覆盖的重大

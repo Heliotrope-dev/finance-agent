@@ -415,6 +415,20 @@ def get_multi_index_snapshot(market: str) -> list[dict]:
     return [r for r in (_one_index_snapshot(market, name, code) for name, code in indices) if r]
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def get_multi_index_snapshot_slow(market: str) -> list[dict]:
+    """跟get_multi_index_snapshot逻辑完全一样，只是缓存TTL换成60秒——给
+    AI咨询窗（assistant.py）这类"偶尔查一次、不需要3秒级实时跳动"的调用方
+    用，不要直接调上面那个3秒缓存的版本。2026-08-28复核时实测发现：AI
+    助手打开时对A/HK/US三个市场各调一次get_multi_index_snapshot，三个市场
+    加起来近9个指数，3秒缓存意味着几乎每次打开都要重新串行发一遍网络
+    请求（这个函数内部本来就是故意串行的，见上面函数的docstring），实测
+    60秒都没跑完。3秒缓存是专门为"行情"页那个每3秒自动刷新的fragment
+    设计的，AI助手复用它纯属选错了函数，不是"需要更快的数据"，加一个更
+    长缓存的独立版本就够。"""
+    return get_multi_index_snapshot(market)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_index_history(code: str, market: str, period: str = "日K") -> pd.DataFrame:
     """指数K线。三个市场的指数接口都只给日线，周K/月K用pandas重采样凑，
@@ -535,6 +549,12 @@ _HK_FAMOUS_CODES = [
     "02318", "00005", "01299", "00388", "03968", "09618", "01024", "02020",
     "00027", "01928", "02628", "00016", "00883", "00003", "00688", "01109",
     "02331", "06618", "09888", "03888", "01211",
+    # 2026-08-28：观察池港股目标从20支扩到40支——热度榜（stock_hk_hot_rank_em）
+    # 挂了的时候，兜底路径（_get_hk_movers_by_change）只从这份名单里选，原来
+    # 29支不够覆盖40支的目标，补了11支同样是知名度高、流动性好的港股（含几支
+    # 中概股在港股这边的代码，跟_HK_NAME_MAP已有的条目对应）。
+    "09961", "09626", "09866", "02015", "09868", "01088", "02688",
+    "00011", "00006", "00012", "00017",
 ]
 
 # 名称/别名 -> 代码，只覆盖知名股清单，给搜索框做本地模糊匹配用（不是全市场公司名库）。
@@ -748,6 +768,11 @@ _US_FAMOUS_CODES = [
     "JPM", "V", "MA", "HD", "WMT", "JNJ", "PG", "XOM", "CVX", "BA",
     "GS", "MS", "IBM", "QCOM", "TXN", "COST", "SBUX", "MCD", "LLY",
     "UNH", "PFE", "T", "VZ", "CSCO", "GE", "CAT", "PLTR", "SNOW", "SHOP",
+    # 2026-08-28：观察池美股目标从20支扩到60支（get_index_top_movers("US")
+    # 兜底就是从这份名单按当天涨跌幅取前N），原来48支不够覆盖60支的目标，
+    # 补了17支同样是市值大、流动性好、跨行业分散的知名股，不是随便凑数。
+    "LIN", "ABBV", "ABT", "ACN", "AXP", "BAC", "BKNG", "C", "CMCSA",
+    "COP", "DE", "GILD", "HON", "INTU", "ISRG", "LRCX", "MU",
 ]
 
 _US_NAME_MAP = {

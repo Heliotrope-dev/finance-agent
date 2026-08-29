@@ -1869,8 +1869,16 @@ def _render_ai_assistant():
         # 这类数据变化不快，没必要每发一条消息都重新查一遍数据库；
         # 用户明确要求"重新开一次对话"才需要最新数据可以接受这个折衷。
         if "_assistant_context" not in st.session_state:
+            # build_assistant_context内部已经给最慢的那几个数据源分别加了
+            # 超时保护，但这里再兜一层调用方总超时——不指望"内部每处都想
+            # 到了"，只要有任何一个环节（现在的或者以后新加的）意外没被
+            # 内部保护到，这层total_timeout保证浮窗最多等15秒，不会无限
+            # 卡住整个弹窗打不开。超时/失败都走同一个降级文案。
             try:
-                st.session_state["_assistant_context"] = build_assistant_context(email)
+                _ctx_ex = ThreadPoolExecutor(max_workers=1)
+                _ctx_fut = _ctx_ex.submit(build_assistant_context, email)
+                st.session_state["_assistant_context"] = _ctx_fut.result(timeout=15)
+                _ctx_ex.shutdown(wait=False)
             except Exception:
                 st.session_state["_assistant_context"] = "（数据加载失败，先聊网站怎么用的问题）"
 
