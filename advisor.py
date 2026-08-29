@@ -130,19 +130,25 @@ _WATCHLIST_TARGET_SIZE = {"US": 60, "HK": 40, "A": 20}
 
 def _build_watchlist() -> list[dict]:
     """三个市场各自的get_index_top_movers独立跑，用_run_concurrent_with_deadline
-    包一层超时——实测港股那条路径（东财人气榜接口）故障时不是干脆报错，是
+    包一层超时——港股那条路径（东财人气榜接口）真实故障时不是干脆报错，是
     整个请求挂住不返回（底层requests调用没设超时，_with_retry的重试/退避
     压根等不到第一次调用失败），如果不加这层保护，某天港股那边一卡，会把
     "每天17:30必须跑完"的整条cron拖死。三个市场互不依赖，并发跑，一个卡住
     不影响另外两个market正常出结果——某个市场这次超时/失败，观察池那天就
     少这个市场的股票，不是空手硬凑，也不该让整个watchlist流程陪着一起卡死。
+
+    timeout=150：2026-08-29查过一次"港股这次0支是不是接口挂了"，结果不是
+    挂了，是这个接口本身就慢——实测跑了92秒才拿到39条数据，跟原来这里给的
+    45秒超时对比，等于每次运行都会在它快跑完之前被这层保护自己先掐断，
+    "超时保护"反而成了"必定超时"。不是接口不稳定，是超时阈值定得比接口
+    正常耗时还短。改成150秒，给到接近2倍实测耗时的余量。
     """
     def _fetch(market_n):
         market, n = market_n
         return ds.get_index_top_movers(market, limit=n)
 
     results = _run_concurrent_with_deadline(
-        list(_WATCHLIST_TARGET_SIZE.items()), _fetch, timeout=45, max_workers=3,
+        list(_WATCHLIST_TARGET_SIZE.items()), _fetch, timeout=150, max_workers=3,
     )
     items = []
     for market, df in ((m, results.get(i)) for i, (m, _n) in enumerate(_WATCHLIST_TARGET_SIZE.items())):
