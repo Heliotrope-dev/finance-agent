@@ -34,6 +34,7 @@ from data_sources import (
     get_global_indices,
     search_stock_by_name,
     get_multi_index_snapshot,
+    get_multi_index_snapshot_slow,
     get_market_breadth,
     get_limit_pool,
     get_hk_famous_movers,
@@ -1196,11 +1197,20 @@ def _render_index_snapshot(mkt_code: str):
     后仍在后台继续触发，把已经不该存在的旧内容重新塞回DOM里。残留问题
     优先级更高，撤回run_every，闪烁效果的代码保留（不会触发，也无副作用），
     等找到不会导致残留的方案再说。
+
+    2026-08-30修复：这个页面本身就是要给"较新"的行情数据（不能像首页
+    地图那样换成60秒缓存的_slow版本糊弄过去），get_multi_index_snapshot
+    偶尔慢（港股/美股实测出现过接近10秒），点市场切换时Streamlit整页
+    rerun，在数据回来之前页面停在上一个市场的旧卡片上、没有任何提示，
+    用户会以为看到的还是新选市场的数据，其实是没刷新的旧数字——比单纯
+    等待更容易造成误导。加个spinner，至少明确告诉用户"正在查，这不是
+    最终结果"，不做静默假装没事的等待。
     """
-    try:
-        idx_list = get_multi_index_snapshot(mkt_code)
-    except Exception:
-        idx_list = []
+    with st.spinner(f"加载{mkt_code}行情..."):
+        try:
+            idx_list = get_multi_index_snapshot(mkt_code)
+        except Exception:
+            idx_list = []
 
     _idx_code_by_name = dict(_MULTI_INDICES.get(mkt_code, []))
 
@@ -1513,15 +1523,24 @@ def _render_home_map():
     其余7个国际指数（Yahoo Finance源，CORS不开放）保持页面加载时的
     服务端快照，不会跳动。道琼斯没有单独放在地图标记里（见
     _HOME_MAP_MARKERS 的说明，美股只保留标普+纳斯达克两个）。
+
+    2026-08-30修复：原来这里直接调get_multi_index_snapshot（3秒缓存，
+    内部又是刻意串行拉，见该函数docstring），三个市场顺序叠加，实测
+    经常20秒以上打不开首页——而且这段等待期间是一片空白，连个转圈动画
+    都没有，用户反馈"很多地方长时间显示加载中，卡死在那边很丑"。这正是
+    assistant.py早先复用错函数踩过的同一个坑（见get_multi_index_
+    snapshot_slow的docstring）——首页地图跟AI助手一样，都是"打开时
+    查一次快照，不需要3秒级跳动"的场景（4个核心指数本来就有独立的
+    浏览器JS每3秒直接跳动，不依赖这次服务端快照），换成60秒缓存的
+    _slow版本+并发（用已有的_run_concurrent_with_deadline，8秒截止），
+    一个市场慢/卡不连累另外两个，也不再是首页固定成本。剩下这8秒截止
+    时间内的等待用st.spinner包一下，至少不再是一片死寂的空白。
     """
-    snaps: dict[str, list[dict]] = {}
-    for _, mkt, _, _ in _HOME_MAP_MARKERS:
-        if mkt == "GLOBAL" or mkt in snaps:
-            continue
-        try:
-            snaps[mkt] = get_multi_index_snapshot(mkt)
-        except Exception:
-            snaps[mkt] = []
+    with st.spinner("加载全球指数..."):
+        snap_results = _run_concurrent_with_deadline(
+            ["A", "HK", "US"], get_multi_index_snapshot_slow, timeout=8, max_workers=3
+        )
+    snaps: dict[str, list[dict]] = dict(zip(["A", "HK", "US"], [snap_results.get(i, []) for i in range(3)]))
     try:
         global_idx = get_global_indices()
     except Exception:
