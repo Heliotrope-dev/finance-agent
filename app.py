@@ -1508,6 +1508,24 @@ _HOME_MAP_TENCENT_CODE = {
     "标普500": "usINX", "纳斯达克100": "usNDX",
 }
 
+_HOME_MAP_CACHE_PATH = os.path.join(os.path.dirname(__file__), "data", "home_map_cache.json")
+
+
+def _load_home_map_cache(max_age_sec: float) -> dict | None:
+    """读warm_home_cache.py（系统crontab每分钟跑一次的独立脚本）预热好的
+    首页地图数据。文件不存在/太旧/格式坏掉都当作"没有可用缓存"处理，返回
+    None让调用方走原来的实时查询兜底路径——预热脚本没跑上不该让首页
+    直接空白或报错。
+    """
+    try:
+        with open(_HOME_MAP_CACHE_PATH) as f:
+            payload = json.load(f)
+        if time.time() - payload["fetched_at"] > max_age_sec:
+            return None
+        return payload
+    except Exception:
+        return None
+
 
 def _render_home_map():
     """首页世界地图——Leaflet.js + OpenStreetMap 免费瓦片（不需要API key/信用卡），
@@ -1524,7 +1542,7 @@ def _render_home_map():
     服务端快照，不会跳动。道琼斯没有单独放在地图标记里（见
     _HOME_MAP_MARKERS 的说明，美股只保留标普+纳斯达克两个）。
 
-    2026-08-30修复：原来这里直接调get_multi_index_snapshot（3秒缓存，
+    2026-08-30修复第一版：原来这里直接调get_multi_index_snapshot（3秒缓存，
     内部又是刻意串行拉，见该函数docstring），三个市场顺序叠加，实测
     经常20秒以上打不开首页——而且这段等待期间是一片空白，连个转圈动画
     都没有，用户反馈"很多地方长时间显示加载中，卡死在那边很丑"。这正是
@@ -1533,18 +1551,32 @@ def _render_home_map():
     查一次快照，不需要3秒级跳动"的场景（4个核心指数本来就有独立的
     浏览器JS每3秒直接跳动，不依赖这次服务端快照），换成60秒缓存的
     _slow版本+并发（用已有的_run_concurrent_with_deadline，8秒截止），
-    一个市场慢/卡不连累另外两个，也不再是首页固定成本。剩下这8秒截止
-    时间内的等待用st.spinner包一下，至少不再是一片死寂的空白。
+    一个市场慢/卡不连累另外两个。这一版把20秒压到3秒左右，但"3秒"仍然是
+    每个访问者都要付的成本。
+
+    2026-08-30修复第二版：加了warm_home_cache.py，每分钟由系统crontab
+    独立跑一次（不是Streamlit进程自己的定时任务），把三个市场+国际指数
+    提前查好写进data/home_map_cache.json。这里改成优先读这个文件——
+    读到90秒以内的新鲜数据就直接用，完全不用等网络，只有文件缺失/太旧
+    （预热脚本没跑上）时才退回上面第一版那套并发查+8秒截止的兜底路径，
+    不会比修复前更差。详见warm_home_cache.py开头的说明（包括这么做的
+    代价：预热脚本会不看有没有真人访问都固定按分钟去查免费接口）。
     """
-    with st.spinner("加载全球指数..."):
-        snap_results = _run_concurrent_with_deadline(
-            ["A", "HK", "US"], get_multi_index_snapshot_slow, timeout=8, max_workers=3
-        )
-    snaps: dict[str, list[dict]] = dict(zip(["A", "HK", "US"], [snap_results.get(i, []) for i in range(3)]))
-    try:
-        global_idx = get_global_indices()
-    except Exception:
-        global_idx = {}
+    snaps: dict[str, list[dict]] = {}
+    global_idx: dict = {}
+    cached = _load_home_map_cache(max_age_sec=90)
+    if cached:
+        snaps, global_idx = cached["snaps"], cached["global_idx"]
+    else:
+        with st.spinner("加载全球指数..."):
+            snap_results = _run_concurrent_with_deadline(
+                ["A", "HK", "US"], get_multi_index_snapshot_slow, timeout=8, max_workers=3
+            )
+        snaps = dict(zip(["A", "HK", "US"], [snap_results.get(i, []) for i in range(3)]))
+        try:
+            global_idx = get_global_indices()
+        except Exception:
+            global_idx = {}
 
     # 地图图标点进对应指数详情页——只有恒生指数/上证指数/标普500/纳斯达克100这4个
     # 有真正的详情页数据支撑（_MULTI_INDICES里的A/HK/US市场，K线/成分股/AI分析全套都有）。
