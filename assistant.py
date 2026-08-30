@@ -108,33 +108,42 @@ def build_context(email: str | None) -> str:
     # 三个市场的核心指数快照+首页世界地图那几个国际指数——用户明确反馈过
     # "问恒生科技指数最新数据答不上来，网站'行情'页明明就有"，说明这类
     # 公开行情数据也得算进"所有数据"里，不能只顾着账号相关的数据。
-    # 三个市场分别限时8秒，不用一个for循环顺序查——2026-08-28复核实测过：
-    # HK这条路径在Futu偶尔卡顿时会掉进_one_index_snapshot的新浪EOD兜底分支，
-    # 那条分支本身没有超时保护（见该函数docstring原有的踩坑记录），单个
-    # market卡住会拖死整个build_context，用户点开AI浮窗要等一分钟以上。
-    # 三个市场互不依赖，各自开一个线程限时8秒，一个卡住不连累另外两个，
-    # 卡住的那个直接跳过，不强行等。
+    #
+    # 2026-08-30修复：原来这里自己开线程池并发查三个市场（8秒截止），
+    # 跟首页地图/"行情"tab查的是同一份数据，三处各自另开一条查询路径纯属
+    # 重复劳动。现在改成优先读warm_home_cache.py每分钟预热好的共享缓存
+    # （load_home_map_cache），三处共用同一份，AI浮窗打开时这里基本秒读，
+    # 不用再等最多8秒。缓存没有/太旧（预热脚本没跑上）才退回原来那套
+    # 并发查询兜底，行为保持不变，只是从"每次都做"变成"偶尔才需要做"。
     try:
         idx_lines = []
-        # 不用with语句——ThreadPoolExecutor的__exit__会调shutdown(wait=True)，
-        # 等所有提交的任务全部完成才退出，会把fut.result(timeout=8)这个超时
-        # 白白抵消掉（读结果超时了，但退出这个代码块本身还是会卡住等那个
-        # 慢线程跑完）。手动shutdown(wait=False)，卡住的线程留在后台自生自
-        # 灭（不理想，但这类"卡住的线程杀不掉、只能不等它"是Futu SDK本身
-        # 的限制，advisor.py的_run_concurrent_with_deadline也是同一个处理
-        # 方式，不是这里独有的妥协）。
-        _ex = ThreadPoolExecutor(max_workers=3)
-        futures = {_ex.submit(ds.get_multi_index_snapshot_slow, m): m for m in ("A", "HK", "US")}
-        for fut in futures:
-            market = futures[fut]
-            try:
-                for row in fut.result(timeout=8):
+        cached = ds.load_home_map_cache(max_age_sec=90)
+        if cached:
+            for market, rows in cached["snaps"].items():
+                for row in rows:
                     idx_lines.append(
                         f"  {row.get('名称')}（{market}）最新{row.get('最新')}，涨跌幅{row.get('涨跌幅'):.2f}%"
                     )
-            except Exception:
-                continue
-        _ex.shutdown(wait=False)
+        else:
+            # 不用with语句——ThreadPoolExecutor的__exit__会调shutdown(wait=True)，
+            # 等所有提交的任务全部完成才退出，会把fut.result(timeout=8)这个超时
+            # 白白抵消掉（读结果超时了，但退出这个代码块本身还是会卡住等那个
+            # 慢线程跑完）。手动shutdown(wait=False)，卡住的线程留在后台自生自
+            # 灭（不理想，但这类"卡住的线程杀不掉、只能不等它"是Futu SDK本身
+            # 的限制，advisor.py的_run_concurrent_with_deadline也是同一个处理
+            # 方式，不是这里独有的妥协）。
+            _ex = ThreadPoolExecutor(max_workers=3)
+            futures = {_ex.submit(ds.get_multi_index_snapshot_slow, m): m for m in ("A", "HK", "US")}
+            for fut in futures:
+                market = futures[fut]
+                try:
+                    for row in fut.result(timeout=8):
+                        idx_lines.append(
+                            f"  {row.get('名称')}（{market}）最新{row.get('最新')}，涨跌幅{row.get('涨跌幅'):.2f}%"
+                        )
+                except Exception:
+                    continue
+            _ex.shutdown(wait=False)
         if idx_lines:
             parts.append("三个市场核心指数快照：\n" + "\n".join(idx_lines))
     except Exception:

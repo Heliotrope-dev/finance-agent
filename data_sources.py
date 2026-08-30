@@ -429,6 +429,35 @@ def get_multi_index_snapshot_slow(market: str) -> list[dict]:
     return get_multi_index_snapshot(market)
 
 
+_HOME_MAP_CACHE_PATH = Path(__file__).parent / "data" / "home_map_cache.json"
+
+
+def save_home_map_cache(snaps: dict[str, list[dict]], global_idx: dict) -> None:
+    """写入warm_home_cache.py预热的A/HK/US指数快照+国际指数，供首页地图/
+    "行情"tab指数卡片/AI咨询窗三处共用同一份数据，不用各自另开一条查询
+    路径。跟fx_rate_cache同一个"独立小文件"套路（见_FX_CACHE_PATH），
+    只是这个文件的写入方只有warm_home_cache.py这一个（那三个读取方都不
+    写），职责更单纯。
+    """
+    payload = {"fetched_at": time.time(), "snaps": snaps, "global_idx": global_idx}
+    _HOME_MAP_CACHE_PATH.write_text(json.dumps(payload))
+
+
+def load_home_map_cache(max_age_sec: float = 90) -> dict | None:
+    """读warm_home_cache.py预热的数据，文件不存在/太旧/格式坏掉都当作
+    "没有可用缓存"返回None，调用方各自决定用哪套兜底（首页/AI助手退回
+    get_multi_index_snapshot_slow并发查，"行情"tab有自己的原始3秒缓存
+    版本可退）——不在这里替调用方决定兜底策略，只管"这份缓存新不新鲜"。
+    """
+    try:
+        payload = json.loads(_HOME_MAP_CACHE_PATH.read_text())
+        if time.time() - payload["fetched_at"] > max_age_sec:
+            return None
+        return payload
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_index_history(code: str, market: str, period: str = "日K") -> pd.DataFrame:
     """指数K线。三个市场的指数接口都只给日线，周K/月K用pandas重采样凑，
@@ -690,6 +719,7 @@ _HSTECH_CONSTITUENTS = [
 ]
 
 
+@st.cache_data(ttl=120, show_spinner=False)
 def get_hstech_constituents(limit: int = 30) -> pd.DataFrame:
     """恒生科技指数的真实成分股（见_HSTECH_CONSTITUENTS上面的说明），只走
     Futu批量快照——这份名单本来就是手动维护的真实成分股，不是"全市场筛出来
@@ -703,6 +733,11 @@ def get_hstech_constituents(limit: int = 30) -> pd.DataFrame:
     同一个线程"，实测会直接卡死超过90秒不返回（跟 get_futu_news /
     get_stock_realtime_futu 那边记录的教训一样）。改成跟 get_futu_news 一样：
     连接+查询+关闭全部放在同一个子线程里做完，超时兜底返回空。
+
+    2026-08-30补：之前一直漏了缓存装饰器，"行情"tab每次渲染这块都要重新
+    问一次富途30只股票的快照，是这一批里唯一没缓存的兄弟函数（get_index_
+    top_movers/get_limit_pool这些都有）。ttl跟get_index_top_movers对齐，
+    没有特殊理由要更短。
     """
     if not _FUTU_SDK_AVAILABLE:
         return pd.DataFrame()

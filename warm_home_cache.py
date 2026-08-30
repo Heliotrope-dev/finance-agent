@@ -16,14 +16,10 @@ _render_home_map()改成优先读这个文件，读到新鲜数据就完全不�
 是同一个"独立小文件+读写函数"套路，不是新发明一套。
 """
 
-import json
 import os
 import sys
-from pathlib import Path
 
 import data_sources as ds
-
-_CACHE_PATH = Path(__file__).parent / "data" / "home_map_cache.json"
 
 
 def main():
@@ -38,10 +34,7 @@ def main():
     except Exception:
         global_idx = {}
 
-    import time
-
-    payload = {"fetched_at": time.time(), "snaps": snaps, "global_idx": global_idx}
-    _CACHE_PATH.write_text(json.dumps(payload))
+    ds.save_home_map_cache(snaps, global_idx)
     print(f"预热完成：{sum(len(v) for v in snaps.values())}条市场指数 + {len(global_idx)}条国际指数")
 
 

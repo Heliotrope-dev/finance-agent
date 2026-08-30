@@ -35,6 +35,7 @@ from data_sources import (
     search_stock_by_name,
     get_multi_index_snapshot,
     get_multi_index_snapshot_slow,
+    load_home_map_cache,
     get_market_breadth,
     get_limit_pool,
     get_hk_famous_movers,
@@ -1198,19 +1199,28 @@ def _render_index_snapshot(mkt_code: str):
     优先级更高，撤回run_every，闪烁效果的代码保留（不会触发，也无副作用），
     等找到不会导致残留的方案再说。
 
-    2026-08-30修复：这个页面本身就是要给"较新"的行情数据（不能像首页
-    地图那样换成60秒缓存的_slow版本糊弄过去），get_multi_index_snapshot
-    偶尔慢（港股/美股实测出现过接近10秒），点市场切换时Streamlit整页
-    rerun，在数据回来之前页面停在上一个市场的旧卡片上、没有任何提示，
-    用户会以为看到的还是新选市场的数据，其实是没刷新的旧数字——比单纯
-    等待更容易造成误导。加个spinner，至少明确告诉用户"正在查，这不是
-    最终结果"，不做静默假装没事的等待。
+    2026-08-30修复第一版：这个页面本身就是要给"较新"的行情数据，get_multi_
+    index_snapshot偶尔慢（港股/美股实测出现过接近10秒），点市场切换时
+    Streamlit整页rerun，在数据回来之前页面停在上一个市场的旧卡片上、没有
+    任何提示，用户会以为看到的还是新选市场的数据，其实是没刷新的旧数字——
+    比单纯等待更容易造成误导。加个spinner，至少明确告诉用户"正在查，这
+    不是最终结果"。
+
+    2026-08-30修复第二版：跟用户明确确认过，接受首页地图那份预热缓存
+    （warm_home_cache.py每分钟更新，最多1分钟旧）的新鲜度用来换稳定秒开，
+    这里改成优先读同一份缓存（load_home_map_cache）——三处（首页地图/
+    这里/AI咨询窗）现在共用同一份数据，不用各自另开一条查询路径。缓存
+    没有或太旧（预热脚本没跑上）才退回上面第一版那套spinner+实时查询。
     """
-    with st.spinner(f"加载{mkt_code}行情..."):
-        try:
-            idx_list = get_multi_index_snapshot(mkt_code)
-        except Exception:
-            idx_list = []
+    cached = load_home_map_cache(max_age_sec=90)
+    if cached:
+        idx_list = cached["snaps"].get(mkt_code, [])
+    else:
+        with st.spinner(f"加载{mkt_code}行情..."):
+            try:
+                idx_list = get_multi_index_snapshot(mkt_code)
+            except Exception:
+                idx_list = []
 
     _idx_code_by_name = dict(_MULTI_INDICES.get(mkt_code, []))
 
@@ -1508,25 +1518,6 @@ _HOME_MAP_TENCENT_CODE = {
     "标普500": "usINX", "纳斯达克100": "usNDX",
 }
 
-_HOME_MAP_CACHE_PATH = os.path.join(os.path.dirname(__file__), "data", "home_map_cache.json")
-
-
-def _load_home_map_cache(max_age_sec: float) -> dict | None:
-    """读warm_home_cache.py（系统crontab每分钟跑一次的独立脚本）预热好的
-    首页地图数据。文件不存在/太旧/格式坏掉都当作"没有可用缓存"处理，返回
-    None让调用方走原来的实时查询兜底路径——预热脚本没跑上不该让首页
-    直接空白或报错。
-    """
-    try:
-        with open(_HOME_MAP_CACHE_PATH) as f:
-            payload = json.load(f)
-        if time.time() - payload["fetched_at"] > max_age_sec:
-            return None
-        return payload
-    except Exception:
-        return None
-
-
 def _render_home_map():
     """首页世界地图——Leaflet.js + OpenStreetMap 免费瓦片（不需要API key/信用卡），
     在几个指数所在交易所城市的真实经纬度上放小图标，图标里显示指数名+当前点数+
@@ -1564,7 +1555,7 @@ def _render_home_map():
     """
     snaps: dict[str, list[dict]] = {}
     global_idx: dict = {}
-    cached = _load_home_map_cache(max_age_sec=90)
+    cached = load_home_map_cache(max_age_sec=90)
     if cached:
         snaps, global_idx = cached["snaps"], cached["global_idx"]
     else:
