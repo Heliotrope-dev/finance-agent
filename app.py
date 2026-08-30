@@ -2817,6 +2817,12 @@ def _backfill_due_reviews(email: str):
     实测过Futu需要重连时接近10秒，而"7天后补录"这个需求是天级颗粒度的，
     没必要每次切页面都重新触发一遍网络请求，同一个会话内每
     _REVIEW_RECHECK_INTERVAL 秒最多真正跑一次。
+
+    2026-08-30修复：deadline原来是3秒，比上面这段自己docstring里写的
+    "接近10秒"还短，等于这条回填路径实测经常连一个都补不上——既然
+    _REVIEW_RECHECK_INTERVAL已经把真正发请求的频率控制在每60秒最多一次，
+    这里不需要为了"页面快0.几秒"牺牲"功能根本跑不起来"，调到10秒对齐
+    实测延迟。
     """
     _REVIEW_RECHECK_INTERVAL = 60
     _review_checked_at = st.session_state.get("_review_checked_at", 0.0)
@@ -2832,9 +2838,13 @@ def _backfill_due_reviews(email: str):
             return item, None
 
     if due:
-        review_results = _run_concurrent_with_deadline(due, _fetch_review_price, timeout=3)
+        review_results = _run_concurrent_with_deadline(due, _fetch_review_price, timeout=10)
         for item, spot in review_results.values():
-            if spot and spot.get("最新价"):
+            # 价格跟入场价一模一样大概率是当天没开盘取回的还是同一个交易日
+            # 收盘价（周末/节假日回填），不是真的"事后零涨跌"——留着不记，
+            # 下次真实交易日再试，跟advisor.py的_backfill_due_advice同一个
+            # 修复思路，不能当0%收益记进一致率统计。
+            if spot and spot.get("最新价") and float(spot["最新价"]) != item.get("price_at_analysis"):
                 try:
                     record_review(item["id"], float(spot["最新价"]))
                 except Exception:

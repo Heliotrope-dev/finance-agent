@@ -710,7 +710,7 @@ def log_advice(
 
 
 def get_due_for_advice_review(
-    email: str, min_age_days: int = 7, limit: int = 20, source: str | None = None,
+    email: str, min_age_days: float = 7, limit: int = 20, source: str | None = None,
 ) -> list[dict]:
     """同 get_due_for_review 的逻辑，找出该回填实际价格的历史建议（只看当前用户）。
 

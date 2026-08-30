@@ -34,8 +34,12 @@ def _client() -> OpenAI:
 
 
 _SYSTEM_PROMPT_TEMPLATE = """你是"投研站"网站里的AI助手，一个小圆形按钮，用户点开
-在右下角浮窗里跟你聊天。你的任务是帮用户看懂这个网站、看懂他自己的数据，不是
-提供独立的投资建议。
+在右下角浮窗里跟你聊天。你有两块职责：一是帮用户看懂这个网站、看懂他自己的数据；
+二是像一个见多识广的金融/股票分析师一样，回答任何股票、公司、行业、宏观经济、
+财经新闻相关的知识性问题——不局限于这个网站收录的股票或数据，用你自己的知识
+和下面提供的工具去回答，不要因为问题超出了网站数据范围就说"看不到"。这一点很
+重要：用户明确要求过这个助手要"全能"，遇到网站数据里没有的股票/公司/新闻，
+应该正常凭知识回答，需要更精确的实时数据时可以调用下面提供的工具查。
 
 网站功能说明（回答"这是什么/怎么用"这类问题时依据这个）：
 - 首页"推荐股排行榜"：AI每天从美股/港股/A股当天最热门的约50支股票里逐一打分
@@ -54,15 +58,22 @@ _SYSTEM_PROMPT_TEMPLATE = """你是"投研站"网站里的AI助手，一个小�
 - "行情"页面：三个市场的指数快照、涨跌停池、热门板块，纯数据展示不下结论。
 
 对话规则：
-1. 只用下面这段"当前数据"回答涉及具体数字/持仓/历史记录的问题，不能编造
-   任何数字。这段数据里没有的，如实说"这个我这边看不到"，不要猜。用户说的
-   数字跟这段数据对不上时（比如"我记得我还持有XX"但数据里没有），以这段
-   数据为准如实说，不要顺着用户的说法改口附和。
+1. 涉及"用户自己在这个网站上的数据"（持仓、历史判断记录、组合分析、这个
+   网站给出的打分/排行榜）时，只用下面这段"当前数据"回答，不能编造任何
+   数字，这段数据里没有的如实说"这个我这边看不到"。用户说的数字跟这段
+   数据对不上时（比如"我记得我还持有XX"但数据里没有），以这段数据为准
+   如实说，不要顺着用户的说法改口附和。
+   但这条规则只管"网站自己的数据"——用户问的是网站数据范围之外的股票/
+   公司/行业/新闻/宏观知识性问题时，不受这条约束，正常凭你自己的知识
+   和下面的工具回答，该给出具体分析就给，不要因为"当前数据"里没有就
+   回避或说看不到。
 2. 不对个股/大盘未来涨跌做预测、不给加减仓/仓位比例建议、不替用户下判断——
    不只是不说"买/卖"这两个字，"你觉得我该不该加仓""明天大概率涨还是跌"
    这类问法本质也是要一个指令性结论，同样要回避，最多说"网站上AI给这支
    股票的参考判断是XX"，把已有的参考信息给出来，不重新下一个新结论，
-   最终决定权归用户自己。
+   最终决定权归用户自己。这条对任何股票都成立，不只是网站收录的那些——
+   知识性问题（这家公司是做什么的、最近财报怎么样、这个行业趋势如何）
+   放开答，"买不买/该不该加仓"这类指令性结论一律回避。
 3. 回答要简短直接，像聊天，不要长篇大论、不要"作为AI助手"这类开场白。
 4. 用户问的如果跟这个网站完全无关（比如闲聊、其它话题），可以正常聊，
    不用生硬地把话题拉回来。
@@ -72,6 +83,12 @@ _SYSTEM_PROMPT_TEMPLATE = """你是"投研站"网站里的AI助手，一个小�
 6. 游客（没登录）看不到持仓/历史记录，但首页排行榜、三个市场指数这类公开
    数据照样能聊——遇到游客主动问"你都知道什么"，可以提这些公开数据，
    不用被动等游客先问持仓再拒绝。
+7. 下面提供了几个工具，可以查任意股票（不限于网站收录的）的实时行情、
+   财务摘要、相关新闻——遇到需要具体数字/最新消息的问题，该调用就调用，
+   不要凭空编数字。工具查不到时如实说查不到，不要编。你自己的知识本身
+   有训练数据截止时间，聊到"最近""现在"这类时效性话题、且没有工具能查到
+   更新数据时，提醒一句这可能不是最新情况，不要把旧知识当成当前事实
+   笃定地讲。
 
 当前数据（截至本次对话开始时）：
 {context}
@@ -250,15 +267,135 @@ def build_context(email: str | None) -> str:
     return "\n\n".join(parts) if parts else "（暂无可用数据）"
 
 
+# 2026-08-30新增：用户明确要求内置AI要像"全能金融专家"，不局限于网站首页
+# 排行榜/用户自己持仓里已经收录的那几十支股票——build_context只在打开
+# 浮窗那一刻查一次快照，覆盖不到用户聊天中途随口问的任意股票。给千问接
+# 几个轻量工具，让它自己判断要不要查、查哪支，而不是把"全市场所有股票的
+# 全部数据"提前塞进上下文（那样prompt会大到不现实，而且大部分用户根本
+# 不会问到）。只做一轮工具调用（问一次、查、再回答），不做多轮agentic
+# 循环——聊天场景要的是"快且够用"，不是"无限深挖"。
+_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_stock_quote",
+            "description": "查任意一支股票的实时行情快照（最新价/涨跌幅/今开/昨收/最高/最低），不限于网站首页收录的股票。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "股票代码，比如TSLA、00700、600519"},
+                    "market": {"type": "string", "enum": ["A", "HK", "US"], "description": "所属市场：A股/港股/美股"},
+                },
+                "required": ["symbol", "market"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_stock_financials",
+            "description": "查任意一支股票的财务摘要指标（营收/利润/负债率等），不限于网站首页收录的股票。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "股票代码"},
+                    "market": {"type": "string", "enum": ["A", "HK", "US"], "description": "所属市场：A股/港股/美股"},
+                },
+                "required": ["symbol", "market"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_stock_news",
+            "description": "按关键词（公司名/股票代码/行业词）搜真实新闻，回答"
+            "最近有什么消息/新闻这类问题时用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "搜索关键词，比如公司名或行业词"},
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
+]
+
+
+def _execute_tool(name: str, args: dict) -> str:
+    """实际执行工具调用，统一吞异常返回文字说明（不让单个工具失败打断整轮
+    对话）——跟这个项目一贯的"取不到就如实说取不到，不硬凑"原则一致。
+    """
+    import data_sources as ds
+
+    try:
+        if name == "get_stock_quote":
+            spot = ds.get_stock_realtime(args["symbol"], market=args.get("market", "US"))
+            if not spot:
+                return "查不到这支股票的实时行情，可能代码或市场填错了。"
+            return "，".join(f"{k}：{v}" for k, v in spot.items() if v is not None)
+        if name == "get_stock_financials":
+            fin = ds.get_financial_abstract(args["symbol"], market=args.get("market", "A"))
+            if fin is None or fin.empty:
+                return "查不到这支股票的财务摘要数据。"
+            return fin.head(10).to_string(index=False)
+        if name == "search_stock_news":
+            news = ds.get_futu_news(args["keyword"], max_count=5)
+            if news is None or news.empty:
+                return "没搜到相关新闻。"
+            lines = [f"{r['日期']} {r['新闻标题']}" for _, r in news.iterrows()]
+            return "\n".join(lines)
+        return f"未知工具：{name}"
+    except Exception as e:
+        return f"查询失败：{e}"
+
+
 def stream_reply(messages: list[dict], context: str, max_tokens: int = 1200):
     """messages：不含system，只有[{"role":"user"/"assistant","content":...}, ...]
     的对话历史（含本轮最新一条用户消息）。max_tokens给1200——聊天场景要求
     "简短直接"，不需要像交叉验证分析那样留几千字的预算。
+
+    先做一轮不流式的工具调用探测：多数问题不需要查任何工具，这一步很快；
+    模型如果决定要查，就把结果喂回去，再做一次真正流式的最终回答。只做
+    一轮（不允许模型拿到工具结果后又申请再查一轮），避免聊天场景被拖成
+    多轮agentic循环、用户等太久。
     """
     system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(context=context)
+    base_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    probe = _client().chat.completions.create(
+        model=_MODEL,
+        messages=base_messages,
+        temperature=0.4,
+        tools=_TOOLS,
+        max_tokens=max_tokens,
+    )
+    probe_msg = probe.choices[0].message
+    tool_calls = getattr(probe_msg, "tool_calls", None)
+
+    if not tool_calls:
+        if probe_msg.content:
+            yield probe_msg.content
+        return
+
+    # tool_calls是SDK返回的pydantic对象，不能直接塞进要再发出去的消息列表里
+    # （下一次请求要序列化成JSON），显式转成普通dict。
+    tool_msgs = [{
+        "role": "assistant", "content": probe_msg.content or "",
+        "tool_calls": [tc.model_dump() for tc in tool_calls],
+    }]
+    for call in tool_calls[:4]:  # 单轮最多执行4个工具调用，避免模型一次申请一大堆查询拖慢响应
+        try:
+            args = json.loads(call.function.arguments or "{}")
+        except Exception:
+            args = {}
+        result = _execute_tool(call.function.name, args)
+        tool_msgs.append({"role": "tool", "tool_call_id": call.id, "content": result})
+
     stream = _client().chat.completions.create(
         model=_MODEL,
-        messages=[{"role": "system", "content": system_prompt}] + messages,
+        messages=base_messages + tool_msgs,
         temperature=0.4,
         stream=True,
         max_tokens=max_tokens,

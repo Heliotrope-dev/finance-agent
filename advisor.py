@@ -168,7 +168,13 @@ _WATCHLIST_LEADERBOARD_SIZE = 5
 # 没必要等7天——次日核对足够，用户明确要求"次日验证、再给新预测"这个每日
 # 循环。跟持仓/全市场扫描那两个source沿用的7天窗口分开（那两个场景是"这次
 # 判断能不能扛得住一段时间"，跟这里"每天一个新判断"的定位不同）。
-_WATCHLIST_REVIEW_MIN_AGE_DAYS = 1
+#
+# 2026-08-30修复：原来是1（整24小时）——但cron每天固定同一时刻启动，
+# watchlist判断排在main()最后，写库时间总比当天cron启动时刻晚10-20分钟，
+# 导致"距上次cron启动正好24小时"这个cutoff结构性地永远卡在昨天watchlist
+# 落库时间之前，实测命中数永远是0（详见_backfill_due_advice里的注释）。
+# 改成0.9天（21.6小时），留出吸收这个固定偏移量的余量。
+_WATCHLIST_REVIEW_MIN_AGE_DAYS = 0.9
 
 
 def _load_secrets_into_env():
@@ -1182,12 +1188,22 @@ def _judge_one(item: dict, source: str) -> dict | None:
 
 def _backfill_due_advice() -> int:
     # position/screen沿用7天窗口（默认min_age_days），watchlist每天都出新
-    # 判断，单独用1天窗口——不能合并成一次不带source过滤的查询，那样watchlist
+    # 判断，单独用更短的窗口——不能合并成一次不带source过滤的查询，那样watchlist
     # 也会被7天窗口卡住，第二天该有的"次日核对"就出不来了（见
     # get_due_for_advice_review的source参数注释）。
+    #
+    # 2026-08-30修复：watchlist原来用min_age_days=1（整24小时），但cron每天
+    # 固定同一时刻（17:30）启动，watchlist判断是main()里排最后、要等
+    # backfill+持仓判断+组合分析都跑完才开始写，比当天cron启动时刻晚
+    # 10-20分钟——这意味着"距上次cron启动正好24小时"这个cutoff永远比
+    # 昨天watchlist的落库时间早那10-20分钟，"created_at <= cutoff"这个条件
+    # 结构性地永远为假，不是偶尔差一点，是每天都会被卡住，实测8-28这批
+    # 49条在8-29的真实cutoff下命中数是0。改成0.9天（21.6小时），留出
+    # 足够吸收这个固定偏移量的余量。position/screen不用管，它们的7天窗口
+    # 本来就有充裕余量。
     due = (
-        tracker.get_due_for_advice_review(_EMAIL, source="position")
-        + tracker.get_due_for_advice_review(_EMAIL, source="screen")
+        tracker.get_due_for_advice_review(_EMAIL, limit=200, source="position")
+        + tracker.get_due_for_advice_review(_EMAIL, limit=200, source="screen")
         + tracker.get_due_for_advice_review(
             _EMAIL, min_age_days=_WATCHLIST_REVIEW_MIN_AGE_DAYS,
             limit=sum(_WATCHLIST_TARGET_SIZE.values()) * 2, source="watchlist",
@@ -1206,7 +1222,14 @@ def _backfill_due_advice() -> int:
     n = 0
     for i, row in enumerate(due):
         price = results.get(i)
-        if price:
+        # 2026-08-30修复：回填价格等于入场价，大概率是市场当天没开盘
+        # （周末/节假日回填到的还是上一个交易日收盘价，跟入场价撞了同一个
+        # 数），不是真的"次日零涨跌"——按这个项目一贯"取不到就留NULL不
+        # 硬凑"的原则，这种情况不记review_price，留着下次（下一个真实
+        # 交易日）再试，不能当0%收益记进回测统计（8-28那批周六回填出的
+        # 31条review_price=price_at_advice就是这么污染的，把回测胜率
+        # 直接拉到12%~26%，正常该在50%上下）。
+        if price and price != row.get("price_at_advice"):
             tracker.record_advice_review(row["id"], price)
             n += 1
     return n
