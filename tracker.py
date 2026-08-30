@@ -994,6 +994,51 @@ def get_latest_leaderboard(limit: int = 10, source: str = "screen") -> dict:
     return {"run_date": run_date, "leaderboard": [dict(r) for r in rows]}
 
 
+def get_watchlist_verdict_for_symbol(symbol: str, source: str = "watchlist") -> dict:
+    """2026-08-30新增：给AI咨询窗答"为什么XX没上首页推荐榜"这类问题用。
+
+    这类问题最常见的错误答法是让AI凭自己知识临时分析一遍基本面/估值，
+    答案本身可能没错，但没答到点子上——用户真正想知道的往往是"它今天
+    有没有进观察池"，这跟"进了池子但分数不够"是两件完全不同的事：观察池
+    每天只挑约120支当天最热门的股票（见advisor.py的_build_watchlist），
+    大量业绩优秀的大盘股（比如贵州茅台、五粮液这类）大部分交易日热度
+    排不进这120支，根本没被打分，不是"打分低被淘汰"。这个函数直接查
+    这支股票今天在不在池子里、如果在的话真实得分/排名是多少，让AI用
+    网站自己的真实判断结果回答，不用另起炉灶分析一遍。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        latest = c.execute(
+            "SELECT created_at FROM advice WHERE source = ? ORDER BY created_at DESC LIMIT 1", (source,),
+        ).fetchone()
+        if latest is None:
+            return {"in_pool": False, "run_date": None, "pool_size": 0}
+        run_date = latest["created_at"][:10]
+        # 当天完整打分池（去重取每支symbol当天最新一条，score不为空），
+        # 用来算这支股票的真实排名和池子总大小。
+        rows = c.execute(
+            """
+            SELECT * FROM advice WHERE source = ? AND created_at LIKE ? AND score IS NOT NULL
+            AND id IN (
+                SELECT MAX(id) FROM advice WHERE source = ? AND created_at LIKE ? AND score IS NOT NULL
+                GROUP BY symbol
+            )
+            ORDER BY score DESC
+            """,
+            (source, f"{run_date}%", source, f"{run_date}%"),
+        ).fetchall()
+        pool = [dict(r) for r in rows]
+    for rank, row in enumerate(pool, start=1):
+        if row["symbol"] == symbol:
+            return {
+                "in_pool": True, "run_date": run_date, "pool_size": len(pool), "rank": rank,
+                "score": row["score"], "action": row["action"],
+                "verdict_excerpt": (row.get("fundamental_verdict") or "")[:300],
+            }
+    return {"in_pool": False, "run_date": run_date, "pool_size": len(pool)}
+
+
 def get_position_advice(email: str) -> dict:
     """给持仓列表用：每支持仓股票最新的一条AI判断(source='position')，
     按symbol取最近一条——跟get_latest_advice(首页候选，全局只有一批"最近

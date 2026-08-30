@@ -80,6 +80,8 @@ _SYSTEM_PROMPT_TEMPLATE = """你是"投研站"网站里的AI助手，一个小�
 5. 下面的数据是打开这次对话那一刻查到的快照，之后不会自动刷新。如果用户
    问的是"现在/最新"的数字，且这次对话已经聊了一段时间，提醒一句这是
    刚打开时的快照，建议去对应页面看最新数据，不要让用户误以为是实时的。
+   这类提醒放在回答的最后一句，不要开头第一句话就是提醒/免责声明——
+   用户是来听答案的，不是来看声明的，先给内容再补充说明。
 6. 游客（没登录）看不到持仓/历史记录，但首页排行榜、三个市场指数这类公开
    数据照样能聊——遇到游客主动问"你都知道什么"，可以提这些公开数据，
    不用被动等游客先问持仓再拒绝。
@@ -91,6 +93,11 @@ _SYSTEM_PROMPT_TEMPLATE = """你是"投研站"网站里的AI助手，一个小�
    笃定地讲。
 8. 回复里不要出现任何emoji/表情符号（包括提醒/警告类的⚠️这种），这是
    整个网站的硬性规则，用文字表达语气就够，不用符号装饰。
+9. 用户问"为什么XX股票没上首页推荐/排行榜"这类问题时，第一步必须先调用
+   check_watchlist_pool工具确认它今天在不在候选池里，把这个结果放在
+   回答最前面——"没进池子"（当天不够热门，压根没被打分）和"进了池子但
+   分数不够"是完全不同的两种原因，答案要先说清楚是哪一种，再展开分析
+   基本面/估值这些细节，不要跳过这一步直接讲一通独立的个股分析。
 
 当前数据（截至本次对话开始时）：
 {context}
@@ -331,6 +338,41 @@ _TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_valuation_percentile",
+            "description": "查一支股票当前PE/PB相对自己过去三年历史区间处于什么分位（只支持A股/港股）——"
+            "回答“现在贵不贵/便宜不便宜”这类估值问题时用，比只看静态PE倍数更有依据。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "股票代码"},
+                    "market": {"type": "string", "enum": ["A", "HK"], "description": "只支持A股/港股"},
+                },
+                "required": ["symbol", "market"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_watchlist_pool",
+            "description": "查一支股票今天在不在网站首页'推荐股排行榜'的每日观察池里，"
+            "在的话给出真实得分/排名。用户问'为什么XX没上首页推荐/排行榜'这类问题时，"
+            "必须先调这个工具确认它今天有没有进入候选池，不要跳过这一步直接凭自己知识分析——"
+            "观察池只挑当天最热门的约120支股票，很多基本面扎实的大盘股大部分交易日热度"
+            "排不进这个池子，那是'没资格参赛'，跟'进了池子但分数不够'是两个性质完全不同的"
+            "原因，答案的第一句话就该说清楚是哪一种。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "股票代码"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
 ]
 
 
@@ -357,6 +399,28 @@ def _execute_tool(name: str, args: dict) -> str:
                 return "没搜到相关新闻。"
             lines = [f"{r['日期']} {r['新闻标题']}" for _, r in news.iterrows()]
             return "\n".join(lines)
+        if name == "get_valuation_percentile":
+            pct = ds.get_valuation_percentile(args["symbol"], market=args.get("market", "A"))
+            if not pct:
+                return "查不到这支股票的估值历史分位数据。"
+            return "，".join(f"{k}：{v}" for k, v in pct.items() if v is not None)
+        if name == "check_watchlist_pool":
+            import tracker
+
+            v = tracker.get_watchlist_verdict_for_symbol(args["symbol"])
+            if not v.get("run_date"):
+                return "网站的每日观察池还没有任何历史数据。"
+            if not v["in_pool"]:
+                return (
+                    f"这支股票不在{v['run_date']}这天的观察池里（当天池子共{v['pool_size']}支股票，"
+                    "是从全市场当天最热门约120支股票里选的）。不在池子里通常是因为这支股票当天"
+                    "热度/涨跌幅没排进前列，不是因为AI给它打了低分——它压根没被打分。"
+                )
+            return (
+                f"{v['run_date']}这天在池子里，共{v['pool_size']}支，排名第{v['rank']}，"
+                f"得分{v['score']}分，AI给出的操作建议是{v['action']}。"
+                f"判断依据摘要：{v['verdict_excerpt']}"
+            )
         return f"未知工具：{name}"
     except Exception as e:
         return f"查询失败：{e}"
