@@ -360,47 +360,77 @@ def _execute_tool(name: str, args: dict) -> str:
         return f"查询失败：{e}"
 
 
+def _stream_and_collect(messages: list[dict], max_tokens: int):
+    """跑一次流式请求，边收边yield文字增量，同时把可能出现的tool_calls
+    分片累积起来，生成器结束时return——调用方用`result = yield from
+    _stream_and_collect(...)`拿这个返回值，这是Python生成器的标准用法
+    （PEP 380），不是挂在函数对象上的全局属性：如果用函数属性存"上一次
+    结果"，多个用户会话并发调用这同一个模块级函数时会互相踩到对方的
+    结果，那是真的会出错的写法，这里特意避开。
+    """
+    stream = _client().chat.completions.create(
+        model=_MODEL, messages=messages, temperature=0.4, tools=_TOOLS, stream=True, max_tokens=max_tokens,
+    )
+    tool_calls_acc: dict[int, dict] = {}
+    content_acc = ""
+    for chunk in stream:
+        # 千问偶尔发不带内容的收尾chunk（choices=[]），见analysis._stream_chat
+        # 同一处踩坑记录，这里同样处理。
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta.content:
+            content_acc += delta.content
+            yield delta.content
+        # 流式返回的tool_calls是分片的：第一个分片带id/name，后续分片只带
+        # 这一片的arguments字符串，要按index累加拼起来才是完整的JSON参数——
+        # 这是OpenAI兼容协议流式工具调用的标准形状，不是千问特有行为。
+        if delta.tool_calls:
+            for tc in delta.tool_calls:
+                slot = tool_calls_acc.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
+                if tc.id:
+                    slot["id"] = tc.id
+                if tc.function:
+                    if tc.function.name:
+                        slot["name"] += tc.function.name
+                    if tc.function.arguments:
+                        slot["arguments"] += tc.function.arguments
+    return {"content": content_acc, "tool_calls": tool_calls_acc}
+
+
 def stream_reply(messages: list[dict], context: str, max_tokens: int = 1200):
     """messages：不含system，只有[{"role":"user"/"assistant","content":...}, ...]
     的对话历史（含本轮最新一条用户消息）。max_tokens给1200——聊天场景要求
     "简短直接"，不需要像交叉验证分析那样留几千字的预算。
 
-    先做一轮不流式的工具调用探测：多数问题不需要查任何工具，这一步很快；
-    模型如果决定要查，就把结果喂回去，再做一次真正流式的最终回答。只做
-    一轮（不允许模型拿到工具结果后又申请再查一轮），避免聊天场景被拖成
-    多轮agentic循环、用户等太久。
+    2026-08-30重写：原来是先做一轮不流式的探测请求判断要不要调用工具，
+    探测本身实测要4-10秒，这段时间界面上什么都不出，用户反馈"跟卡死一样"。
+    改成直接发一次带tools的流式请求——多数问题模型不需要工具，会直接
+    一边生成一边吐字，第一个字出来的时间跟完全不接工具那版一样快；
+    真要调用工具时，流里不会有正文只有分片的tool_calls，累积到流结束后
+    再执行工具、发第二次流式请求要最终答案。只做一轮工具调用（不允许
+    模型拿到结果后又申请再查一轮），避免聊天场景被拖成多轮agentic循环。
     """
     system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(context=context)
     base_messages = [{"role": "system", "content": system_prompt}] + messages
 
-    probe = _client().chat.completions.create(
-        model=_MODEL,
-        messages=base_messages,
-        temperature=0.4,
-        tools=_TOOLS,
-        max_tokens=max_tokens,
-    )
-    probe_msg = probe.choices[0].message
-    tool_calls = getattr(probe_msg, "tool_calls", None)
-
-    if not tool_calls:
-        if probe_msg.content:
-            yield probe_msg.content
+    first = yield from _stream_and_collect(base_messages, max_tokens)
+    if not first["tool_calls"]:
         return
 
-    # tool_calls是SDK返回的pydantic对象，不能直接塞进要再发出去的消息列表里
-    # （下一次请求要序列化成JSON），显式转成普通dict。
-    tool_msgs = [{
-        "role": "assistant", "content": probe_msg.content or "",
-        "tool_calls": [tc.model_dump() for tc in tool_calls],
-    }]
-    for call in tool_calls[:4]:  # 单轮最多执行4个工具调用，避免模型一次申请一大堆查询拖慢响应
+    # tool_calls_acc是按index累积的分片字典，转成发请求要用的标准格式。
+    tool_calls_list = [
+        {"id": slot["id"], "type": "function", "function": {"name": slot["name"], "arguments": slot["arguments"]}}
+        for slot in first["tool_calls"].values()
+    ]
+    tool_msgs = [{"role": "assistant", "content": first["content"] or "", "tool_calls": tool_calls_list}]
+    for call in tool_calls_list[:4]:  # 单轮最多执行4个工具调用，避免模型一次申请一大堆查询拖慢响应
         try:
-            args = json.loads(call.function.arguments or "{}")
+            args = json.loads(call["function"]["arguments"] or "{}")
         except Exception:
             args = {}
-        result = _execute_tool(call.function.name, args)
-        tool_msgs.append({"role": "tool", "tool_call_id": call.id, "content": result})
+        result = _execute_tool(call["function"]["name"], args)
+        tool_msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result})
 
     stream = _client().chat.completions.create(
         model=_MODEL,
@@ -410,8 +440,6 @@ def stream_reply(messages: list[dict], context: str, max_tokens: int = 1200):
         max_tokens=max_tokens,
     )
     for chunk in stream:
-        # 千问偶尔发不带内容的收尾chunk（choices=[]），见analysis._stream_chat
-        # 同一处踩坑记录，这里同样处理。
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta.content

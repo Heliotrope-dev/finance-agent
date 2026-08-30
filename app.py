@@ -622,6 +622,30 @@ def _chat_bubble(role: str, text: str) -> str:
     )
 
 
+def _typing_indicator_html() -> str:
+    """AI气泡里的"正在想"三点跳动动画——2026-08-30新增。用户反馈发消息后
+    在拿到第一个字之前整个界面"像死机一样"：这轮对话现在会先做一次不流式
+    的探测请求判断要不要调用工具（见assistant.stream_reply），探测本身
+    实测能花4-10秒，这段时间原来的代码从用户消息发出去到出现任何回应
+    之间是真正意义上的空白，跟chat_input本身没包fragment导致的"发消息要
+    整页重跑一遍"叠加在一起，体验上完全等同于卡死。这个函数只负责画气泡
+    本身，样式跟_chat_bubble的assistant气泡对齐（同一个背景色/圆角），
+    调用方在拿到第一个真实字符前用这个占位，拿到后立刻替换掉。
+    """
+    dots = "".join(
+        f"<span style='display:inline-block;width:6px;height:6px;border-radius:50%;"
+        f"background:#8a8a92;margin:0 2px;animation:_fa_typing 1.1s ease-in-out {i * 0.15}s infinite'></span>"
+        for i in range(3)
+    )
+    return (
+        "<style>@keyframes _fa_typing{0%,60%,100%{opacity:0.25;transform:translateY(0)}"
+        "30%{opacity:1;transform:translateY(-3px)}}</style>"
+        "<div style='display:flex;justify-content:flex-start;margin:6px 2px'>"
+        "<div style='padding:11px 15px;border-radius:16px;background:#f0f1f3'>"
+        f"{dots}</div></div>"
+    )
+
+
 def _safe_href(url) -> str:
     """新闻链接专用——_esc() 只做HTML实体转义，不管URL的scheme是什么，理论上
     如果新闻源（财新/富途资讯/东财公告）混进一条 url 字段是 "javascript:..."
@@ -1875,6 +1899,7 @@ def _render_advice_section():
                         st.markdown(f"**{sec}**：{_esc(parts[sec])}")
 
 
+@st.fragment
 def _render_ai_assistant():
     """右下角"AI 咨询"悬浮按钮——不管在哪个分区都常驻显示，点开是个能聊天的
     浮窗，能看到用户自己的持仓/回看历史（登录后）+ 首页推荐股排行榜这类
@@ -1888,6 +1913,15 @@ def _render_ai_assistant():
     带key的组件容器自动加`st-key-<key>`这个class（持仓卡片搜索/添加按钮
     已经在用同一个技巧，见_render_position_rows附近的CSS），不用去猜
     Streamlit内部生成的DOM结构。
+
+    2026-08-30补@st.fragment：之前这个函数没有独立fragment，发一条消息
+    触发的st.chat_input提交会导致整个app.py从头重跑一遍——不管用户当时
+    停在首页/行情/持仓哪个分区，那个分区自己的渲染（哪怕已经有缓存）也
+    要重新跑一次DOM生成，再加上千问那次真实请求，用户反馈"消息发出去
+    要好久才显示在网页上"，这是真正的原因，不是网络慢。包一个fragment，
+    提交消息只重跑这个小组件自己，不牵连整个页面。跟_render_index_
+    snapshot那次踩过的坑不是同一类——那次问题是run_every自动定时器
+    切页后残留，这里只是交互触发重跑，不加run_every，不会有同类风险。
     """
     st.markdown(
         "<style>"
@@ -1950,6 +1984,12 @@ def _render_ai_assistant():
             with bubble_box:
                 st.markdown(_chat_bubble("user", prompt), unsafe_allow_html=True)
                 placeholder = st.empty()
+                # 2026-08-30新增：先占位显示"正在想"的三点动画，再开始真正的
+                # 请求——stream_reply现在会先做一次不流式的工具调用探测
+                # （见assistant.py），实测这一步单独就要4-10秒，这段时间内
+                # 原来占位符是空的，看起来跟卡死一样。这里让用户在等待的
+                # 第一时间就看到"AI收到了、正在处理"，不是真的加速请求本身。
+                placeholder.markdown(_typing_indicator_html(), unsafe_allow_html=True)
                 reply = ""
                 try:
                     for chunk in stream_assistant_reply(
