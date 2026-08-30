@@ -1887,6 +1887,18 @@ def _render_ai_assistant():
         # AI白气泡"经典聊天条样式，改成自己拼HTML气泡，不带任何头像。
         bubble_box = st.container(height=320)
         with bubble_box:
+            if not st.session_state["_assistant_messages"]:
+                # 空对话只是个输入框，用户不知道能问啥——加一句纯展示的
+                # 引导语，不写进_assistant_messages（不进模型上下文，也不会
+                # 被当成一轮真实对话历史发出去）。
+                st.markdown(
+                    _chat_bubble(
+                        "assistant",
+                        "可以问我：这支股票为什么打这个分、我的持仓现在要不要动、"
+                        "推荐股排行榜准不准。",
+                    ),
+                    unsafe_allow_html=True,
+                )
             for m in st.session_state["_assistant_messages"]:
                 st.markdown(_chat_bubble(m["role"], m["content"]), unsafe_allow_html=True)
 
