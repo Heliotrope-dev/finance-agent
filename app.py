@@ -31,6 +31,7 @@ from data_sources import (
     get_index_news,
     get_futu_news,
     get_market_news,
+    get_hot_market_news,
     get_global_indices,
     search_stock_by_name,
     get_multi_index_snapshot,
@@ -2007,10 +2008,12 @@ def _render_ai_assistant():
 def _render_home_page():
     """首页——世界地图（几个常见指数的实时点位）+ 今日重磅资讯。
 
-    "今日重磅消息"走财新大盘资讯（get_market_news，跟指数详情页资讯兜底
-    用的是同一个数据源）——如实说明：这不是真正意义上的"热度排行"，免费
-    数据源里没找到带热度分数的全市场资讯榜，财新这份本身是按时间倒序的
-    编辑精选大盘资讯，这里按时间排序取前10，不是编造一个假的热度分数。
+    2026-08-30改用get_hot_market_news（富途新闻搜索，用当天真实异动股票
+    当关键词种子）替代财新大盘资讯——用户反馈财新那条线"更新的好慢"，
+    查过不是查询慢（接口本身1秒内返回），是财新这个源发布节奏本身偏慢
+    （周刊/深度报道风格），不是分钟级快讯。富途这条线搜出来为空（比如
+    今天没有股票明显异动、或者富途连不上）才退回财新兜底，不会完全没有
+    内容可看。
     """
     st.markdown("**全球指数一览**")
     _render_home_map()
@@ -2021,15 +2024,23 @@ def _render_home_page():
     st.divider()
     st.markdown("**今日重磅消息**")
     try:
-        news = get_market_news()
+        news = get_hot_market_news()
     except Exception:
         news = None
+    if news is None or news.empty:
+        try:
+            news = get_market_news()
+        except Exception:
+            news = None
     if news is None or news.empty:
         st.caption("暂时获取不到资讯。")
         return
 
     news = news.copy()
-    news["日期"] = news["url"].str.extract(r"/(\d{4}-\d{2}-\d{2})/")
+    # get_hot_market_news已经带了"日期"列（来自富途，跟财新的URL日期格式
+    # 不一样），只有财新兜底那条路径（没有这一列）才需要从url正则提取。
+    if "日期" not in news.columns:
+        news["日期"] = news["url"].str.extract(r"/(\d{4}-\d{2}-\d{2})/")
     news = news.sort_values("日期", ascending=False, na_position="last")
 
     show_n = 30 if st.session_state.get("_home_news_expand") else 10

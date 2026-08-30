@@ -582,8 +582,16 @@ _HK_FAMOUS_CODES = [
     # 挂了的时候，兜底路径（_get_hk_movers_by_change）只从这份名单里选，原来
     # 29支不够覆盖40支的目标，补了11支同样是知名度高、流动性好的港股（含几支
     # 中概股在港股这边的代码，跟_HK_NAME_MAP已有的条目对应）。
+    #
+    # 2026-08-30修复：这批里的"00011"是无效代码——Futu明确报"未知股票00011"，
+    # 不是网络问题，是这个代码本身查不到。get_market_snapshot是整批一起查的，
+    # 一个代码无效整批39支全部失败，会直接掉进akshare全市场快照兜底那条慢
+    # 路径（实测能到100秒以上，见_get_hk_movers_by_change的踩坑记录）。也就是
+    # 说自从这批代码加进来，get_hk_famous_movers的Futu主路径实际上从来没有
+    # 真正成功过，一直在走最慢的那条兜底——这是当时加代码时没有逐个验证
+    # 导致的真实回归，删掉这个查不到的代码，其余10支都实测验证过是有效的。
     "09961", "09626", "09866", "02015", "09868", "01088", "02688",
-    "00011", "00006", "00012", "00017",
+    "00006", "00012", "00017",
 ]
 
 # 名称/别名 -> 代码，只覆盖知名股清单，给搜索框做本地模糊匹配用（不是全市场公司名库）。
@@ -2446,6 +2454,82 @@ def get_global_indices() -> dict[str, dict]:
 def get_market_news() -> pd.DataFrame:
     """大盘/宏观资讯，补充个股新闻覆盖不到的面。"""
     return _with_retry(ak.stock_news_main_cx, throttle=False)  # 财新，不是东财
+
+
+def _hot_news_keywords(limit: int = 8) -> list[str]:
+    """收集今天真正有异动的股票名，当搜新闻的关键词种子。
+
+    2026-08-30实测过：本来想连A股涨停池（get_limit_pool）也一起拿来当
+    种子，跟app._get_hot_stock_names的数据源对齐——但实测ak.stock_zt_
+    pool_em在冷缓存时能跑到100秒以上（akshare内部自己在分页拉取，不是
+    网络卡住，是真的在等它一页页拉完），get_limit_pool虽然包了60秒缓存，
+    但缓存过期那一刻撞上的用户还是要扛这上百秒。这个新闻功能不值得为了
+    多几个A股关键词背上这个尾部风险，只用港股/美股核心股的显著异动
+    （数据源本身够快，前面已经反复实测过），不取涨停池。
+    """
+    names: list[str] = []
+    try:
+        hk = get_hk_famous_movers(15)
+        if hk is not None and not hk.empty:
+            names.extend(hk[hk["涨跌幅"].abs() > 3]["名称"].dropna().tolist())
+    except Exception:
+        pass
+    try:
+        us = get_us_famous_movers(15)
+        if us is not None and not us.empty:
+            names.extend(us[us["涨跌幅"].abs() > 3]["名称"].dropna().tolist())
+    except Exception:
+        pass
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+        if len(out) >= limit:
+            break
+    return out
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_hot_market_news(limit: int = 30) -> pd.DataFrame:
+    """2026-08-30新增：首页"今日重磅消息"原来走财新大盘资讯，实测这个源
+    发布节奏偏慢（周刊/深度报道风格），用户反馈"更新的好慢"——直接查过：
+    接口本身1秒就能返回，不是查询慢，是财新这天真的没发几条新东西，不是
+    我们这边缓存卡住了。
+
+    改成用富途新闻搜索（get_futu_news，个股详情页已经在用，实测响应快、
+    内容也更及时）替代，但富途这个接口是"按关键词搜"，没有"不用关键词，
+    直接给我今天大盘发生了什么"的综合模式，所以先拿_hot_news_keywords
+    收集一批今天真正有异动的股票名当关键词种子，并发搜完合并去重——
+    不是编一个假的"热度排行"，关键词种子本身就是当天真实异动数据，跟
+    get_multi_index_snapshot/get_limit_pool同一批数据源。
+
+    跟watchlist观察池"热度驱动、每天不同"是同一个理念，但这里是独立的
+    关键词种子（涨停池+港美股异动），不直接复用watchlist那120支（那批
+    是按成交额/涨跌幅选的候选池，跟"今天有新闻的公司"未必是同一批）。
+    """
+    keywords = _hot_news_keywords(limit=8)
+    if not keywords:
+        return pd.DataFrame()
+
+    def _search(kw: str) -> pd.DataFrame:
+        try:
+            return get_futu_news(kw, max_count=5)
+        except Exception:
+            return pd.DataFrame()
+
+    with ThreadPoolExecutor(max_workers=len(keywords)) as ex:
+        results = list(ex.map(_search, keywords))
+
+    frames = [r for r in results if r is not None and not r.empty]
+    if not frames:
+        return pd.DataFrame()
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.drop_duplicates(subset="url")
+    merged = merged.sort_values("日期", ascending=False)
+    merged = merged.rename(columns={"新闻标题": "summary", "分类": "tag"})
+    return merged[["日期", "summary", "tag", "url"]].head(limit)
 
 
 def get_index_news(name: str, limit: int = 10) -> tuple:
