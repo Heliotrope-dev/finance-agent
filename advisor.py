@@ -1027,8 +1027,8 @@ def _valuation_text(symbol: str, market: str) -> str:
 
 def _technical_summary_text(symbol: str, market: str) -> str:
     try:
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+        end = ds.cn_now().strftime("%Y%m%d")
+        start = (ds.cn_now() - timedelta(days=90)).strftime("%Y%m%d")
         hist = ds.get_stock_history(symbol, start, end, market=market)
         if hist is None or hist.empty:
             return ""
@@ -1107,8 +1107,8 @@ def _price_position_text(symbol: str, market: str) -> str:
     # 算最高/最低，不依赖Futu权限。
     if market == "A":
         try:
-            end = datetime.now().strftime("%Y-%m-%d")
-            start = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+            end = ds.cn_now().strftime("%Y-%m-%d")
+            start = (ds.cn_now() - timedelta(days=365)).strftime("%Y-%m-%d")
             hist = ds.get_stock_history(symbol, start, end, market="A")
         except Exception:
             hist = None

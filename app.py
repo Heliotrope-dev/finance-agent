@@ -13,6 +13,7 @@ import streamlit.components.v1 as _cv1
 from datetime import datetime, timedelta, timezone
 
 from data_sources import (
+    cn_now,
     _MULTI_INDICES,
     get_stock_kline_futu,
     get_stock_intraday_futu,
@@ -447,8 +448,8 @@ def _fetch_sparkline_closes(symbol: str, market: str, days: int = 20) -> list:
     过期），不新开专门的接口，多取一倍自然日天数换算成够用的交易日数量。
     """
     try:
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=days * 2 + 10)).strftime("%Y%m%d")
+        end = cn_now().strftime("%Y%m%d")
+        start = (cn_now() - timedelta(days=days * 2 + 10)).strftime("%Y%m%d")
         hist = get_stock_history(symbol, start, end, market=market)
         if hist is None or hist.empty:
             return []
@@ -892,8 +893,8 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
             st.caption("暂无财务数据。")
 
     elif module == "benchmark":
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+        end = cn_now().strftime("%Y%m%d")
+        start = (cn_now() - timedelta(days=90)).strftime("%Y%m%d")
         benchmark = get_benchmark_history(start, end, market=market)
         bm_name = _BENCHMARK_NAMES[market]
         if benchmark is not None and not benchmark.empty:
@@ -2099,8 +2100,8 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     if core_key not in st.session_state:
         with st.spinner("加载行情..."):
             try:
-                end = datetime.now().strftime("%Y%m%d")
-                start = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+                end = cn_now().strftime("%Y%m%d")
+                start = (cn_now() - timedelta(days=90)).strftime("%Y%m%d")
                 hist = get_stock_history(symbol, start, end, market=market)
                 if hist is None or hist.empty:
                     st.error("没有获取到行情数据，检查一下股票代码是否正确。")
@@ -2136,8 +2137,8 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     elif market == "A":
         period_options = {"日K": ("d", 90), "周K": ("w", 730), "月K": ("m", 1825)}
         freq, days_back = period_options[period_label]
-        c_end = datetime.now().strftime("%Y%m%d")
-        c_start = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+        c_end = cn_now().strftime("%Y%m%d")
+        c_start = (cn_now() - timedelta(days=days_back)).strftime("%Y%m%d")
         try:
             chart_hist = get_stock_history(symbol, c_start, c_end, frequency=freq, market=market)
         except Exception:
@@ -3474,8 +3475,8 @@ def _show_compare_dialog(positions: list):
         return
 
     if st.button("生成对比图", type="primary", use_container_width=True, key="_pos_compare_go"):
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=period_days + 10)).strftime("%Y%m%d")
+        end = cn_now().strftime("%Y%m%d")
+        start = (cn_now() - timedelta(days=period_days + 10)).strftime("%Y%m%d")
 
         def _fetch(label):
             item = options[label]

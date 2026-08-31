@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import akshare as ak
@@ -33,6 +33,34 @@ def _session_request_with_timeout(self, method, url, **kwargs):
 
 
 requests.Session.request = _session_request_with_timeout
+
+_CN_TZ = timezone(timedelta(hours=8))
+
+
+def cn_now() -> datetime:
+    """2026-08-31修复：VPS服务器系统时区是America/Los_Angeles（`timedatectl`
+    查到的，不是猜的），不是北京时间——PDT比北京时间晚15小时。这个项目
+    从A股/港股/美股取数据、算"今天""过去N天"这些窗口，语义上全都是"北京
+    交易日"，但之前散落在各处的`datetime.now()`用的是服务器本地时间
+    （PDT），每天从北京时间0点到15点这段时间（对应PDT前一天9点到当天
+    0点），服务器本地日历日期还停在"昨天"。
+
+    实测炸出来的真实案例：涨跌停池`get_limit_pool`用`datetime.now()`
+    算今天日期传给akshare接口，北京时间周一上午10点多（服务器本地还是
+    周日晚上），传进去的是"周日"这个不存在交易的日期，接口正常返回0条，
+    页面显示"暂时没有数据"——不是接口挂了，是问了一个错误的日期。这类
+    单点日期查询（涨跌停池/是否交易日判断）踩到了会直接可见地"没数据"；
+    "过去N天历史窗口"这类查询(K线/财务对比)只是边界偏移一天，不那么
+    显眼但同样是错的。
+
+    所有需要"北京交易日"语义的地方统一改用这个函数取当前时间，不再
+    直接裸调`datetime.now()`——后者在需要区分"今天是哪天"的场景下已经
+    被证明不可信。跟tracker.py里`created_at`/`review_at`用的
+    `datetime.now(timezone.utc)`不冲突，那边存的是不含时区歧义的UTC
+    时间戳，不代表"北京的今天是哪天"，两件事各自独立正确。
+    """
+    return datetime.now(_CN_TZ)
+
 
 _MIN_INTERVAL_SEC = 3  # 东财接口对高频请求会临时封IP，两次请求之间留够间隔
 _last_call_ts = 0.0
@@ -338,8 +366,8 @@ def _one_index_snapshot(market: str, name: str, code: str) -> dict | None:
             # 同时触发本文件里任意两处BaoStock调用都可能互相踢掉对方的登录状态，
             # 所以全文件所有 bs.login()/bs.logout() 都统一加了 _baostock_lock。
             try:
-                start = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
-                end = datetime.now().strftime("%Y-%m-%d")
+                start = (cn_now() - timedelta(days=10)).strftime("%Y-%m-%d")
+                end = cn_now().strftime("%Y-%m-%d")
                 with _baostock_lock, contextlib.redirect_stdout(io.StringIO()):
                     bs.login()
                     try:
@@ -464,8 +492,8 @@ def get_index_history(code: str, market: str, period: str = "日K") -> pd.DataFr
     没有分时数据（指数没有Futu那种实时分时源），分时选项退化成展示日K。
     """
     if market == "A":
-        end = datetime.now().strftime("%Y-%m-%d")
-        start = (datetime.now() - timedelta(days=1825)).strftime("%Y-%m-%d")
+        end = cn_now().strftime("%Y-%m-%d")
+        start = (cn_now() - timedelta(days=1825)).strftime("%Y-%m-%d")
         with _baostock_lock, contextlib.redirect_stdout(io.StringIO()):
             bs.login()
             try:
@@ -492,7 +520,7 @@ def get_index_history(code: str, market: str, period: str = "日K") -> pd.DataFr
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["开盘", "收盘"]).sort_values("日期")
 
-    today = pd.Timestamp(datetime.now().date())
+    today = pd.Timestamp(cn_now().date())
     if not df.empty and df["日期"].max() < today:
         try:
             name = next((n for n, c in _MULTI_INDICES.get(market, []) if c == code), None)
@@ -559,7 +587,7 @@ def get_limit_pool(kind: str = "up", limit: int = 10) -> pd.DataFrame:
     breaker_key = f"limit_pool_{kind}"
     if _breaker_open(breaker_key):
         return pd.DataFrame()
-    date_str = datetime.now().strftime("%Y%m%d")
+    date_str = cn_now().strftime("%Y%m%d")
     fn = ak.stock_zt_pool_em if kind == "up" else ak.stock_zt_pool_dtgc_em
     try:
         df = _with_retry(lambda: fn(date=date_str))
@@ -1259,7 +1287,7 @@ def _append_today_bar(df: pd.DataFrame, symbol: str, market: str) -> pd.DataFram
     """
     if df is None or df.empty:
         return df
-    today = pd.Timestamp(datetime.now().date())
+    today = pd.Timestamp(cn_now().date())
     if df["日期"].max() >= today:
         return df
     try:
@@ -1695,7 +1723,9 @@ def get_futu_news(keyword: str, max_count: int = 8) -> pd.DataFrame:
         # publish_time 只给"7/17"这种月/日，没有年份——都是最近的资讯，直接拼当前年份。
         try:
             m, d = s.strip().split("/")
-            today = datetime.now()
+            # 下面guess是naive datetime，today要跟着去掉tzinfo才能比较，
+            # 不然offset-aware跟offset-naive比较会直接抛TypeError。
+            today = cn_now().replace(tzinfo=None)
             year = today.year
             guess = datetime(year, int(m), int(d))
             if guess > today + timedelta(days=1):
@@ -1730,8 +1760,8 @@ def get_stock_kline_futu(symbol: str, market: str, period: str) -> pd.DataFrame:
     code = f"HK.{symbol}" if market == "HK" else f"US.{symbol}"
     ktype = getattr(ft.KLType, _FUTU_KTYPE_MAP[period])
     days_back = _FUTU_DAYS_BACK[period]
-    end = datetime.now().strftime("%Y-%m-%d")
-    start = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+    end = cn_now().strftime("%Y-%m-%d")
+    start = (cn_now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
     # 这个接口实测延迟不稳定（偶尔卡住半天不返回）——套超时兜底，这条路径只在
     # 用户主动切周期时触发，卡的话最多耽误这一次点击（_futu_call本身已经保证
     # 连接和调用在同一个线程，这里的timeout只是"等结果"的超时，不是线程隔离）。
@@ -1797,8 +1827,8 @@ def _futu_last_day_intraday(ctx, code: str) -> pd.DataFrame:
     （不需要订阅），取最近一个交易日的分钟线当分时用。跟只剩日K比，好歹还是
     分时的形状。同样只在 _futu_call 的 worker 线程任务里被调用，同步直调。
     """
-    end = datetime.now().strftime("%Y-%m-%d")
-    start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    end = cn_now().strftime("%Y-%m-%d")
+    start = (cn_now() - timedelta(days=7)).strftime("%Y-%m-%d")
     try:
         ret, data, _ = ctx.request_history_kline(
             code, start=start, end=end, ktype=ft.KLType.K_1M, autype=ft.AuType.QFQ, max_count=1000,
@@ -1874,7 +1904,7 @@ def _sina_minute_intraday(sina_code: str) -> pd.DataFrame:
         return pd.DataFrame()
     if df is None or df.empty:
         return pd.DataFrame()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = cn_now().strftime("%Y-%m-%d")
     todays = df[df["day"].str.startswith(today)]
     if todays.empty:
         date_only = df["day"].str[:10]
@@ -2285,7 +2315,7 @@ def get_fx_rate(currency: str, quote: str = "CNY") -> tuple[float | None, str]:
             rate = None
         if rate:
             cache = _load_fx_cache()
-            cache[currency] = {"rate": rate, "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M")}
+            cache[currency] = {"rate": rate, "fetched_at": cn_now().strftime("%Y-%m-%d %H:%M")}
             _save_fx_cache(cache)
             return rate, "实时"
 
