@@ -65,7 +65,7 @@ from tracker import (
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
     get_ai_sim_trading, set_ai_sim_trading, get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
-    get_equity_snapshots,
+    get_equity_snapshots, get_period_pnl,
 )
 import sim_trader
 import sim_agent
@@ -2630,6 +2630,20 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
             st.metric("累计收益率（相对第一次记录）", f"{change_pct:+.2f}%")
     if snapshot["skipped_markets"]:
         st.caption(f"以下市场暂时没查到模拟账户：{'、'.join(snapshot['skipped_markets'])}")
+
+    # 本日/昨日/本月收益——用户明确要求这三个分开的时间窗口，各自带一个
+    # 收益百分比，负收益就是负数（不用红绿颜色掩盖，数字本身带符号最直接）。
+    # 找不到某个窗口的数据（比如AI今天/本月还没运行过）时如实显示"暂无
+    # 数据"，不拿0冒充"没有变化"。
+    pnl = get_period_pnl(email, net_value)
+    pnl_col1, pnl_col2, pnl_col3 = st.columns(3)
+    for col, label, key in ((pnl_col1, "本日收益", "today"), (pnl_col2, "昨日收益", "yesterday"), (pnl_col3, "本月收益", "month")):
+        block = pnl.get(key)
+        with col:
+            if block:
+                st.metric(label, f"HK${block['change']:+,.0f}", f"{block['pct']:+.2f}%")
+            else:
+                st.metric(label, "暂无数据")
 
     st.caption("每15秒自动刷新")
     if snapshot["positions"]:

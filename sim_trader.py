@@ -31,6 +31,40 @@ CNY_HKD_RATE = 1.085
 _MARKET_TRD = {"HK": ft.TrdMarket.HK, "US": ft.TrdMarket.US, "A": ft.TrdMarket.CN}
 
 
+def calc_fee_hkd(market: str, shares: float, price: float, action: str, usd_hkd_rate: float) -> float:
+    """一笔交易的手续费(折HKD)——按富途官方公开费率算(佣金+平台使用费+
+    政府/交易所各项代收费用)，港股见 https://www.futuhk.com/hans/support/topic2_335，
+    美股见 https://www.futuhk.com/hans/support/topic2_283。
+
+    只给sim_agent.py那条自主决策的虚拟现金台账(_settle_virtual_cash)用——
+    持仓页那条每日信号交易走的是富途真实SIMULATE账户余额(get_sim_snapshot)，
+    富途自己的模拟盘本身就会按真实费率扣账，不用在这边重复算一遍。
+    A股不在自主agent操作范围内，给0兜底，不硬编一套A股费率。
+    """
+    if shares <= 0 or price <= 0:
+        return 0.0
+    amount_native = shares * price
+    if market == "HK":
+        commission = max(amount_native * 0.0003, 3.0)
+        platform_fee = 15.0
+        settlement_fee = amount_native * 0.000042
+        stamp_duty = max(amount_native * 0.001, 1.0)
+        trading_fee = max(amount_native * 0.0000565, 0.01)
+        sfc_levy = max(amount_native * 0.000027, 0.01)
+        frc_levy = amount_native * 0.0000015
+        return commission + platform_fee + settlement_fee + stamp_duty + trading_fee + sfc_levy + frc_levy
+    if market == "US":
+        commission_usd = max(shares * 0.0049, 0.99)
+        platform_fee_usd = max(shares * 0.005, 1.0)
+        combined_usd = min(commission_usd + platform_fee_usd, amount_native * 0.005)
+        settlement_fee_usd = shares * 0.003
+        sec_fee_usd = max(amount_native * 0.0000206, 0.01) if action == "卖出" else 0.0
+        taf_usd = min(max(shares * 0.000195, 0.01), 9.79) if action == "卖出" else 0.0
+        total_usd = combined_usd + settlement_fee_usd + sec_fee_usd + taf_usd
+        return total_usd * usd_hkd_rate
+    return 0.0
+
+
 def _a_share_prefix(symbol: str) -> str:
     """A股代码转富途SH./SZ.前缀——6开头是上交所，0/3开头是深交所。8/4开头
     理论上是北交所，富途模拟盘是否支持不确定，不特殊处理，交给下单接口

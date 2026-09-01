@@ -164,13 +164,17 @@ def _apply_budget_limit(signals: list[dict], candidates: list[dict], holdings_va
     return kept, dropped
 
 
-def _settle_virtual_cash(email: str, kept_signals: list[dict], exec_results: list[dict], candidates: list[dict]) -> float:
+def _settle_virtual_cash(email: str, kept_signals: list[dict], exec_results: list[dict], candidates: list[dict]) -> tuple[float, float]:
     """只对真正下单成功的信号结算虚拟现金——预算检查只是"预计"，真正扣钱
     以是否成功下单为准，不能纸上谈兵（比如lot_size取整后不足一手被
     sim_trader跳过的买入，不该扣虚拟现金，那笔钱根本没花出去）。用
     exec_results里的shares_ordered(真实下单股数，可能因取整跟AI原话不完全
-    一致)而不是AI原始给的shares，金额算得更准。返回结算后的新虚拟现金
-    余额（已经写入数据库，调用方不用再存一次）。
+    一致)而不是AI原始给的shares，金额算得更准。用户明确要求"加上平台附带的
+    手续费其他费用"——每笔成交额外按sim_trader.calc_fee_hkd扣富途真实费率
+    (佣金/平台费/印花税/交收费等)，买入是"花的钱+手续费"，卖出是"收的钱-
+    手续费"，跟真实交易的现金流向一致。返回(结算后的新虚拟现金余额, 这次
+    结算总共扣的手续费)——现金余额已经写入数据库，调用方不用再存一次；
+    手续费只是拿去展示/记录用，不用额外存。
     """
     usd_hkd, cny_hkd = _fx_rates()
     price_map = {(c["symbol"], c["market"]): c["price"] for c in candidates}
@@ -180,6 +184,7 @@ def _settle_virtual_cash(email: str, kept_signals: list[dict], exec_results: lis
     if cash is None:
         cash = _VIRTUAL_BUDGET_HKD
 
+    total_fee_hkd = 0.0
     for r in exec_results:
         if r.get("status") != "成功":
             continue
@@ -188,13 +193,16 @@ def _settle_virtual_cash(email: str, kept_signals: list[dict], exec_results: lis
             continue
         shares = r.get("shares") or 0
         amount_hkd = _estimate_amount_hkd(s, shares, price_map, usd_hkd, cny_hkd)
+        price = price_map.get((s["symbol"], s["market"])) or 0.0
+        fee_hkd = sim_trader.calc_fee_hkd(s["market"], shares, price, s["action"], usd_hkd)
+        total_fee_hkd += fee_hkd
         if s["action"] == "买入":
-            cash -= amount_hkd
+            cash -= (amount_hkd + fee_hkd)
         elif s["action"] == "卖出":
-            cash += amount_hkd
+            cash += (amount_hkd - fee_hkd)
 
     tracker.set_sim_virtual_cash(email, cash)
-    return cash
+    return cash, total_fee_hkd
 
 
 def _virtual_net_value(email: str, holdings_value_hkd: float) -> float:
@@ -398,13 +406,14 @@ def _run_cycle_locked(email: str) -> dict:
     # 结算虚拟现金供下一轮用——这次记录的净值快照用net_value_before（这次
     # 决策开始前的状态），不用结算后的值，理由见上面net_value_before那段
     # 注释。
-    _settle_virtual_cash(email, kept_signals, exec_results, candidates)
+    _, total_fee_hkd = _settle_virtual_cash(email, kept_signals, exec_results, candidates)
 
     tracker.log_sim_agent_run(
         email, open_markets, net_value_before, reasoning_text,
         json.dumps(signals, ensure_ascii=False), "完成",
         f"{len(exec_results)}条信号，其中执行成功{sum(1 for r in exec_results if r.get('status') == '成功')}条"
-        + (f"，{len(dropped_signals)}条超预算被拦截" if dropped_signals else ""),
+        + (f"，{len(dropped_signals)}条超预算被拦截" if dropped_signals else "")
+        + (f"，本轮手续费共HK${total_fee_hkd:,.2f}" if total_fee_hkd > 0 else ""),
     )
     return {"status": "完成", "reasoning": reasoning_text, "signals": signals, "dropped": dropped_signals, "executed": exec_results}
 

@@ -645,6 +645,71 @@ def get_equity_snapshots(email: str, limit: int = 500) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+_CN_TZ = timezone(timedelta(hours=8))
+
+
+def get_period_pnl(email: str, current_net_value: float) -> dict:
+    """本日/昨日/本月收益——用户明确要求"要有本日收益昨日收益本月收益三个
+    模块，还有一个收益百分比，负收益就是负数"。基于sim_equity_snapshots
+    (每5分钟一次的净值快照)按北京时间的自然日/自然月分组，跟当前实时净值
+    (current_net_value，调用方传入——快照表最新一条可能有几分钟延迟，"现在"
+    这一端要用真正实时查到的数字，不能拿旧快照冒充)做差值。
+
+    某个时间窗口内一条快照都没有(比如AI今天还没运行过、或者是本月第一天
+    还没有上个月末的数据可比)时，对应字段返回None，界面上如实显示"暂无
+    数据"，不拿0或者硬凑一个数字出来充当"没有变化"。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        rows = c.execute(
+            "SELECT snapshot_at, net_value_hkd FROM sim_equity_snapshots WHERE email = ? ORDER BY snapshot_at ASC",
+            (email,),
+        ).fetchall()
+
+    parsed: list[tuple[datetime, float]] = []
+    for snapshot_at, net_value in rows:
+        try:
+            dt = datetime.fromisoformat(snapshot_at)
+        except (ValueError, TypeError):
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        parsed.append((dt.astimezone(_CN_TZ), net_value))
+
+    def _pct_block(base: float | None, end: float) -> dict | None:
+        if base is None or base == 0:
+            return None
+        change = end - base
+        return {"change": change, "pct": change / base * 100}
+
+    if not parsed:
+        return {"today": None, "yesterday": None, "month": None}
+
+    today = datetime.now(_CN_TZ).date()
+    yesterday = today - timedelta(days=1)
+    month_start = today.replace(day=1)
+
+    # 每个自然日/月窗口的"期初"：这个窗口开始后第一条快照；"期末"（仅
+    # 昨日收益需要，本日/本月的期末统一用current_net_value）：这个窗口
+    # 结束前最后一条快照。
+    today_start = next((v for dt, v in parsed if dt.date() >= today), None)
+    month_start_val = next((v for dt, v in parsed if dt.date() >= month_start), None)
+
+    yesterday_start = next((v for dt, v in parsed if dt.date() >= yesterday), None)
+    yesterday_end = None
+    for dt, v in parsed:
+        if dt.date() < today:
+            yesterday_end = v
+        else:
+            break
+
+    return {
+        "today": _pct_block(today_start, current_net_value),
+        "yesterday": _pct_block(yesterday_start, yesterday_end) if yesterday_end is not None else None,
+        "month": _pct_block(month_start_val, current_net_value),
+    }
+
+
 def get_sim_agent_runs(email: str, limit: int = 30) -> list[dict]:
     init_db()
     with closing(_conn()) as c:
