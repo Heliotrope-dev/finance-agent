@@ -398,6 +398,14 @@ def run_cycle(email: str) -> dict:
 
 
 def _run_cycle_locked(email: str) -> dict:
+    # "AI模拟炒股"页的"AI自主模拟交易"开关——2026-09-01真实故障纠偏：这里
+    # 之前完全不检查任何开关，openclaw那个cron只要是enabled状态就会一直
+    # 跑，导致页面上的开关是摆设，关了也没用。见tracker.py里
+    # sim_agent_enabled字段的注释。
+    if not tracker.get_sim_agent_enabled(email):
+        tracker.log_sim_agent_run(email, [], None, "", "[]", "跳过", "AI自主模拟交易已关闭")
+        return {"status": "跳过", "note": "AI自主模拟交易已关闭"}
+
     open_markets = _open_markets()
     if not open_markets:
         tracker.log_sim_agent_run(email, [], None, "", "[]", "跳过", "当前没有市场开盘")

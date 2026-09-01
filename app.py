@@ -64,7 +64,7 @@ from tracker import (
     add_search_history, get_search_history, get_latest_leaderboard, get_advice_accuracy, get_score_band_backtest,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
-    get_ai_sim_trading, set_ai_sim_trading, get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
+    get_sim_agent_enabled, set_sim_agent_enabled, get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
     get_equity_snapshots, get_period_pnl,
 )
 import sim_trader
@@ -2523,66 +2523,6 @@ def _render_max_capital_input(email: str):
         st.success("已保存。")
 
 
-def _render_ai_sim_trading(email: str):
-    """AI模拟交易开关+模拟盘快照——2026-09-01用户明确要求"让内置AI模拟
-    买卖"，对接的是富途账号自带的SIMULATE模拟盘（参照富途App自己的"模拟
-    买入"按钮），不涉及真实资金、不需要交易密码，见sim_trader.py开头的
-    说明。默认关闭，开关状态存在user_settings.ai_sim_trading，打开后
-    advise_portfolio每天17:30生成组合信号时会自动往模拟盘下单。
-    """
-    enabled = get_ai_sim_trading(email)
-    new_enabled = st.toggle(
-        "AI自动模拟交易（接富途模拟盘，不涉及真实资金）", value=enabled, key=f"_ai_sim_toggle_{email}",
-    )
-    if new_enabled != enabled:
-        set_ai_sim_trading(email, new_enabled)
-        st.rerun()
-
-    if not enabled:
-        st.caption("关闭状态——每天17:30的组合分析只给参考信号，不会真的下单到模拟盘。")
-        return
-
-    st.caption("已开启——每天17:30组合分析生成的买卖信号会自动同步到富途模拟盘（A股/港股/美股各自独立的SIMULATE账户）。")
-
-    with st.spinner("读取模拟盘状态..."):
-        try:
-            snapshot = sim_trader.get_sim_snapshot()
-        except Exception as e:
-            st.error(f"模拟盘状态读取失败：{e}")
-            snapshot = None
-
-    if snapshot:
-        st.metric("模拟盘总资产（折人民币，三个市场独立资金池加总仅供参考规模）", f"¥{snapshot['total_assets_cny']:,.0f}")
-        if snapshot["skipped_markets"]:
-            st.caption(f"以下市场的模拟账户暂时没查到，未计入：{'、'.join(snapshot['skipped_markets'])}")
-        if snapshot["positions"]:
-            st.caption("模拟盘当前持仓")
-            for p in snapshot["positions"]:
-                pl_color = UP_COLOR if (p["pl_val"] or 0) >= 0 else DOWN_COLOR
-                pl_text = f"{p['pl_val']:+,.0f} {p['currency']}" if p["pl_val"] is not None else "—"
-                st.markdown(
-                    f"<div style='display:flex;justify-content:space-between;padding:4px 0'>"
-                    f"<span>{_esc(p['name'])}（{_esc(p['code'])}）· {p['qty']:g}股</span>"
-                    f"<span style='color:{pl_color}'>{pl_text}</span></div>",
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.caption("模拟盘当前没有持仓。")
-
-    orders = get_simulated_orders(email, limit=20)
-    if orders:
-        with st.expander(f"最近{len(orders)}条模拟下单记录"):
-            for o in orders:
-                status_color = {"成功": UP_COLOR, "失败": DOWN_COLOR, "跳过": NEUTRAL_COLOR}.get(o["status"], NEUTRAL_COLOR)
-                st.markdown(
-                    f"<div style='padding:4px 0'>{_to_cn_time_str(o['created_at'])} · "
-                    f"{_esc(o['name'] or o['symbol'])}（{_esc(o['symbol'])}·{_esc(o['market'])}）· {_esc(o['action'])} · "
-                    f"<span style='color:{status_color}'>{_esc(o['status'])}</span>"
-                    + (f" · {_esc(o['note'])}" if o["note"] else "") + "</div>",
-                    unsafe_allow_html=True,
-                )
-
-
 @st.fragment(run_every=15)
 def _render_ai_sim_live_snapshot(email: str, equity_points: list):
     """AI模拟盘的现金/持仓市值/浮盈浮亏这部分单独抽出来自动刷新——用户
@@ -2695,10 +2635,10 @@ def _render_ai_sim_dashboard(email: str):
         "这里如实展示它的持仓、收益和完整交易记录，仅供观察AI决策能力，不构成投资建议。"
     )
 
-    enabled = get_ai_sim_trading(email)
+    enabled = get_sim_agent_enabled(email)
     new_enabled = st.toggle("AI自主模拟交易", value=enabled, key=f"_ai_sim_dash_toggle_{email}")
     if new_enabled != enabled:
-        set_ai_sim_trading(email, new_enabled)
+        set_sim_agent_enabled(email, new_enabled)
         st.rerun()
     if not enabled:
         st.caption("当前关闭——打开后AI会在下一个港股/美股开盘的15分钟节点开始自主交易。")
@@ -4141,13 +4081,6 @@ else:
                         _render_max_capital_input(_email)
                     with ai_col:
                         _render_portfolio_advice(_email, holding_items)
-
-                # 不放进上面"if holding_items"里——AI模拟交易这个开关跟"当前
-                # 有没有真实持仓"没关系（哪怕一支持仓都没有，也应该能提前打开
-                # 开关等着advisor.py下次跑），放里面会导致清仓后开关突然连
-                # 界面上都找不到了。
-                st.divider()
-                _render_ai_sim_trading(_email)
 
         elif active_section == "自选":
             if not st.session_state.get("logged_in"):

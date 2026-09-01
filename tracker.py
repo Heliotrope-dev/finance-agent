@@ -258,6 +258,20 @@ def init_db():
         if "sim_virtual_cash_hkd" not in us_cols:
             c.execute("ALTER TABLE user_settings ADD COLUMN sim_virtual_cash_hkd REAL")
 
+        # sim_agent_enabled：AI模拟炒股页面"AI自主模拟交易"开关——2026-09-01
+        # 真实故障纠偏：这个开关之前跟ai_sim_trading(上面那个，控制的是
+        # advisor.py每天17:30那条完全不同的信号)混用同一个字段，导致用户
+        # 在"AI模拟炒股"页关掉开关其实什么都没关掉——sim_agent.py的15分钟
+        # 自主决策循环根本不看这个字段，只要openclaw那个cron是enabled就会
+        # 一直跑，而ai_sim_trading当时还是True，advisor.py那条legacy流程
+        # 还在悄悄往同一个富途SIMULATE账户下单，两套系统互不知情地共用
+        # 同一个账户，这也是重置时总冒出"来源不明的遗留持仓"的原因之一。
+        # 新开一个独立字段，sim_agent.py的run_cycle会真的检查它；默认1
+        # (开启)，跟"目前一直在跑"的既成事实保持一致，不会因为这次修复
+        # 突然把正在运行的agent停掉。
+        if "sim_agent_enabled" not in us_cols:
+            c.execute("ALTER TABLE user_settings ADD COLUMN sim_agent_enabled INTEGER NOT NULL DEFAULT 1")
+
         # simulated_orders：AI模拟盘每次自动下单的执行记录——富途自己的订单
         # 历史会被清理/查询接口只能看近期，这里单独留一份，让"回看"页能展示
         # 完整的历史执行记录，不依赖富途那边保留多久。
@@ -557,6 +571,26 @@ def get_ai_sim_trading(email: str) -> bool:
     with closing(_conn()) as c:
         row = c.execute("SELECT ai_sim_trading FROM user_settings WHERE email = ?", (email,)).fetchone()
         return bool(row[0]) if row else False
+
+
+def set_sim_agent_enabled(email: str, enabled: bool):
+    """AI模拟炒股页"AI自主模拟交易"开关的真正落地——跟上面ai_sim_trading
+    是两个独立字段，见user_settings建表那段注释，不要合并成一个。"""
+    init_db()
+    with closing(_conn()) as c:
+        c.execute(
+            "INSERT INTO user_settings (email, sim_agent_enabled, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(email) DO UPDATE SET sim_agent_enabled = excluded.sim_agent_enabled, updated_at = excluded.updated_at",
+            (email, int(enabled), datetime.now(timezone.utc).isoformat()),
+        )
+        c.commit()
+
+
+def get_sim_agent_enabled(email: str) -> bool:
+    init_db()
+    with closing(_conn()) as c:
+        row = c.execute("SELECT sim_agent_enabled FROM user_settings WHERE email = ?", (email,)).fetchone()
+        return bool(row[0]) if row else True
 
 
 def get_sim_virtual_cash(email: str) -> float | None:
