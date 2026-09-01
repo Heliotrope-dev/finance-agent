@@ -2582,6 +2582,70 @@ def _render_ai_sim_trading(email: str):
                 )
 
 
+@st.fragment(run_every=15)
+def _render_ai_sim_live_snapshot(email: str, equity_points: list):
+    """AI模拟盘的现金/持仓市值/浮盈浮亏这部分单独抽出来自动刷新——用户
+    反馈"持仓收益好久没更新"，查证后发现_render_ai_sim_dashboard本身没有
+    任何自动刷新机制，只有用户手动触发rerun（切tab/点按钮）才会重新查询
+    Futu账户，之前看到的数字不是错的（跟当时的实时行情核对过是对的），
+    只是页面不会自己动。这里用run_every=15秒刷新——比持仓页真实持仓那个
+    3秒刷新（_render_position_rows）更保守，因为这里每次刷新要建HK+US
+    两个市场的Futu交易连接，比单纯查行情更重，没必要跟那边一样逐秒刷新。
+    历史决策记录/下单记录/图表不放在这个fragment里——那些只有AI每15分钟
+    跑一次才会变，没必要跟着这里一起抖。
+    """
+    with st.spinner("读取模拟盘状态..."):
+        try:
+            snapshot = sim_trader.get_agent_snapshot()
+        except Exception as e:
+            st.error(f"模拟盘状态读取失败：{e}")
+            snapshot = None
+
+    if not snapshot:
+        return
+
+    # 虚拟现金和持仓市值分开展示，不只给一个合并数字——用户明确要求
+    # 能看清"钱花出去多少变成了股票、还剩多少现金"，不是只有一个净值
+    # 黑箱数字。总额(=两者之和)标注清楚"十万港币起始"这个基准，这个
+    # 基准数字本身不会变，变的是净值相对它涨跌了多少。
+    holdings_value = snapshot["holdings_value_hkd"]
+    virtual_cash = get_sim_virtual_cash(email)
+    if virtual_cash is None:
+        virtual_cash = sim_agent._VIRTUAL_BUDGET_HKD
+    net_value = holdings_value + virtual_cash
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("虚拟现金（剩余可用）", f"HK${virtual_cash:,.0f}")
+    with col2:
+        st.metric("持仓市值", f"HK${holdings_value:,.0f}")
+    with col3:
+        st.metric("总额（起始十万港币）", f"HK${net_value:,.0f}")
+
+    if equity_points:
+        first = min(equity_points, key=lambda p: p["run_at"])["assets_hkd"]
+        if first:
+            change_pct = (net_value - first) / first * 100
+            st.metric("累计收益率（相对第一次记录）", f"{change_pct:+.2f}%")
+    if snapshot["skipped_markets"]:
+        st.caption(f"以下市场暂时没查到模拟账户：{'、'.join(snapshot['skipped_markets'])}")
+
+    st.caption("每15秒自动刷新")
+    if snapshot["positions"]:
+        st.markdown("**当前持仓**")
+        for p in snapshot["positions"]:
+            pl_color = UP_COLOR if (p["pl_val"] or 0) >= 0 else DOWN_COLOR
+            pl_text = f"{p['pl_val']:+,.0f} {p['currency']}" if p["pl_val"] is not None else "—"
+            st.markdown(
+                f"<div style='display:flex;justify-content:space-between;padding:4px 0'>"
+                f"<span>{_esc(p['name'])}（{_esc(p['code'])}）· {p['qty']:g}股</span>"
+                f"<span style='color:{pl_color}'>{pl_text}</span></div>",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.caption("当前空仓。")
+
+
 def _render_ai_sim_dashboard(email: str):
     """回看页——2026-09-01用户明确要求"回看页全部改成AI模拟炒股，我需要
     看到它的持仓、收益和相关的所有交易记录"，完全取代原来的AI判断准确率
@@ -2625,13 +2689,6 @@ def _render_ai_sim_dashboard(email: str):
         st.caption("当前关闭——打开后AI会在下一个港股/美股开盘的15分钟节点开始自主交易。")
         return
 
-    with st.spinner("读取模拟盘状态..."):
-        try:
-            snapshot = sim_trader.get_agent_snapshot()
-        except Exception as e:
-            st.error(f"模拟盘状态读取失败：{e}")
-            snapshot = None
-
     runs = get_sim_agent_runs(email, limit=200)
     equity_points = []
     for r in runs:
@@ -2642,51 +2699,12 @@ def _render_ai_sim_dashboard(email: str):
             continue
         equity_points.append({"run_at": _dt, "assets_hkd": r["assets_hkd_before"]})
 
-    if snapshot:
-        # 虚拟现金和持仓市值分开展示，不只给一个合并数字——用户明确要求
-        # 能看清"钱花出去多少变成了股票、还剩多少现金"，不是只有一个净值
-        # 黑箱数字。总额(=两者之和)标注清楚"十万港币起始"这个基准，这个
-        # 基准数字本身不会变，变的是净值相对它涨跌了多少。
-        holdings_value = snapshot["holdings_value_hkd"]
-        virtual_cash = get_sim_virtual_cash(email)
-        if virtual_cash is None:
-            virtual_cash = sim_agent._VIRTUAL_BUDGET_HKD
-        net_value = holdings_value + virtual_cash
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("虚拟现金（剩余可用）", f"HK${virtual_cash:,.0f}")
-        with col2:
-            st.metric("持仓市值", f"HK${holdings_value:,.0f}")
-        with col3:
-            st.metric("总额（起始十万港币）", f"HK${net_value:,.0f}")
-
-        if equity_points:
-            first = min(equity_points, key=lambda p: p["run_at"])["assets_hkd"]
-            if first:
-                change_pct = (net_value - first) / first * 100
-                st.metric("累计收益率（相对第一次记录）", f"{change_pct:+.2f}%")
-        if snapshot["skipped_markets"]:
-            st.caption(f"以下市场暂时没查到模拟账户：{'、'.join(snapshot['skipped_markets'])}")
+    _render_ai_sim_live_snapshot(email, equity_points)
 
     if len(equity_points) >= 2:
         st.plotly_chart(build_sim_equity_curve(equity_points, baseline=sim_agent._VIRTUAL_BUDGET_HKD), use_container_width=True)
     else:
         st.caption("收益曲线数据还在积累——AI每次运行会记一个资产快照点，多跑几次（开盘时段每15分钟一次）后这里会出现走势图。")
-
-    if snapshot and snapshot["positions"]:
-        st.markdown("**当前持仓**")
-        for p in snapshot["positions"]:
-            pl_color = UP_COLOR if (p["pl_val"] or 0) >= 0 else DOWN_COLOR
-            pl_text = f"{p['pl_val']:+,.0f} {p['currency']}" if p["pl_val"] is not None else "—"
-            st.markdown(
-                f"<div style='display:flex;justify-content:space-between;padding:4px 0'>"
-                f"<span>{_esc(p['name'])}（{_esc(p['code'])}）· {p['qty']:g}股</span>"
-                f"<span style='color:{pl_color}'>{pl_text}</span></div>",
-                unsafe_allow_html=True,
-            )
-    elif snapshot:
-        st.caption("当前空仓。")
 
     st.divider()
     st.markdown("**AI每次决策记录**")
@@ -2716,7 +2734,7 @@ def _render_ai_sim_dashboard(email: str):
         for o in orders:
             status_color = {"成功": UP_COLOR, "失败": DOWN_COLOR, "跳过": NEUTRAL_COLOR}.get(o["status"], NEUTRAL_COLOR)
             st.markdown(
-                f"<div style='padding:4px 0'>{o['created_at'][:19].replace('T',' ')} · "
+                f"<div style='padding:4px 0'>{_to_cn_time_str(o['created_at'])} · "
                 f"{_esc(o['name'] or o['symbol'])}（{_esc(o['symbol'])}·{_esc(o['market'])}）· {_esc(o['action'])} · "
                 f"<span style='color:{status_color}'>{_esc(o['status'])}</span>"
                 + (f" · {_esc(o['note'])}" if o["note"] else "") + "</div>",
