@@ -1267,13 +1267,26 @@ def advise_positions() -> list[dict]:
     """持仓判断——跟screen候选不同，这是"要不要卖"的仓位管理判断
     (holding=True，见judge_stock的_HOLDING_ADDENDUM)。结果只落库给网站
     持仓页面用，不进每日微信简报正文——用户明确说过不用在微信里报持仓
-    这块，微信简报的定位是"发现新机会"，持仓走网站页面自己看。
+    这块，微信简报的定位是"发现新机会"，持仓走网站页面自己看。这里覆盖
+    positions表里的全部行，不分真实持仓(shares>0)还是纯关注/自选
+    (shares<=0)——用户明确要求"每个自选股每天都同步分析一下"，自选本来
+    就该跟持仓享受同一份判断。
+
+    真实故障(2026-09-02)纠偏：原来timeout=250、max_workers=4，实测22支
+    观察项里只有11支真的落了库、剩下清一色是美股（AAPL/NVDA/META/MSFT/
+    TSLA等）被漏掉——不是这几支特殊，是队列排在后面、4个worker在250秒
+    预算内根本轮不到，被统一deadline直接截断丢弃了（这个项目里"统一
+    deadline而非per-future timeout"是有意为之的设计，代价就是预算给
+    不够时靠后的条目会被整批舍弃，不是报错，是静默不落库）。参考
+    judge_watchlist那边对付大批量判断给的budget(900秒/20个worker)，
+    这里也相应放宽，不能让"自选清单越加越多"时越来越多条目连跑都没跑到
+    就被截断。
     """
     items = tracker.get_positions(_EMAIL)
     if not items:
         return []
     results = _run_concurrent_with_deadline(
-        items, lambda it: _judge_one(it, "position"), timeout=250, max_workers=4
+        items, lambda it: _judge_one(it, "position"), timeout=600, max_workers=10
     )
     return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
 
