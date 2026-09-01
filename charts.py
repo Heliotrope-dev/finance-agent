@@ -468,7 +468,7 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0) -> go.Figure:
+def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, granularity: str = "day") -> go.Figure:
     """AI模拟盘收益曲线——points是[{"run_at": 北京时区datetime, "assets_hkd": 浮点数}]，
     按sim_agent每次运行(开盘时段每15分钟一次)时的资产快照点连线，不插值编造中间点，
     数据本身就是按这个节奏产生的，早期稀疏是正常状态。
@@ -477,6 +477,10 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0) -> g
     画线，净值曲线本身有涨有跌，固定红色在净值下跌时会跟"红=涨"这个全局约定
     自相矛盾、误导用户。baseline画一条起始十万港币的虚线参考——用户一眼就能
     看出"现在比起点高还是低"，不用自己心算差值。
+
+    granularity（"day"/"week"/"month"）控制X轴刻度密度——"天"视图数据点是
+    5分钟一个，刻度按5分钟画正合适；"周"/"月"视图跨度拉长后再按5分钟画
+    刻度会挤成一团看不清，改成按天为单位、只显示月-日。
     """
     df = pd.DataFrame(points).sort_values("run_at")
     is_up = df["assets_hkd"].iloc[-1] >= df["assets_hkd"].iloc[0]
@@ -519,12 +523,18 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0) -> g
             title="总资产（港币）", range=[y_min - y_pad, y_max + y_pad],
             gridcolor="rgba(0,0,0,0.06)", zeroline=False,
         ),
-        xaxis=dict(
-            # 5分钟一格，跟sim_snapshot.py的采样节奏对齐——这个图的数据源是
-            # sim_equity_snapshots(每5分钟一次)，不是sim_agent_runs的15分钟
-            # 决策记录，2026-09-01把数据源从后者换成前者时这个刻度漏改了，
-            # 之前固定按15分钟画会导致刻度比实际数据点稀疏3倍。
-            dtick=5 * 60 * 1000, tickformat="%H:%M", gridcolor="rgba(0,0,0,0.04)",
+        xaxis=(
+            dict(
+                # 5分钟一格，跟sim_snapshot.py的采样节奏对齐——这个图的数据源是
+                # sim_equity_snapshots(每5分钟一次)，不是sim_agent_runs的15分钟
+                # 决策记录，2026-09-01把数据源从后者换成前者时这个刻度漏改了，
+                # 之前固定按15分钟画会导致刻度比实际数据点稀疏3倍。
+                dtick=5 * 60 * 1000, tickformat="%H:%M", gridcolor="rgba(0,0,0,0.04)",
+            )
+            if granularity == "day" else
+            dict(
+                dtick=24 * 60 * 60 * 1000, tickformat="%m-%d", gridcolor="rgba(0,0,0,0.04)",
+            )
         ),
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         showlegend=False,

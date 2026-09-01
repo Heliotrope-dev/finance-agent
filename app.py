@@ -2704,7 +2704,7 @@ def _render_ai_sim_dashboard(email: str):
         st.caption("当前关闭——打开后AI会在下一个港股/美股开盘的15分钟节点开始自主交易。")
         return
 
-    runs = get_sim_agent_runs(email, limit=200)
+    runs = get_sim_agent_runs(email, limit=30)
 
     # 走势图数据源用sim_equity_snapshots(每几分钟一次，跟AI决策频率解耦)，
     # 不再用sim_agent_runs的决策快照(15分钟一次)——用户反馈"遇到低波动
@@ -2721,7 +2721,34 @@ def _render_ai_sim_dashboard(email: str):
     _render_ai_sim_live_snapshot(email, equity_points)
 
     if len(equity_points) >= 2:
-        st.plotly_chart(build_sim_equity_curve(equity_points, baseline=sim_agent._VIRTUAL_BUDGET_HKD), use_container_width=True)
+        # 用户明确要求走势图分天/周/月三种模式看——快照本身就只在开盘时段
+        # 才记（sim_snapshot.py没开盘直接跳过不落库），非交易日/非开盘时段
+        # 天然没有数据点，不用额外过滤"非交易日"。
+        _view_key = f"_ai_sim_chart_view_{email}"
+        view = st.radio(
+            "走势图范围", ["天", "周", "月"], horizontal=True,
+            key=_view_key, label_visibility="collapsed",
+        )
+        now_cn = datetime.now(timezone(timedelta(hours=8)))
+        if view == "天":
+            latest_date = max(p["run_at"].date() for p in equity_points)
+            windowed = [p for p in equity_points if p["run_at"].date() == latest_date]
+            granularity = "day"
+        elif view == "周":
+            cutoff = now_cn - timedelta(days=7)
+            windowed = [p for p in equity_points if p["run_at"] >= cutoff]
+            granularity = "week"
+        else:
+            cutoff = now_cn - timedelta(days=30)
+            windowed = [p for p in equity_points if p["run_at"] >= cutoff]
+            granularity = "month"
+        if len(windowed) >= 2:
+            st.plotly_chart(
+                build_sim_equity_curve(windowed, baseline=sim_agent._VIRTUAL_BUDGET_HKD, granularity=granularity),
+                use_container_width=True,
+            )
+        else:
+            st.caption(f"「{view}」这个范围内数据点还不够画线——换个更大的范围看看，或者等AI多跑几轮。")
     else:
         st.caption("收益曲线数据还在积累——AI每次运行会记一个资产快照点，多跑几次（开盘时段每15分钟一次）后这里会出现走势图。")
 
@@ -2730,7 +2757,10 @@ def _render_ai_sim_dashboard(email: str):
     if not runs:
         st.caption("还没有运行记录——开盘时段每15分钟会自动跑一次。")
     else:
-        for r in runs[:20]:
+        _runs_key = f"_ai_sim_runs_show_all_{email}"
+        show_all_runs = st.session_state.get(_runs_key, False)
+        visible_runs = runs if show_all_runs else runs[:5]
+        for r in visible_runs:
             when = _to_cn_time_str(r.get("run_at"))
             title = f"{when} · {r['status']}" + (f" · {r['note']}" if r.get("note") else "")
             with st.expander(title):
@@ -2743,14 +2773,21 @@ def _render_ai_sim_dashboard(email: str):
                 actionable = [s for s in sigs if s.get("action") in ("买入", "卖出")]
                 for s in actionable:
                     st.caption(f"{s['action']} {s['name']}（{s['symbol']}·{s['market']}）{s['shares']:g}股")
+        if not show_all_runs and len(runs) > 5:
+            if st.button(f"更多（最近{len(runs)}条）", key=f"_ai_sim_runs_more_{email}"):
+                st.session_state[_runs_key] = True
+                st.rerun()
 
     st.divider()
     st.markdown("**完整下单记录**")
-    orders = get_simulated_orders(email, limit=100)
+    orders = get_simulated_orders(email, limit=50)
     if not orders:
         st.caption("还没有下单记录。")
     else:
-        for o in orders:
+        _orders_key = f"_ai_sim_orders_show_all_{email}"
+        show_all_orders = st.session_state.get(_orders_key, False)
+        visible_orders = orders if show_all_orders else orders[:10]
+        for o in visible_orders:
             status_color = {"成功": UP_COLOR, "失败": DOWN_COLOR, "跳过": NEUTRAL_COLOR}.get(o["status"], NEUTRAL_COLOR)
             st.markdown(
                 f"<div style='padding:4px 0'>{_to_cn_time_str(o['created_at'])} · "
@@ -2759,6 +2796,10 @@ def _render_ai_sim_dashboard(email: str):
                 + (f" · {_esc(o['note'])}" if o["note"] else "") + "</div>",
                 unsafe_allow_html=True,
             )
+        if not show_all_orders and len(orders) > 10:
+            if st.button(f"更多（最近{len(orders)}条）", key=f"_ai_sim_orders_more_{email}"):
+                st.session_state[_orders_key] = True
+                st.rerun()
 
 
 def _render_positions_donut(positions: list):

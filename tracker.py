@@ -592,6 +592,14 @@ def log_simulated_order(
             (email, symbol, name, market, action, shares_signal, shares_ordered, order_id, acc_id, status, note,
              datetime.now(timezone.utc).isoformat()),
         )
+        # 用户明确要求"完整下单记录"最多留50笔，过了自动删除——不能让这张表
+        # 无限长下去（agent每15分钟可能下好几单，攒得很快），每次插入后顺手
+        # 清掉这个email超出50条的旧记录。
+        c.execute(
+            "DELETE FROM simulated_orders WHERE email = ? AND id NOT IN "
+            "(SELECT id FROM simulated_orders WHERE email = ? ORDER BY created_at DESC LIMIT 50)",
+            (email, email),
+        )
         c.commit()
 
 
@@ -617,6 +625,14 @@ def log_sim_agent_run(
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (email, datetime.now(timezone.utc).isoformat(), json.dumps(open_markets, ensure_ascii=False),
              assets_hkd_before, reasoning_text, signals_json, status, note),
+        )
+        # 同样的道理——"AI每次决策记录"最多留30条，过了自动删除。这张表比
+        # simulated_orders涨得还快（开盘每15分钟必有一条，不管有没有真的下单，
+        # 含"跳过：当前没有市场开盘"这种），不清理会一直膨胀下去。
+        c.execute(
+            "DELETE FROM sim_agent_runs WHERE email = ? AND id NOT IN "
+            "(SELECT id FROM sim_agent_runs WHERE email = ? ORDER BY run_at DESC LIMIT 30)",
+            (email, email),
         )
         c.commit()
         return cur.lastrowid
