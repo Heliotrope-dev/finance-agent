@@ -306,6 +306,40 @@ def get_agent_snapshot() -> dict:
         finally:
             trd.close()
 
+    # 用户明确要求"实时收益要读取Futu获得最新报价结算当前收益"——真实故障：
+    # 上面position_list_query返回的market_val/pl_val是富途SIMULATE账户自己
+    # 记账用的估值，实测发现它不是逐笔实时重估的，同一支持仓连续几次(间隔
+    # 15分钟)查出来的market_val/pl_val完全没变过，哪怕这段时间美股一直在
+    # 正常交易——反映到走势图上就是"一直是平的"，不是图表渲染的问题，是
+    # 上游这份持仓市值数据本身没实时更新。这里改成拿到持仓清单后，再用
+    # 一次真实行情快照(get_market_snapshot)把每支持仓的市值/浮动盈亏按
+    # 最新成交价重新算一遍，覆盖掉富途账户自己给的(可能滞后的)那份数字，
+    # 换算逻辑不变，只是价格来源换成了真实盘口。
+    codes_by_market: dict[str, list[str]] = {}
+    for p in positions:
+        codes_by_market.setdefault(p["market"], []).append(p["code"])
+    if codes_by_market:
+        qot = ft.OpenQuoteContext(host=_HOST, port=_PORT)
+        try:
+            for market, codes in codes_by_market.items():
+                ret3, snap = qot.get_market_snapshot(codes)
+                if ret3 != ft.RET_OK or snap.empty:
+                    continue
+                price_by_code = dict(zip(snap["code"], snap["last_price"]))
+                rate = _rate_to_hkd.get(_MARKET_CURRENCY[market])
+                for p in positions:
+                    if p["market"] != market:
+                        continue
+                    last_price = price_by_code.get(p["code"])
+                    if last_price is None or not rate:
+                        continue
+                    p["market_val"] = float(last_price) * p["qty"]
+                    p["market_val_hkd"] = p["market_val"] * rate
+                    if p.get("cost_price") is not None:
+                        p["pl_val"] = (float(last_price) - p["cost_price"]) * p["qty"]
+        finally:
+            qot.close()
+
     # 持仓总市值(折HKD)——sim_agent.py的虚拟预算约束(用户要求"理论无上限的
     # 富途账户里，让AI自己控制在约十万港币规模")要用这个数字做硬性拦截，
     # 不能只让AI嘴上说控制预算，代码这边也要能核实"当前占用了多少额度"，
