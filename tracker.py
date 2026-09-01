@@ -6,6 +6,7 @@
 表现，只是历史记录的客观统计，避免误导。
 """
 
+import json
 import re
 import sqlite3
 from contextlib import closing
@@ -268,6 +269,32 @@ def init_db():
             """
         )
 
+        # sim_agent_runs：AI模拟盘"自主决策"每次运行的完整记录——2026-09-01
+        # 用户要求"全自动、自己学习试错"，这是每小时一次的独立决策循环
+        # (sim_agent.py)跟每天17:30那次组合分析(advise_portfolio)不是同一
+        # 回事，各自留自己的执行记录：这张表记的是"这次AI看到了什么、想了
+        # 什么、决定怎么做"的完整上下文，不只是最终下了哪些单（simulated_
+        # orders已经记了下单结果，这张表补的是决策过程本身，让"学习试错"
+        # 这件事有据可查，不是黑箱）。assets_cny_before/after用于在下一轮
+        # 决策时喂给AI"你上次操作后资产变化"这个反馈，是"学习"这个说法在
+        # LLM agent场景下能落地的方式——不是训练模型权重，是把历史战绩摘要
+        # 写进prompt当参考。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sim_agent_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                run_at TEXT NOT NULL,
+                open_markets TEXT NOT NULL DEFAULT '',
+                assets_cny_before REAL,
+                reasoning_text TEXT NOT NULL DEFAULT '',
+                signals_json TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
         # 从watchlist表一次性迁移进positions，shares/cost_total都是0(纯关注)。
         # UNIQUE(email,symbol)保证INSERT OR IGNORE天然幂等，每次启动跑一遍
         # 无副作用，不会覆盖已经有真实持仓数据的行。
@@ -513,6 +540,33 @@ def get_simulated_orders(email: str, limit: int = 50) -> list[dict]:
         c.row_factory = sqlite3.Row
         rows = c.execute(
             "SELECT * FROM simulated_orders WHERE email = ? ORDER BY created_at DESC LIMIT ?", (email, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def log_sim_agent_run(
+    email: str, open_markets: list[str], assets_cny_before: float | None,
+    reasoning_text: str, signals_json: str, status: str, note: str = "",
+) -> int:
+    init_db()
+    with closing(_conn()) as c:
+        cur = c.execute(
+            "INSERT INTO sim_agent_runs "
+            "(email, run_at, open_markets, assets_cny_before, reasoning_text, signals_json, status, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (email, datetime.now(timezone.utc).isoformat(), json.dumps(open_markets, ensure_ascii=False),
+             assets_cny_before, reasoning_text, signals_json, status, note),
+        )
+        c.commit()
+        return cur.lastrowid
+
+
+def get_sim_agent_runs(email: str, limit: int = 30) -> list[dict]:
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM sim_agent_runs WHERE email = ? ORDER BY run_at DESC LIMIT ?", (email, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
