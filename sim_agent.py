@@ -301,6 +301,15 @@ def _run_cycle_locked(email: str) -> dict:
 
     candidates = _build_candidates(open_markets)
     holdings_value_hkd = snapshot.get("holdings_value_hkd", 0.0)
+    # 这次决策"开始前"的净值快照——必须在AI调用/下单之前就固定下来，不能
+    # 等这次交易执行完再算。之前的bug：交易执行完之后拿"决策前的持仓市值"
+    # (这时还不包含刚买的这笔)去加"结算后的现金"(已经扣了这笔买入的钱)，
+    # 一来一回把这笔新建仓的市值凭空漏掉了，净值平白无故"蒸发"一截，下一次
+    # 运行时因为重新查到了真实持仓市值又"恢复"正常，图表上看起来像坐了
+    # 一次过山车，实际上是记账时点错位导致的假象，不是真的涨跌。改成统一
+    # 只记"决策前"这一个时点的净值，每次运行前后台账各自独立结清，不会
+    # 有"半路记录一个既扣了钱又没算上货"的中间态。
+    net_value_before = _virtual_net_value(email, holdings_value_hkd)
     history_lines = _history_context_lines(email, holdings_value_hkd)
 
     holdings_lines = []
@@ -347,13 +356,11 @@ def _run_cycle_locked(email: str) -> dict:
         )
         text = resp.choices[0].message.content or ""
     except Exception as e:
-        net_value = _virtual_net_value(email, holdings_value_hkd)
-        tracker.log_sim_agent_run(email, open_markets, net_value, "", "[]", "失败", f"AI调用失败：{e}")
+        tracker.log_sim_agent_run(email, open_markets, net_value_before, "", "[]", "失败", f"AI调用失败：{e}")
         return {"status": "失败", "note": str(e)}
 
     if not text.strip():
-        net_value = _virtual_net_value(email, holdings_value_hkd)
-        tracker.log_sim_agent_run(email, open_markets, net_value, "", "[]", "失败", "AI返回空内容")
+        tracker.log_sim_agent_run(email, open_markets, net_value_before, "", "[]", "失败", "AI返回空内容")
         return {"status": "失败", "note": "AI返回空内容"}
 
     signals = advisor._parse_trade_signals(text)
@@ -375,10 +382,13 @@ def _run_cycle_locked(email: str) -> dict:
         exec_results = []
         reasoning_text += f"\n\n（下单执行失败：{e}）"
 
-    net_value_after = _settle_virtual_cash(email, kept_signals, exec_results, candidates) + holdings_value_hkd
+    # 结算虚拟现金供下一轮用——这次记录的净值快照用net_value_before（这次
+    # 决策开始前的状态），不用结算后的值，理由见上面net_value_before那段
+    # 注释。
+    _settle_virtual_cash(email, kept_signals, exec_results, candidates)
 
     tracker.log_sim_agent_run(
-        email, open_markets, net_value_after, reasoning_text,
+        email, open_markets, net_value_before, reasoning_text,
         json.dumps(signals, ensure_ascii=False), "完成",
         f"{len(exec_results)}条信号，其中执行成功{sum(1 for r in exec_results if r.get('status') == '成功')}条"
         + (f"，{len(dropped_signals)}条超预算被拦截" if dropped_signals else ""),
