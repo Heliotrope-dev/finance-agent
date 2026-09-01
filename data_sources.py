@@ -1681,6 +1681,14 @@ def get_stock_realtime_futu(symbol: str, market: str) -> dict:
         # 判断"活不活跃"时有真数字可查，不用凭感觉猜。
         "量比": float(row["volume_ratio"]) if pd.notna(row.get("volume_ratio")) else None,
         "换手率": float(row["turnover_rate"]) if pd.notna(row.get("turnover_rate")) else None,
+        # 2026-09-01新增：52周高低/PE(TTM)/PB——AI模拟盘之前只看得到当天涨跌幅，
+        # 完全不知道现价是在52周区间的什么位置、贵不贵，等于只会追当天动能、
+        # 看不出"追高在52周高点+估值已经不便宜"这种风险。这几个字段Futu快照
+        # 本来就有，之前没往上传，不是拿不到。
+        "52周最高": float(row["highest52weeks_price"]) if pd.notna(row.get("highest52weeks_price")) else None,
+        "52周最低": float(row["lowest52weeks_price"]) if pd.notna(row.get("lowest52weeks_price")) else None,
+        "PE_TTM": float(row["pe_ttm_ratio"]) if pd.notna(row.get("pe_ttm_ratio")) and row.get("pe_ttm_ratio") else None,
+        "PB": float(row["pb_ratio"]) if pd.notna(row.get("pb_ratio")) and row.get("pb_ratio") else None,
         "更新时间": str(row["update_time"]),
         "数据源": "Futu实时",
     }
