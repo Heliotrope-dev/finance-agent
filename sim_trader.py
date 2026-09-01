@@ -77,6 +77,16 @@ def _a_share_prefix(symbol: str) -> str:
 
 
 def _to_futu_code(symbol: str, market: str) -> str:
+    # 真实故障(2026-09-01)：AI偶尔会在信号里把市场前缀也写进symbol字段本身
+    # (比如给出"US.META"而不是"META")，advisor._parse_trade_signals不会
+    # 帮忙剥掉这个前缀——这里如果直接拼"US."+symbol会拼出"US.US.META"这种
+    # 不存在的代码，下单直接报"美股找不到"失败。这里防御性地先把symbol
+    # 开头已经带着的市场前缀去掉，不管AI给没给前缀，最终拼出来的都是
+    # 正确的单一前缀代码。
+    for prefix in ("HK.", "US.", "SH.", "SZ."):
+        if symbol.upper().startswith(prefix):
+            symbol = symbol[len(prefix):]
+            break
     if market == "HK":
         return f"HK.{symbol}"
     if market == "US":
