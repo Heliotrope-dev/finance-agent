@@ -64,7 +64,7 @@ from tracker import (
     add_search_history, get_search_history, get_latest_leaderboard, get_advice_accuracy, get_score_band_backtest,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
-    get_ai_sim_trading, set_ai_sim_trading, get_simulated_orders, get_sim_agent_runs,
+    get_ai_sim_trading, set_ai_sim_trading, get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
 )
 import sim_trader
 import sim_agent
@@ -2643,19 +2643,29 @@ def _render_ai_sim_dashboard(email: str):
         equity_points.append({"run_at": _dt, "assets_hkd": r["assets_hkd_before"]})
 
     if snapshot:
-        # 展示的是虚拟净值(持仓市值+虚拟现金)，不是富途账户真实总资产——
-        # 账户里躺着港股/美股各上百万闲置资金，AI碰不到也不该算进"AI管理
-        # 的十万港币"这个概念里，见sim_agent._virtual_net_value的说明。
-        net_value = sim_agent._virtual_net_value(email, snapshot["holdings_value_hkd"])
-        col1, col2 = st.columns(2)
+        # 虚拟现金和持仓市值分开展示，不只给一个合并数字——用户明确要求
+        # 能看清"钱花出去多少变成了股票、还剩多少现金"，不是只有一个净值
+        # 黑箱数字。总额(=两者之和)标注清楚"十万港币起始"这个基准，这个
+        # 基准数字本身不会变，变的是净值相对它涨跌了多少。
+        holdings_value = snapshot["holdings_value_hkd"]
+        virtual_cash = get_sim_virtual_cash(email)
+        if virtual_cash is None:
+            virtual_cash = sim_agent._VIRTUAL_BUDGET_HKD
+        net_value = holdings_value + virtual_cash
+
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("虚拟净值（十万港币起始，港股+美股加总）", f"HK${net_value:,.0f}")
+            st.metric("虚拟现金（剩余可用）", f"HK${virtual_cash:,.0f}")
         with col2:
-            if equity_points:
-                first = min(equity_points, key=lambda p: p["run_at"])["assets_hkd"]
-                if first:
-                    change_pct = (net_value - first) / first * 100
-                    st.metric("累计收益率（相对第一次记录）", f"{change_pct:+.2f}%")
+            st.metric("持仓市值", f"HK${holdings_value:,.0f}")
+        with col3:
+            st.metric("总额（起始十万港币）", f"HK${net_value:,.0f}")
+
+        if equity_points:
+            first = min(equity_points, key=lambda p: p["run_at"])["assets_hkd"]
+            if first:
+                change_pct = (net_value - first) / first * 100
+                st.metric("累计收益率（相对第一次记录）", f"{change_pct:+.2f}%")
         if snapshot["skipped_markets"]:
             st.caption(f"以下市场暂时没查到模拟账户：{'、'.join(snapshot['skipped_markets'])}")
 

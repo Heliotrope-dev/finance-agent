@@ -123,17 +123,10 @@ def _build_candidates(open_markets: list[str]) -> list[dict]:
 
 
 def _fx_rates() -> tuple[float, float]:
-    """(USD兑HKD, CNY兑HKD)——只服务于虚拟预算的估算/记账，不追求精确到
-    分，接口都失败时用近似兜底值，不能让预算控制因为汇率接口挂了就整个
-    失效（宁可用一个大致对的数字继续保守放行，也不能没了汇率就放弃拦截）。
-    """
-    import data_sources as ds
-
-    usd_cny, _n1 = ds.get_fx_rate("USD")
-    hkd_cny, _n2 = ds.get_fx_rate("HKD")
-    usd_hkd = (usd_cny / hkd_cny) if (usd_cny and hkd_cny) else 8.6
-    cny_hkd = (1 / hkd_cny) if hkd_cny else 1.08
-    return usd_hkd, cny_hkd
+    """(USD兑HKD, CNY兑HKD)固定汇率——用sim_trader.py里唯一的那份定义
+    (USD_HKD_RATE/CNY_HKD_RATE)，不在这里另外写一份，避免两处汇率数字
+    以后改一个忘了改另一个。"""
+    return sim_trader.USD_HKD_RATE, sim_trader.CNY_HKD_RATE
 
 
 def _estimate_amount_hkd(signal: dict, shares: float, price_map: dict, usd_hkd: float, cny_hkd: float) -> float:

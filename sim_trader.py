@@ -18,6 +18,16 @@ import tracker
 
 _HOST, _PORT = "127.0.0.1", 11111
 
+# 2026-09-01用户明确要求"这两个绑定的汇率固定数字就行不用每次去找"——
+# AI模拟盘(get_agent_snapshot/sim_agent.py)统一用固定汇率，不再每次调用
+# data_sources.get_fx_rate查实时值。USD/HKD用7.80合理（港币是联系汇率
+# 制度，官方盯住美元浮动区间7.75-7.85，几十年没脱离过，固定值本来就比
+# "实时查询"更稳）；CNY/HKD用1.085是近期大致中枢。只服务于这个模拟盘的
+# 估算/记账，不追求分毫不差，也不影响持仓页那个用get_sim_snapshot()的
+# 通用视图（那边继续用ds.to_cny的实时汇率，两套快照本来就是独立的）。
+USD_HKD_RATE = 7.80
+CNY_HKD_RATE = 1.085
+
 _MARKET_TRD = {"HK": ft.TrdMarket.HK, "US": ft.TrdMarket.US, "A": ft.TrdMarket.CN}
 
 
@@ -221,10 +231,7 @@ def get_agent_snapshot() -> dict:
     positions: list[dict] = []
     skipped_markets: list[str] = []
 
-    usd_cny_rate, _n1 = ds.get_fx_rate("USD")
-    hkd_cny_rate, _n2 = ds.get_fx_rate("HKD")
-    usd_hkd_rate = (usd_cny_rate / hkd_cny_rate) if (usd_cny_rate and hkd_cny_rate) else None
-    _rate_to_hkd = {"HKD": 1.0, "USD": usd_hkd_rate}
+    _rate_to_hkd = {"HKD": 1.0, "USD": USD_HKD_RATE}
 
     for market in ("HK", "US"):
         trd_market = _MARKET_TRD[market]
