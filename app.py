@@ -2443,23 +2443,39 @@ def _render_index_detail(name: str, code: str, market: str):
 @st.fragment(run_every=3)
 def _render_positions_today_pnl(positions: list):
     """今日收益，要求实时同步——跟_render_position_rows一样每3秒刷新。
-    get_stock_realtime本身@st.cache_data(ttl=3)，跟这个fragment的刷新节奏
-    对齐，同一只股票3秒内被两个fragment各查一次实际只打一次真实请求，
-    第二次直接命中缓存，不算"额外请求"。只用最新价/昨收这两个已有字段
-    算涨跌额，不需要新接口。汇率/行情任一失败就跳过那一支，跳过的部分
-    在展示里如实说明，不拿旧数字硬凑。
+
+    2026-09-01真实故障纠偏：这里原来靠"get_stock_realtime本身@st.cache_data
+    (ttl=3)，同一只股票3秒内被两个fragment各查一次第二次命中缓存"这个隐性
+    假设省请求——前提是_render_position_rows也在调get_stock_realtime，
+    帮忙把缓存填上。后来_render_position_rows改成用
+    get_stock_realtime_futu_batch(见那边的真实故障修复注释：22支自选股票
+    每3秒各自单独查询撞上Futu"每30秒最多60次"的限流)，这个隐性的缓存共享
+    就断了——这个fragment会退回成每支持仓各自单独查询，重新变成撞限流的
+    源头之一。这里也改成同一套批量查询，两个fragment都不再依赖"运气好
+    刚好命中另一个fragment填的缓存"这种脆弱的隐性耦合。
     """
     holding_items = [w for w in positions if (w.get("shares") or 0) > 0]
     if not holding_items:
         st.caption("今日收益：暂无真实持仓。")
         return
 
+    hk_us_items = [
+        (it["symbol"], it.get("market", "A")) for it in holding_items if it.get("market", "A") in ("HK", "US")
+    ]
+    try:
+        hk_us_quotes = get_stock_realtime_futu_batch(hk_us_items) if hk_us_items else {}
+    except Exception:
+        hk_us_quotes = {}
+
     def _fetch_today(item):
         symbol, market = item["symbol"], item.get("market", "A")
-        try:
-            spot = get_stock_realtime(symbol, market=market)
-        except Exception:
-            spot = {}
+        if market in ("HK", "US"):
+            spot = hk_us_quotes.get((symbol, market)) or {}
+        else:
+            try:
+                spot = get_stock_realtime(symbol, market=market)
+            except Exception:
+                spot = {}
         price, prev_close = spot.get("最新价"), spot.get("昨收")
         if not price or not prev_close:
             return None
