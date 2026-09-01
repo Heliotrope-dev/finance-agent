@@ -316,6 +316,27 @@ def init_db():
         if "assets_cny_before" in sar_cols and "assets_hkd_before" not in sar_cols:
             c.execute("ALTER TABLE sim_agent_runs RENAME COLUMN assets_cny_before TO assets_hkd_before")
 
+        # sim_equity_snapshots：2026-09-01用户反馈"15分钟一格太稀疏，走势图
+        # 看着像死了"——sim_agent_runs是跟着AI决策节奏走的(15分钟一次，且
+        # 只在决策时才记)，遇到工商银行/中国神华这种低波动防御型持仓，连续
+        # 几次数字精确不变，图表就会显得很平。这张表职责单一：不涉及AI
+        # 决策，只是每隔几分钟单纯查一次市值+虚拟现金写一条快照，专门喂给
+        # 走势图用，跟"AI每次决策记录"那个列表（继续用sim_agent_runs，
+        # 15分钟一次）解耦——决策历史和资产曲线是两回事，不用绑在同一个
+        # 采样频率上。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sim_equity_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                snapshot_at TEXT NOT NULL,
+                holdings_value_hkd REAL NOT NULL,
+                virtual_cash_hkd REAL NOT NULL,
+                net_value_hkd REAL NOT NULL
+            )
+            """
+        )
+
         # 从watchlist表一次性迁移进positions，shares/cost_total都是0(纯关注)。
         # UNIQUE(email,symbol)保证INSERT OR IGNORE天然幂等，每次启动跑一遍
         # 无副作用，不会覆盖已经有真实持仓数据的行。
@@ -599,6 +620,29 @@ def log_sim_agent_run(
         )
         c.commit()
         return cur.lastrowid
+
+
+def log_equity_snapshot(email: str, holdings_value_hkd: float, virtual_cash_hkd: float) -> int:
+    init_db()
+    with closing(_conn()) as c:
+        cur = c.execute(
+            "INSERT INTO sim_equity_snapshots (email, snapshot_at, holdings_value_hkd, virtual_cash_hkd, net_value_hkd) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (email, datetime.now(timezone.utc).isoformat(), holdings_value_hkd, virtual_cash_hkd,
+             holdings_value_hkd + virtual_cash_hkd),
+        )
+        c.commit()
+        return cur.lastrowid
+
+
+def get_equity_snapshots(email: str, limit: int = 500) -> list[dict]:
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM sim_equity_snapshots WHERE email = ? ORDER BY snapshot_at DESC LIMIT ?", (email, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_sim_agent_runs(email: str, limit: int = 30) -> list[dict]:

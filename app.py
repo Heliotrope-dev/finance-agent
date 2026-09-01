@@ -65,6 +65,7 @@ from tracker import (
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
     get_ai_sim_trading, set_ai_sim_trading, get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
+    get_equity_snapshots,
 )
 import sim_trader
 import sim_agent
@@ -2690,14 +2691,18 @@ def _render_ai_sim_dashboard(email: str):
         return
 
     runs = get_sim_agent_runs(email, limit=200)
+
+    # 走势图数据源用sim_equity_snapshots(每几分钟一次，跟AI决策频率解耦)，
+    # 不再用sim_agent_runs的决策快照(15分钟一次)——用户反馈"遇到低波动
+    # 持仓连续几次数字精确不变，图表看着像死了"，见sim_snapshot.py开头
+    # 的说明。"AI每次决策记录"那个列表(下面)继续用runs，两者互不影响。
+    snapshots = get_equity_snapshots(email, limit=500)
     equity_points = []
-    for r in runs:
-        if r.get("assets_hkd_before") is None:
-            continue
-        _dt = _to_cn_dt(r.get("run_at"))
+    for s in snapshots:
+        _dt = _to_cn_dt(s.get("snapshot_at"))
         if _dt is None:
             continue
-        equity_points.append({"run_at": _dt, "assets_hkd": r["assets_hkd_before"]})
+        equity_points.append({"run_at": _dt, "assets_hkd": s["net_value_hkd"]})
 
     _render_ai_sim_live_snapshot(email, equity_points)
 
