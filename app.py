@@ -3882,10 +3882,15 @@ else:
                         _render_positions_today_pnl(holding_items)
                         st.divider()
                         _render_max_capital_input(_email)
-                        st.divider()
-                        _render_ai_sim_trading(_email)
                     with ai_col:
                         _render_portfolio_advice(_email, holding_items)
+
+                # 不放进上面"if holding_items"里——AI模拟交易这个开关跟"当前
+                # 有没有真实持仓"没关系（哪怕一支持仓都没有，也应该能提前打开
+                # 开关等着advisor.py下次跑），放里面会导致清仓后开关突然连
+                # 界面上都找不到了。
+                st.divider()
+                _render_ai_sim_trading(_email)
 
         elif active_section == "自选":
             if not st.session_state.get("logged_in"):
