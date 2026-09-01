@@ -64,7 +64,7 @@ from tracker import (
     add_search_history, get_search_history, get_latest_leaderboard, get_advice_accuracy, get_score_band_backtest,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
-    get_sim_agent_enabled, set_sim_agent_enabled, get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
+    get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
     get_equity_snapshots, get_period_pnl,
 )
 import sim_trader
@@ -2601,8 +2601,8 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
         st.caption("当前空仓。")
 
 
-def _render_ai_sim_dashboard(email: str):
-    """回看页——2026-09-01用户明确要求"回看页全部改成AI模拟炒股，我需要
+def _render_ai_sim_dashboard():
+    """AI模拟炒股页——2026-09-01用户明确要求"回看页全部改成AI模拟炒股，我需要
     看到它的持仓、收益和相关的所有交易记录"，完全取代原来的AI判断准确率
     追踪（_render_accuracy_dashboard函数还留着，只是导航不再调用它——
     用户是要"完全替换"这个入口，不是要删掉底层历史数据，函数和数据表都
@@ -2612,37 +2612,23 @@ def _render_ai_sim_dashboard(email: str):
     A股不参与，起始本金约十万港币——由用户自己在富途App里设置，这里没法
     通过代码改），不是持仓页那个"跟着每天17:30组合分析走"的模拟盘（那个
     继续在持仓页自己的开关那块，两条链路各自独立）。
+
+    2026-09-01用户明确要求"其他用户都能看见，就是让他们看内置AI靠不靠谱
+    的"——这不是per-user数据，是同一个固定账号(sim_agent.advisor._EMAIL)
+    的展示台，不区分是谁在看，所以不接收email参数，也不像持仓/自选那样
+    卡登录墙，游客也能直接看。同一个理由，"AI自主模拟交易"开关也去掉了
+    （用户反馈"省的误触断掉"）——这本来就该是个一直开着的展示性功能，不
+    是需要谁去手动控制的开关，误触关掉会让其他访客看到的是"已关闭"而不是
+    真实在跑的AI，得不偿失。sim_agent.py里那层sim_agent_enabled检查还留着
+    当兜底（真要停可以直接改数据库），只是页面上不再暴露这个开关。
     """
-    if not st.session_state.get("logged_in"):
-        st.write("")
-        _, mid_empty, _ = st.columns([1, 2, 1])
-        with mid_empty:
-            st.markdown(
-                "<div style='text-align:center;color:var(--fa-muted);padding:40px 0 10px'>"
-                "回看是个人功能，需要登录后使用<br>"
-                "<span style='font-size:0.82rem'>行情/详情页/AI分析等其它功能无需登录即可查看</span>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-            if st.button("登录 / 注册", use_container_width=True, key="_review_page_login_btn"):
-                st.session_state["guest_mode"] = False
-                st.rerun()
-        return
+    email = sim_agent.advisor._EMAIL
 
     st.caption(
         "这是内置AI（千问）用虚拟资金自主管理的模拟盘——只交易港股/美股（A股不参与），"
         "起始本金约十万港币，在开盘时段每15分钟自主决定要不要买卖，不需要你手动操作。"
         "这里如实展示它的持仓、收益和完整交易记录，仅供观察AI决策能力，不构成投资建议。"
     )
-
-    enabled = get_sim_agent_enabled(email)
-    new_enabled = st.toggle("AI自主模拟交易", value=enabled, key=f"_ai_sim_dash_toggle_{email}")
-    if new_enabled != enabled:
-        set_sim_agent_enabled(email, new_enabled)
-        st.rerun()
-    if not enabled:
-        st.caption("当前关闭——打开后AI会在下一个港股/美股开盘的15分钟节点开始自主交易。")
-        return
 
     runs = get_sim_agent_runs(email, limit=30)
 
@@ -4150,7 +4136,7 @@ else:
             # 名字本身也在同一天改成"AI模拟炒股"——完全替换掉原来的AI判断
             # 准确率追踪入口，_render_accuracy_dashboard函数本身和它依赖
             # 的历史数据都还在，只是不再从这个入口调用。
-            _render_ai_sim_dashboard(_uemail)
+            _render_ai_sim_dashboard()
 
         _render_ai_assistant()
 
