@@ -393,3 +393,10 @@ if __name__ == "__main__":
     email = advisor._EMAIL
     result = run_cycle(email)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    # Futu SDK建立连接开的线程不是daemon线程（跟advisor.py同一个老坑，
+    # 见advisor.py那边的注释）——不强制退出的话，main()跑完正常逻辑后
+    # 进程会一直挂着不退出，直到cron的超时限制才被杀死。这也是刚才
+    # 5次连续误判"上一轮还没跑完"的直接原因：进程早就干完活了，只是
+    # 迟迟不退出，一直占着并发锁。
+    import os
+    os._exit(0)
