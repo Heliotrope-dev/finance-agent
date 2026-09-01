@@ -2882,7 +2882,22 @@ def _render_position_rows(position_items: list, _email: str):
                 unsafe_allow_html=True,
             )
             if del_col.button("×", key=f"pos_del_{symbol}", help="卖出/取消关注", type="tertiary"):
-                _confirm_sell_dialog(_email, item, item_market, wspot.get("最新价") if wspot else None)
+                # 不能在这里直接调_confirm_sell_dialog——这个函数(_render_position_rows)
+                # 是@st.fragment(run_every=3)，弹窗打开后绑定的是当下这个fragment实例，
+                # 但每3秒的自动刷新会让fragment在后台重新生成一份，弹窗还留在界面上、
+                # 看着正常，可点"确认卖出"时服务端发现绑定的fragment id已经不存在了，
+                # 点击被静默丢弃、什么反应都没有(2026-09-01真实复现：VPS日志能看到
+                # "The fragment with id ... does not exist anymore"，前端完全没有报错
+                # 提示，只是点了没用)。改成在这里只记一个"要打开哪个标的的卖出弹窗"的
+                # session_state标记+st.rerun()（默认整页作用域，会跳出这个fragment），
+                # 真正调用_confirm_sell_dialog的代码挪到本函数外层不会自动刷新的稳定
+                # 作用域里（持仓/自选两个分区各自调用_render_position_rows之后），
+                # 这样弹窗绑定的就是稳定作用域，不会被后台定时刷新顶掉。
+                st.session_state["_confirm_sell_target"] = {
+                    "symbol": symbol, "item": item, "market": item_market,
+                    "cur_price": wspot.get("最新价") if wspot else None,
+                }
+                st.rerun()
 
             adv = _advice_map.get(symbol)
             if adv:
@@ -3172,8 +3187,10 @@ def _confirm_sell_dialog(email: str, item: dict, market: str, cur_price: float |
         dc1, dc2 = st.columns(2)
         if dc1.button("确认", type="primary", use_container_width=True):
             delete_position(email, symbol)
+            st.session_state.pop("_confirm_sell_target", None)
             st.rerun()
         if dc2.button("取消", use_container_width=True):
+            st.session_state.pop("_confirm_sell_target", None)
             st.rerun()
         return
 
@@ -3200,8 +3217,10 @@ def _confirm_sell_dialog(email: str, item: dict, market: str, cur_price: float |
             st.error("卖出股数要大于0。")
         else:
             reduce_position(email, symbol, sell_shares, sell_amount)
+            st.session_state.pop("_confirm_sell_target", None)
             st.rerun()
     if dc2.button("取消", use_container_width=True):
+        st.session_state.pop("_confirm_sell_target", None)
         st.rerun()
 
 
@@ -3786,6 +3805,15 @@ else:
                         # 必要，反而多一层点击——去掉筛选，统一直接展示全部持仓。
                         _render_position_rows(holding_items, _email)
 
+                    # 卖出确认弹窗调用挪到这个稳定作用域（不是_render_position_rows
+                    # 那个run_every=3的fragment内部）——见_render_position_rows里
+                    # pos_del_按钮那段注释，原因是fragment的定时自动刷新会让弹窗绑定
+                    # 的fragment失效，点"确认卖出"没反应。按shares>0过滤，避免自选
+                    # 分区点的卖出误在这个持仓分区弹出来。
+                    _sell_target = st.session_state.get("_confirm_sell_target")
+                    if _sell_target and (_sell_target["item"].get("shares") or 0) > 0:
+                        _confirm_sell_dialog(_email, _sell_target["item"], _sell_target["market"], _sell_target["cur_price"])
+
                     st.divider()
                     pnl_col, ai_col = st.columns([1, 1])
                     with pnl_col:
@@ -3851,6 +3879,12 @@ else:
                         )
                 else:
                     _render_position_rows(watch_items, _email)
+
+                # 同上——挪到稳定作用域，避开run_every fragment失效的问题；
+                # shares<=0过滤只处理"自选"这边点的卖出/取消关注。
+                _sell_target = st.session_state.get("_confirm_sell_target")
+                if _sell_target and (_sell_target["item"].get("shares") or 0) <= 0:
+                    _confirm_sell_dialog(_email, _sell_target["item"], _sell_target["market"], _sell_target["cur_price"])
 
         elif active_section == "回看":
             _render_accuracy_dashboard(_uemail)
