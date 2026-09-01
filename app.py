@@ -2670,7 +2670,7 @@ def _render_ai_sim_dashboard(email: str):
             st.caption(f"以下市场暂时没查到模拟账户：{'、'.join(snapshot['skipped_markets'])}")
 
     if len(equity_points) >= 2:
-        st.plotly_chart(build_sim_equity_curve(equity_points), use_container_width=True)
+        st.plotly_chart(build_sim_equity_curve(equity_points, baseline=sim_agent._VIRTUAL_BUDGET_HKD), use_container_width=True)
     else:
         st.caption("收益曲线数据还在积累——AI每次运行会记一个资产快照点，多跑几次（开盘时段每15分钟一次）后这里会出现走势图。")
 

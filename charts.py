@@ -462,23 +462,70 @@ def build_position_donut(holdings: list[dict], total_value_cny: float) -> go.Fig
     return fig
 
 
-def build_sim_equity_curve(points: list[dict]) -> go.Figure:
-    """AI模拟盘收益曲线——points是[{"run_at": ISO时间字符串, "assets_hkd": 浮点数}]，
-    按sim_agent每次运行时的资产快照点连线。数据点是"每次AI决策前的资产"，不是
-    分钟级K线，早期数据稀疏是正常的（agent刚上线，只在开盘时段每15分钟才有一个
-    点），不用插值编造中间点，稀疏就如实画成稀疏。"""
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0) -> go.Figure:
+    """AI模拟盘收益曲线——points是[{"run_at": 北京时区datetime, "assets_hkd": 浮点数}]，
+    按sim_agent每次运行(开盘时段每15分钟一次)时的资产快照点连线，不插值编造中间点，
+    数据本身就是按这个节奏产生的，早期稀疏是正常状态。
+
+    颜色跟着这个项目"红涨绿跌"的既定约定动态选——不能像K线图那样固定用UP_COLOR
+    画线，净值曲线本身有涨有跌，固定红色在净值下跌时会跟"红=涨"这个全局约定
+    自相矛盾、误导用户。baseline画一条起始十万港币的虚线参考——用户一眼就能
+    看出"现在比起点高还是低"，不用自己心算差值。
+    """
     df = pd.DataFrame(points).sort_values("run_at")
+    is_up = df["assets_hkd"].iloc[-1] >= df["assets_hkd"].iloc[0]
+    line_color = UP_COLOR if is_up else DOWN_COLOR
+
     fig = go.Figure()
+
+    fig.add_hline(
+        y=baseline, line=dict(color=NEUTRAL_COLOR, width=1, dash="dot"),
+        annotation_text=f"起始 HK${baseline:,.0f}", annotation_position="top left",
+        annotation_font=dict(size=10, color=NEUTRAL_COLOR),
+    )
+
     fig.add_trace(
         go.Scatter(
             x=df["run_at"], y=df["assets_hkd"], mode="lines+markers",
-            line=dict(color=UP_COLOR, width=2), marker=dict(size=4),
-            hovertemplate="%{x}<br>HK$%{y:,.0f}<extra></extra>",
+            line=dict(color=line_color, width=2.5, shape="spline", smoothing=0.35),
+            marker=dict(size=5, color=line_color, line=dict(color="#fff", width=1)),
+            fill="tozeroy", fillcolor=_hex_to_rgba(line_color, 0.08),
+            hovertemplate="%{x|%m-%d %H:%M}<br>HK$%{y:,.0f}<extra></extra>",
         )
     )
+
+    last = df.iloc[-1]
+    fig.add_annotation(
+        x=last["run_at"], y=last["assets_hkd"], text=f"HK${last['assets_hkd']:,.0f}",
+        showarrow=True, arrowhead=0, arrowcolor=line_color, ax=0, ay=-28,
+        font=dict(size=12, color=line_color, weight="bold"),
+        bgcolor="rgba(255,255,255,0.92)", bordercolor=line_color, borderwidth=1, borderpad=3,
+    )
+
+    y_min = min(baseline, df["assets_hkd"].min())
+    y_max = max(baseline, df["assets_hkd"].max())
+    y_pad = max((y_max - y_min) * 0.25, baseline * 0.002)
+
     fig.update_layout(
-        height=280,
-        margin=dict(l=10, r=10, t=10, b=10),
-        yaxis_title="总资产（港币）",
+        height=300,
+        margin=dict(l=10, r=10, t=36, b=10),
+        yaxis=dict(
+            title="总资产（港币）", range=[y_min - y_pad, y_max + y_pad],
+            gridcolor="rgba(0,0,0,0.06)", zeroline=False,
+        ),
+        xaxis=dict(
+            # 15分钟一格，跟sim_agent.py的决策节奏对齐——数据点本来就是这个
+            # 间隔产生的，刻度按同样的颗粒度显示，不会因为Plotly自动选刻度
+            # 显得比实际决策频率更密或更疏。
+            dtick=15 * 60 * 1000, tickformat="%H:%M", gridcolor="rgba(0,0,0,0.04)",
+        ),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
     )
     return fig
