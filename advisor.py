@@ -1562,8 +1562,15 @@ def advise_portfolio(email: str) -> dict | None:
         try:
             import sim_trader
             sim_trader.execute_simulated_trades(email, signals)
-        except Exception:
-            pass
+        except Exception as e:
+            # 之前是except Exception: pass——execute_simulated_trades如果在
+            # 建连接这步就炸了（比如OpenD没起来），异常在函数内部还没走到
+            # 任何tracker.log_simulated_order就直接冒出来，静默吞掉的话
+            # simulated_orders表里连一条失败记录都不会有，用户完全看不出
+            # 今天这次自动下单其实根本没跑，跟这个项目"失败要如实说明"的
+            # 一贯原则矛盾。改成印出来——advisor.py的stdout本来就是cron
+            # 那个agent读了去整理微信简报的，至少能在日常巡检里露出来。
+            print(f"（AI模拟盘自动下单失败：{e}）")
 
     return {"email": email, "total_value_cny": total_value_cny, "analysis_text": analysis_text, "signals": signals}
 

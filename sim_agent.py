@@ -366,9 +366,25 @@ def _run_cycle_locked(email: str) -> dict:
         sig_idx = text.find("交易信号:")
     reasoning_text = text[:sig_idx].strip() if sig_idx != -1 else text.strip()
 
+    # A股拦截——只在system prompt里说了"不要碰A股"，没有代码层面强制过；
+    # advisor._parse_trade_signals本身接受market="A"的行(它是给
+    # advise_portfolio那条允许A股的链路共用的解析器)，sim_trader.py的
+    # _MARKET_TRD字典也确实认得"A"这个市场，如果AI没听话给了一条A股信号，
+    # 会被真的送去execute_simulated_trades执行，不会被自然拦下来。跟
+    # 下面预算拦截同一个道理——不能只信prompt，这里也得代码层面真核实过。
+    off_market_signals = [s for s in signals if s.get("market") not in _AGENT_MARKETS and s.get("action") in ("买入", "卖出")]
+    if off_market_signals:
+        _a_text = "、".join(f"{s['name']}（{s['symbol']}·{s.get('market')}）" for s in off_market_signals)
+        reasoning_text += f"\n\n（系统提示：以下不属于港股/美股，已被拦截未执行：{_a_text}）"
+    # 不直接给signals重新赋值——跟下面预算拦截同一个原则，signals这个
+    # 变量最后要完整原样写进log_sim_agent_run（含被拦截的这些），方便
+    # 在"AI每次决策记录"里如实看到"AI试图操作了什么、系统拦了什么"，
+    # 只是不让这些进入下面真正下单的执行链路。
+    tradeable_signals = [s for s in signals if s not in off_market_signals]
+
     # 硬性预算拦截——不能只信AI自己说的"我会控制在预算内"，必须代码层面
     # 真的核实过再放行，见_apply_budget_limit的docstring。
-    kept_signals, dropped_signals = _apply_budget_limit(signals, candidates, holdings_value_hkd)
+    kept_signals, dropped_signals = _apply_budget_limit(tradeable_signals, candidates, holdings_value_hkd)
     if dropped_signals:
         _dropped_text = "、".join(f"{s['name']}（{s['symbol']}）{s['shares']:g}股" for s in dropped_signals)
         reasoning_text += f"\n\n（系统提示：以下买入超出十万港币虚拟预算，已被拦截未执行：{_dropped_text}）"
@@ -401,6 +417,5 @@ if __name__ == "__main__":
     # 见advisor.py那边的注释）——不强制退出的话，main()跑完正常逻辑后
     # 进程会一直挂着不退出，直到cron的超时限制才被杀死。这也是刚才
     # 5次连续误判"上一轮还没跑完"的直接原因：进程早就干完活了，只是
-    # 迟迟不退出，一直占着并发锁。
-    import os
+    # 迟迟不退出，一直占着并发锁。os已经在文件顶部import过了。
     os._exit(0)

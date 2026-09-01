@@ -520,10 +520,11 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0) -> g
             gridcolor="rgba(0,0,0,0.06)", zeroline=False,
         ),
         xaxis=dict(
-            # 15分钟一格，跟sim_agent.py的决策节奏对齐——数据点本来就是这个
-            # 间隔产生的，刻度按同样的颗粒度显示，不会因为Plotly自动选刻度
-            # 显得比实际决策频率更密或更疏。
-            dtick=15 * 60 * 1000, tickformat="%H:%M", gridcolor="rgba(0,0,0,0.04)",
+            # 5分钟一格，跟sim_snapshot.py的采样节奏对齐——这个图的数据源是
+            # sim_equity_snapshots(每5分钟一次)，不是sim_agent_runs的15分钟
+            # 决策记录，2026-09-01把数据源从后者换成前者时这个刻度漏改了，
+            # 之前固定按15分钟画会导致刻度比实际数据点稀疏3倍。
+            dtick=5 * 60 * 1000, tickformat="%H:%M", gridcolor="rgba(0,0,0,0.04)",
         ),
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
