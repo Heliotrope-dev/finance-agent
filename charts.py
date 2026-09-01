@@ -508,10 +508,12 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
     # 独立线段，不画连接休市时段的假线。
     _GAP_THRESHOLD = pd.Timedelta(minutes=20)
     rows = [df.iloc[0].to_dict()]
+    gap_bounds: list[tuple] = []
     for i in range(1, len(df)):
         prev_t, cur_t = df.iloc[i - 1]["run_at"], df.iloc[i]["run_at"]
         if cur_t - prev_t > _GAP_THRESHOLD:
             rows.append({"run_at": prev_t + (cur_t - prev_t) / 2, "assets_hkd": float("nan")})
+            gap_bounds.append((prev_t, cur_t))
         rows.append(df.iloc[i].to_dict())
     df_plot = pd.DataFrame(rows)
 
@@ -531,6 +533,18 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
     # 硬编码固定偏移——美股有夏令时，硬编码会有小半年是错的。"月"视图跨度
     # 太长，几十条线会糊成一片，不画；"周"视图只画线不加文字注释，避免
     # 好几天的标签叠在一起看不清；"天"视图数据点本来就密集，线+文字都加上。
+    #
+    # 真实故障纠偏（2026-09-01）：早期版本不管边界落不落在实际数据范围内，
+    # 见到"当天"就把港股/美股各自的开盘收盘都画上去——结果比如重置后只有
+    # 22点多的几个数据点，但"当天"港股09:30开盘的边界也被画了出来，
+    # Plotly的X轴autorange会自动撑大到覆盖所有vline的位置，变成"09:30到
+    # 次日04:00"接近19小时的轴，真实数据只占最右边一小段，中间一大片
+    # 全是空白；叠加下面天视图固定5分钟一格的dtick，19小时/5分钟=228格，
+    # 挤在图表宽度里刻度文字全部重叠糊成一片乱码。修复两处：只画落在实际
+    # 数据时间范围内的边界线（不在范围内的边界对这次展示没有意义，不该
+    # 反过来把轴撑大）；X轴range显式锁定在数据实际的[min,max]（留一点点
+    # padding），不再任由vline把范围往外拉。
+    data_min, data_max = df["run_at"].min(), df["run_at"].max()
     if granularity in ("day", "week") and not df["run_at"].empty:
         _dates = sorted({t.date() for t in df["run_at"]})
         _cn = ZoneInfo("Asia/Shanghai")
@@ -538,6 +552,8 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
             for tz_name, label_prefix in (("Asia/Hong_Kong", "港股"), ("America/New_York", "美股")):
                 for t, suffix in ((dtime(9, 30), "开盘"), (dtime(16, 0), "收盘")):
                     boundary = datetime.combine(d, t, tzinfo=ZoneInfo(tz_name)).astimezone(_cn)
+                    if not (data_min <= boundary <= data_max):
+                        continue
                     fig.add_vline(
                         x=boundary, line=dict(color=UP_COLOR, width=1, dash="dash"),
                         opacity=0.5,
@@ -558,6 +574,11 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
     y_max = max(baseline, df["assets_hkd"].max())
     y_pad = max((y_max - y_min) * 0.25, baseline * 0.002)
 
+    # X轴范围显式锁定在数据实际的[min,max]（右边留一点padding避免最后一个
+    # 端点标注被裁掉）——不再靠autorange自己算，理由见上面vline那段注释。
+    x_span = data_max - data_min
+    x_pad = max(x_span * 0.04, pd.Timedelta(minutes=5))
+
     fig.update_layout(
         height=300,
         margin=dict(l=10, r=10, t=36, b=10),
@@ -565,18 +586,22 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
             title="总资产（港币）", range=[y_min - y_pad, y_max + y_pad],
             gridcolor="rgba(0,0,0,0.06)", zeroline=False,
         ),
-        xaxis=(
-            dict(
-                # 5分钟一格，跟sim_snapshot.py的采样节奏对齐——这个图的数据源是
-                # sim_equity_snapshots(每5分钟一次)，不是sim_agent_runs的15分钟
-                # 决策记录，2026-09-01把数据源从后者换成前者时这个刻度漏改了，
-                # 之前固定按15分钟画会导致刻度比实际数据点稀疏3倍。
-                dtick=5 * 60 * 1000, tickformat="%H:%M", gridcolor="rgba(0,0,0,0.04)",
-            )
-            if granularity == "day" else
-            dict(
-                dtick=24 * 60 * 60 * 1000, tickformat="%m-%d", gridcolor="rgba(0,0,0,0.04)",
-            )
+        xaxis=dict(
+            # 用户明确要求"港股收盘到美股开盘那段空白砍掉"——休市空档不但
+            # 折线不连（上面的NaN断点），连轴上对应的这段宽度也不留，跟股票
+            # 软件"隐藏非交易时段"是同一个效果。用Plotly的rangebreaks，边界
+            # 直接复用上面已经识别出来的休市空档(gap_bounds)，不用另外猜
+            # 固定的收盘/开盘时间点——数据实际断在哪就砍哪段，跟当天真实
+            # 港股/美股时间表自动对齐。
+            rangebreaks=[dict(bounds=[str(a), str(b)]) for a, b in gap_bounds],
+            range=[data_min - x_pad, data_max + x_pad],
+            tickformat="%H:%M" if granularity == "day" else "%m-%d",
+            # "天"视图固定1小时一格（用户明确要求）；折线本身还是按快照实际
+            # 节奏(5分钟一个点)连，刻度间隔只影响轴上标签疏密，不影响连线
+            # 精细度。"周"/"月"视图数据跨度更大，1小时会挤爆，继续用nticks
+            # 让Plotly自己按当前range挑合适间隔。
+            **(dict(dtick=60 * 60 * 1000) if granularity == "day" else dict(nticks=8)),
+            gridcolor="rgba(0,0,0,0.04)",
         ),
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
