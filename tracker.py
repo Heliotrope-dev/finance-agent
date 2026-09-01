@@ -270,15 +270,17 @@ def init_db():
         )
 
         # sim_agent_runs：AI模拟盘"自主决策"每次运行的完整记录——2026-09-01
-        # 用户要求"全自动、自己学习试错"，这是每小时一次的独立决策循环
-        # (sim_agent.py)跟每天17:30那次组合分析(advise_portfolio)不是同一
-        # 回事，各自留自己的执行记录：这张表记的是"这次AI看到了什么、想了
-        # 什么、决定怎么做"的完整上下文，不只是最终下了哪些单（simulated_
-        # orders已经记了下单结果，这张表补的是决策过程本身，让"学习试错"
-        # 这件事有据可查，不是黑箱）。assets_cny_before/after用于在下一轮
-        # 决策时喂给AI"你上次操作后资产变化"这个反馈，是"学习"这个说法在
-        # LLM agent场景下能落地的方式——不是训练模型权重，是把历史战绩摘要
-        # 写进prompt当参考。
+        # 用户要求"全自动、自己学习试错"，这是每15分钟一次的独立决策循环
+        # (sim_agent.py，只在港股/美股开盘时跑，A股不参与)，跟每天17:30那次
+        # 组合分析(advise_portfolio)不是同一回事，各自留自己的执行记录：
+        # 这张表记的是"这次AI看到了什么、想了什么、决定怎么做"的完整上下文，
+        # 不只是最终下了哪些单（simulated_orders已经记了下单结果，这张表
+        # 补的是决策过程本身，让"学习试错"这件事有据可查，不是黑箱）。
+        # assets_hkd_before用于在下一轮决策时喂给AI"你上次操作后资产变化"
+        # 这个反馈，是"学习"这个说法在LLM agent场景下能落地的方式——不是
+        # 训练模型权重，是把历史战绩摘要写进prompt当参考。用港币而不是人民币
+        # 记账，因为用户把这个自主agent的起始本金定为"十万港币"（港股/美股
+        # 两个独立SIMULATE账户，折算成港币统一核算）。
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS sim_agent_runs (
@@ -286,7 +288,7 @@ def init_db():
                 email TEXT NOT NULL,
                 run_at TEXT NOT NULL,
                 open_markets TEXT NOT NULL DEFAULT '',
-                assets_cny_before REAL,
+                assets_hkd_before REAL,
                 reasoning_text TEXT NOT NULL DEFAULT '',
                 signals_json TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
@@ -294,6 +296,13 @@ def init_db():
             )
             """
         )
+        # 老库升级：这张表刚上线时字段名是assets_cny_before(人民币计价)，
+        # 后来用户改主意要港币计价，字段名同步改成assets_hkd_before——这张
+        # 表还没积累真实要保留的数据，直接RENAME COLUMN，不用像其它老表那样
+        # 走"新增列+回填"的兼容路径。
+        sar_cols = [r[1] for r in c.execute("PRAGMA table_info(sim_agent_runs)").fetchall()]
+        if "assets_cny_before" in sar_cols and "assets_hkd_before" not in sar_cols:
+            c.execute("ALTER TABLE sim_agent_runs RENAME COLUMN assets_cny_before TO assets_hkd_before")
 
         # 从watchlist表一次性迁移进positions，shares/cost_total都是0(纯关注)。
         # UNIQUE(email,symbol)保证INSERT OR IGNORE天然幂等，每次启动跑一遍
@@ -545,17 +554,17 @@ def get_simulated_orders(email: str, limit: int = 50) -> list[dict]:
 
 
 def log_sim_agent_run(
-    email: str, open_markets: list[str], assets_cny_before: float | None,
+    email: str, open_markets: list[str], assets_hkd_before: float | None,
     reasoning_text: str, signals_json: str, status: str, note: str = "",
 ) -> int:
     init_db()
     with closing(_conn()) as c:
         cur = c.execute(
             "INSERT INTO sim_agent_runs "
-            "(email, run_at, open_markets, assets_cny_before, reasoning_text, signals_json, status, note) "
+            "(email, run_at, open_markets, assets_hkd_before, reasoning_text, signals_json, status, note) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (email, datetime.now(timezone.utc).isoformat(), json.dumps(open_markets, ensure_ascii=False),
-             assets_cny_before, reasoning_text, signals_json, status, note),
+             assets_hkd_before, reasoning_text, signals_json, status, note),
         )
         c.commit()
         return cur.lastrowid

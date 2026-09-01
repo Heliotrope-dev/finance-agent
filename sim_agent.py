@@ -1,6 +1,6 @@
 """AI模拟盘自主交易agent——2026-09-01用户明确要求"全自动、AI自己在模拟盘上
 炒股、学习、试错"。这跟sim_trader.execute_simulated_trades（跟着advisor.py
-每天17:30那次组合分析的信号走）是两条独立的执行路径：这里是每小时触发一次
+每天17:30那次组合分析的信号走）是两条独立的执行路径：这里是每15分钟触发一次
 的自主决策循环，AI自己看当前持仓/现金/候选股行情/过去的操作战绩，自己决定
 买卖，不依赖组合分析那条链路。
 
@@ -13,7 +13,9 @@
 不是真正意义上的机器学习。
 """
 import json
+import os
 from datetime import datetime, time as dtime
+from pathlib import Path
 
 from zoneinfo import ZoneInfo
 
@@ -21,12 +23,25 @@ import advisor
 import sim_trader
 import tracker
 
+# 15分钟一次的节奏比之前设计的每小时紧得多——如果某一轮因为网络慢/AI响应
+# 慢跑超过15分钟，下一次cron触发时上一轮可能还没结束，两个进程同时下单
+# 有真实的重复交易风险。用一个简单的文件锁挡住重叠执行：抢不到锁就直接
+# 跳过这次，不排队等待（排队会导致锁越攒越多，不如干脆跳过等下一个自然
+# 触发点）。
+_LOCK_PATH = Path(__file__).parent / "data" / "sim_agent.lock"
+
 _MARKET_TZ = {"A": "Asia/Shanghai", "HK": "Asia/Hong_Kong", "US": "America/New_York"}
 _MARKET_HOURS = {
     "A": [(dtime(9, 30), dtime(11, 30)), (dtime(13, 0), dtime(15, 0))],
     "HK": [(dtime(9, 30), dtime(12, 0)), (dtime(13, 0), dtime(16, 0))],
     "US": [(dtime(9, 30), dtime(16, 0))],
 }
+
+# 2026-09-01用户明确要求"仅需要在港美股开盘阶段思考就行"——自主决策循环
+# 只看这两个市场是否开盘，A股不参与这个每15分钟一次的自主交易（A股T+1
+# 不能当日回转，跟这个高频动量交易的节奏本来就不搭）。A股的SIMULATE账户
+# 依然存在、依然会在快照里展示余额，只是这条自主决策链路不会主动碰它。
+_AGENT_MARKETS = ("HK", "US")
 
 # 每个开盘市场喂给AI的候选股数量——每小时跑一次，不能像advise_portfolio
 # 那样带财务摘要/新闻做深度分析（那样跑一次要几分钟、几十次AI调用，一小时
@@ -48,7 +63,7 @@ def _market_is_open(market: str) -> bool:
 
 
 def _open_markets() -> list[str]:
-    return [m for m in _MARKET_TZ if _market_is_open(m)]
+    return [m for m in _AGENT_MARKETS if _market_is_open(m)]
 
 
 def _build_candidates(open_markets: list[str]) -> list[dict]:
@@ -89,35 +104,37 @@ def _history_context_lines(email: str) -> list[str]:
         return ["（还没有历史运行记录，这是第一次决策，没有过去战绩可参考）"]
 
     try:
-        current_assets = sim_trader.get_sim_snapshot()["total_assets_cny"]
+        current_assets = sim_trader.get_agent_snapshot()["total_assets_hkd"]
     except Exception:
         current_assets = None
 
     lines = []
     for r in runs:
-        before = r.get("assets_cny_before")
+        before = r.get("assets_hkd_before")
         when = (r.get("run_at") or "")[:16].replace("T", " ")
         if before and current_assets:
             change_pct = (current_assets - before) / before * 100
-            lines.append(f"- {when}（¥{before:,.0f}起）：截至现在累计变化{change_pct:+.2f}%，当时的判断：{(r.get('reasoning_text') or '（无记录）')[:80]}")
+            lines.append(f"- {when}（HK${before:,.0f}起）：截至现在累计变化{change_pct:+.2f}%，当时的判断：{(r.get('reasoning_text') or '（无记录）')[:80]}")
         else:
             lines.append(f"- {when}：{(r.get('reasoning_text') or '（无记录）')[:80]}")
     return lines
 
 
-_AGENT_SYSTEM = """你是一个正在用虚拟资金自主管理富途模拟盘的投资agent，目标是长期跑赢大盘，
-不是每次都要交易——没有把握就"不动"，频繁交易会侵蚀模拟盘的长期表现（跟真实交易一样，这是
-在训练你形成正确的交易纪律，不是鼓励你多操作显得"在干活"）。
+_AGENT_SYSTEM = """你是一个正在用虚拟资金自主管理富途模拟盘的投资agent，账户起始本金约十万港币，
+只交易港股和美股（A股不在你的操作范围内，就算候选或持仓信息里出现也不要碰），目标是长期跑赢
+大盘，不是每次都要交易——没有把握就"不动"，频繁交易会侵蚀模拟盘的长期表现（跟真实交易一样，
+这是在训练你形成正确的交易纪律，不是鼓励你多操作显得"在干活"）。
 
-你会看到：当前持仓明细（含浮动盈亏）、账户现金、候选股当前行情（只有现价/涨跌幅，没有基本面/
-新闻）、以及你自己过去几次决策后账户实际的资产变化（这是给你复盘用的——如果最近几次操作后
-资产在跌，说明策略需要更保守或调整方向；如果在涨，可以适度延续当前思路，但不要因为涨了就
-盲目加大手笔）。
+你会看到：当前持仓明细（含浮动盈亏）、账户现金（港股/美股两个独立资金池，都折算成港币展示）、
+候选股当前行情（只有现价/涨跌幅，没有基本面/新闻）、以及你自己过去几次决策后账户实际的资产
+变化（这是给你复盘用的——如果最近几次操作后资产在跌，说明策略需要更保守或调整方向；如果在
+涨，可以适度延续当前思路，但不要因为涨了就盲目加大手笔）。
 
 输出格式（必须严格遵守，不要输出这个格式之外的解释性文字混在信号行里）：
 先写一段简短的决策理由（100-200字，说清楚这次为什么这么操作，或者为什么选择不动），然后另起一行写：
 交易信号：
-每条一行，格式为 名称|代码|市场(A/HK/US)|买入或卖出或不动|股数|预计金额(折人民币)
+每条一行，格式为 名称|代码|市场(HK或US)|买入或卖出或不动|股数|预计金额(折人民币，就算你是用港币
+思考决策的，这一列的数字也按人民币估算填，系统内部会自动处理，不用你自己换算成港币)
 只有"买入"或"卖出"的行会被真实执行，"不动"的行可以省略（没有值得操作的就不用写这行）。
 卖出时的股数不能超过你在"当前持仓"里看到的实际持有股数。
 """
@@ -126,15 +143,34 @@ _AGENT_SYSTEM = """你是一个正在用虚拟资金自主管理富途模拟盘�
 def run_cycle(email: str) -> dict:
     """跑一次自主决策循环。没有市场开盘就直接跳过，不调用AI（省调用额度，
     也没有意义——候选股行情在休市时是不变的，AI在这个状态下做决策等于
-    看着几个小时前的旧数据拍脑袋）。
+    看着几个小时前的旧数据拍脑袋）。抢不到并发锁（上一轮还没跑完）也直接
+    跳过，不重复执行。
     """
+    import fcntl
+
+    _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(_LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_file.close()
+        return {"status": "跳过", "note": "上一轮还没跑完，本次不重叠执行"}
+
+    try:
+        return _run_cycle_locked(email)
+    finally:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
+
+
+def _run_cycle_locked(email: str) -> dict:
     open_markets = _open_markets()
     if not open_markets:
         tracker.log_sim_agent_run(email, [], None, "", "[]", "跳过", "当前没有市场开盘")
         return {"status": "跳过", "note": "当前没有市场开盘"}
 
     try:
-        snapshot = sim_trader.get_sim_snapshot()
+        snapshot = sim_trader.get_agent_snapshot()
     except Exception as e:
         tracker.log_sim_agent_run(email, open_markets, None, "", "[]", "失败", f"读取模拟盘快照失败：{e}")
         return {"status": "失败", "note": str(e)}
@@ -149,7 +185,7 @@ def run_cycle(email: str) -> dict:
     holdings_text = "\n".join(holdings_lines) if holdings_lines else "（当前空仓）"
 
     cash_lines = [
-        f"- {m}市场：{info['assets_native']:,.0f} {info['currency']}（约¥{info['assets_cny']:,.0f}）"
+        f"- {m}市场：{info['assets_native']:,.0f} {info['currency']}（约HK${info['assets_hkd']:,.0f}）"
         for m, info in snapshot["markets"].items()
     ]
     cash_text = "\n".join(cash_lines) if cash_lines else "（资金信息暂时获取不到）"
@@ -181,11 +217,11 @@ def run_cycle(email: str) -> dict:
         )
         text = resp.choices[0].message.content or ""
     except Exception as e:
-        tracker.log_sim_agent_run(email, open_markets, snapshot["total_assets_cny"], "", "[]", "失败", f"AI调用失败：{e}")
+        tracker.log_sim_agent_run(email, open_markets, snapshot["total_assets_hkd"], "", "[]", "失败", f"AI调用失败：{e}")
         return {"status": "失败", "note": str(e)}
 
     if not text.strip():
-        tracker.log_sim_agent_run(email, open_markets, snapshot["total_assets_cny"], "", "[]", "失败", "AI返回空内容")
+        tracker.log_sim_agent_run(email, open_markets, snapshot["total_assets_hkd"], "", "[]", "失败", "AI返回空内容")
         return {"status": "失败", "note": "AI返回空内容"}
 
     signals = advisor._parse_trade_signals(text)
@@ -201,7 +237,7 @@ def run_cycle(email: str) -> dict:
         reasoning_text += f"\n\n（下单执行失败：{e}）"
 
     tracker.log_sim_agent_run(
-        email, open_markets, snapshot["total_assets_cny"], reasoning_text,
+        email, open_markets, snapshot["total_assets_hkd"], reasoning_text,
         json.dumps(signals, ensure_ascii=False), "完成",
         f"{len(exec_results)}条信号，其中执行成功{sum(1 for r in exec_results if r.get('status') == '成功')}条",
     )

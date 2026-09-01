@@ -200,3 +200,66 @@ def get_sim_snapshot() -> dict:
             trd.close()
 
     return {"total_assets_cny": total_assets_cny, "markets": markets_info, "positions": positions, "skipped_markets": skipped_markets}
+
+
+def get_agent_snapshot() -> dict:
+    """sim_agent.py自主决策专用的快照——2026-09-01用户明确要求"暂时先港美股，
+    A股不让AI碰，总资金按十万港币算"：跟get_sim_snapshot()的区别是只统计
+    HK/US两个市场（不含A股），并且统一折算成HKD而不是CNY——用户把这个自主
+    agent的记账本位币定为港币，跟"持仓页"那个面向全部三个市场、以人民币
+    汇总的通用快照(get_sim_snapshot)是两回事，服务于不同的展示需求，所以
+    分开两个函数，不在同一个函数里加参数分叉（分叉逻辑会让两种用途互相
+    牵制，改一个怕影响另一个）。
+
+    起始本金调整（比如改成十万港币）这件事OpenAPI没有对应接口（已确认
+    OpenSecTradeContext没有"重置模拟资金"这个方法），只能用户自己在富途
+    App里"交易-模拟交易-重置模拟资金"手动操作——这个函数只是如实读取账户
+    当前实际余额，用户把本金调好之后这里自然就是以新本金为基准。
+    """
+    total_assets_hkd = 0.0
+    markets_info: dict[str, dict] = {}
+    positions: list[dict] = []
+    skipped_markets: list[str] = []
+
+    usd_cny_rate, _n1 = ds.get_fx_rate("USD")
+    hkd_cny_rate, _n2 = ds.get_fx_rate("HKD")
+    usd_hkd_rate = (usd_cny_rate / hkd_cny_rate) if (usd_cny_rate and hkd_cny_rate) else None
+    _rate_to_hkd = {"HKD": 1.0, "USD": usd_hkd_rate}
+
+    for market in ("HK", "US"):
+        trd_market = _MARKET_TRD[market]
+        currency = _MARKET_CURRENCY[market]
+        trd = ft.OpenSecTradeContext(filter_trdmarket=trd_market, host=_HOST, port=_PORT)
+        try:
+            acc_id = _get_sim_acc_id(trd)
+            if not acc_id:
+                skipped_markets.append(market)
+                continue
+
+            ret, info = trd.accinfo_query(trd_env=ft.TrdEnv.SIMULATE, acc_id=int(acc_id))
+            assets_native = float(info.iloc[0]["total_assets"]) if ret == ft.RET_OK and not info.empty else None
+            rate = _rate_to_hkd.get(currency)
+            assets_hkd = assets_native * rate if (assets_native is not None and rate) else None
+            markets_info[market] = {"acc_id": acc_id, "assets_native": assets_native, "assets_hkd": assets_hkd, "currency": currency}
+            if assets_hkd is not None:
+                total_assets_hkd += assets_hkd
+
+            ret2, pos = trd.position_list_query(trd_env=ft.TrdEnv.SIMULATE, acc_id=int(acc_id))
+            if ret2 == ft.RET_OK and not pos.empty:
+                for _, p in pos.iterrows():
+                    if float(p["qty"] or 0) == 0:
+                        continue
+                    positions.append({
+                        "market": market, "code": p["code"], "name": p.get("stock_name") or p["code"],
+                        "qty": float(p["qty"]),
+                        "cost_price": float(p["cost_price"]) if p.get("cost_price") not in (None, "N/A") else None,
+                        "market_val": float(p["market_val"]) if p.get("market_val") not in (None, "N/A") else None,
+                        "pl_val": float(p["pl_val"]) if p.get("pl_val") not in (None, "N/A") else None,
+                        "currency": currency,
+                    })
+        except Exception:
+            skipped_markets.append(market)
+        finally:
+            trd.close()
+
+    return {"total_assets_hkd": total_assets_hkd, "markets": markets_info, "positions": positions, "skipped_markets": skipped_markets}
