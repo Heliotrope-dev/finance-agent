@@ -1624,12 +1624,21 @@ def _fmt_entry(e: dict, rank: int | None = None) -> str:
     return f"{prefix}【{e['action']}】{e['name']}（{e['symbol']}·{e['market']}） 现价{price}{score_text}\n{e['fundamental_verdict']}\n"
 
 
-def main():
+def run_positions_advice():
+    """独立入口——持仓/自选AI判断，每个交易日中午12:30单独跑一次，不再
+    挂在main()那条17:30"综合得分排行榜+微信简报"的流程里。
+
+    2026-09-02真实故障纠偏+用户明确要求："自选股上的分析放到交易日北京
+    时间下午十二点半午盘时间，不要跟五点半那个AI推荐股票重合了，就一门
+    心思跑那个"。之前advise_positions()跟screen_candidates()/组合分析/
+    推荐股排行榜挤在同一个main()、同一个17:30的时间预算里，22支持仓/
+    自选只有一部分能在超时前跑完，靠后的条目被静默截断丢弃（这个bug本身
+    已经在advise_positions()内部把timeout/max_workers放宽修过一次，但
+    "跟别的任务抢同一段时间预算"这个结构性问题没解决——两条cron分开跑，
+    彻底不互相占用时间，17:30那条从此只需要专心跑"发现新机会"这一件事。
+    """
     _load_secrets_into_env()
     _check_qwen_balance()
-
-    backfilled = _backfill_due_advice()
-    print(f"（已回填 {backfilled} 条到期的历史建议价格）\n")
 
     position_results = advise_positions()
     for e in position_results:
@@ -1638,7 +1647,15 @@ def main():
             e["technical_signal"], e["action"], e["market"], e["name"], source="position",
             score=e.get("score"),
         )
-    print(f"（持仓判断：{len(position_results)} 只已更新，结果在网站持仓页面查看，不进本条简报正文）\n")
+    print(f"（持仓判断：{len(position_results)} 只已更新，结果在网站持仓页面查看，不进微信简报）\n")
+
+
+def main():
+    _load_secrets_into_env()
+    _check_qwen_balance()
+
+    backfilled = _backfill_due_advice()
+    print(f"（已回填 {backfilled} 条到期的历史建议价格）\n")
 
     # 组合分析要覆盖所有注册用户（不是只给_EMAIL这一个固定账号算）——
     # 用户明确要求过，跟上面单支持仓判断/screen候选只服务_EMAIL这个私人
@@ -1743,7 +1760,10 @@ def main():
 
 if __name__ == "__main__":
     import sys as _sys
-    main()
+    if "--positions-only" in _sys.argv:
+        run_positions_advice()
+    else:
+        main()
     # get_stock_realtime_futu 建立的 Futu SDK 连接会开一个非 daemon 线程，main()
     # 跑完所有逻辑之后进程并不会自己退出——实测复现过：日志打印完"共N条判断已
     # 记录"，进程还是挂着一直到外层 timeout 才被杀掉。这里所有该做的事（DB写入/
