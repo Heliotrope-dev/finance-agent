@@ -54,8 +54,12 @@ _VIRTUAL_BUDGET_HKD = 100_000
 
 # 每个开盘市场喂给AI的候选股数量——每小时跑一次，不能像advise_portfolio
 # 那样带财务摘要/新闻做深度分析（那样跑一次要几分钟、几十次AI调用，一小时
-# 一次的节奏耗不起），这里只给"名称/代码/现价/涨跌幅"这种一眼行情，AI基于
-# 盘面动量+已经知道的持仓上下文做决策，不是基本面深挖。
+# 一次的节奏耗不起），这里只给"名称/代码/现价/涨跌幅/量比/换手率"这种一眼
+# 行情，AI基于盘面动量+已经知道的持仓上下文做决策，不是基本面深挖。量比/
+# 换手率是2026-09-01补的——之前只给涨跌幅，AI有一次决策说某支票"成交活跃"，
+# 拿真实Futu数据核对发现那支票当天量比只有0.8（低于日均量），"活跃"是编的，
+# 手上压根没有能验证"活不活跃"的数字。现在给了真数据，AI再说"活跃"就该是
+# 从这两个数字看出来的，不是凭感觉。
 _CANDIDATES_PER_MARKET = 8
 
 # 每次决策喂给AI的历史战绩条数——太多会把prompt撑得很长还没有额外信息量
@@ -118,6 +122,10 @@ def _build_candidates(open_markets: list[str]) -> list[dict]:
             candidates.append({
                 "symbol": it["symbol"], "market": market, "name": it.get("name") or it["symbol"],
                 "price": spot["最新价"], "pct_chg": spot.get("涨跌幅"),
+                # 量比/换手率——给AI判断"是不是真的活跃"用真数据，不是只看
+                # 涨跌幅自己脑补，见data_sources.get_stock_realtime_futu里
+                # 这两个字段的说明。
+                "volume_ratio": spot.get("量比"), "turnover_rate": spot.get("换手率"),
             })
     return candidates
 
@@ -271,8 +279,12 @@ _AGENT_SYSTEM = f"""你是一个正在用虚拟资金自主管理富途模拟盘
 的买入会被系统直接拦截不执行，所以你自己也要心里有数，不要开出明显超预算的买入。
 
 你会看到：当前持仓明细（含浮动盈亏）、你的虚拟预算使用情况（已用多少、还剩多少额度）、
-候选股当前行情（只有现价/涨跌幅，没有基本面/新闻）、以及你自己过去几次决策——当时具体买卖
-了哪些标的、当时的判断理由、以及截至现在账户资产的实际变化。
+候选股当前行情（现价/涨跌幅/量比/换手率，没有基本面/新闻）、以及你自己过去几次决策——当时
+具体买卖了哪些标的、当时的判断理由、以及截至现在账户资产的实际变化。
+
+如果你的理由里提到"成交活跃"/"资金关注"/"量能配合"这类说法，必须能对应上候选股行情里
+给的量比/换手率数字（比如量比明显大于1才算放量，量比低于1其实是缩量，不能反过来说"活跃"）——
+不能只看涨跌幅好看就顺嘴编一个"活跃"当理由，这两个字段就是给你核实用的，说了就要站得住。
 
 用户明确要求这不是"每次决策互不相关地随便选选"，而是要"边炒股边学习，哪里踩过坑、摸清楚
 套路，越操作越像一个真正懂行情的专家，不能一直是散户思维"。具体到每次决策，你应该先花几句
@@ -363,11 +375,17 @@ def _run_cycle_locked(email: str) -> dict:
         + ("（部分持仓汇率暂时获取不到，实际占用可能比这个数字更高，买入要更保守）" if snapshot.get("holdings_value_partial") else "")
     )
 
-    candidates_text = "\n".join(
-        f"- {c['name']}（{c['symbol']}·{c['market']}）：现价{c['price']:.2f}，涨跌幅{c['pct_chg']:+.2f}%"
-        if c.get("pct_chg") is not None else f"- {c['name']}（{c['symbol']}·{c['market']}）：现价{c['price']:.2f}"
-        for c in candidates
-    ) if candidates else "（当前开盘市场暂时没有可用的候选股行情）"
+    def _fmt_candidate(c: dict) -> str:
+        parts = [f"现价{c['price']:.2f}"]
+        if c.get("pct_chg") is not None:
+            parts.append(f"涨跌幅{c['pct_chg']:+.2f}%")
+        if c.get("volume_ratio") is not None:
+            parts.append(f"量比{c['volume_ratio']:.2f}")
+        if c.get("turnover_rate") is not None:
+            parts.append(f"换手率{c['turnover_rate']:.2f}%")
+        return f"- {c['name']}（{c['symbol']}·{c['market']}）：" + "，".join(parts)
+
+    candidates_text = "\n".join(_fmt_candidate(c) for c in candidates) if candidates else "（当前开盘市场暂时没有可用的候选股行情）"
 
     user_content = (
         f"当前开盘市场：{'、'.join(open_markets)}\n\n"

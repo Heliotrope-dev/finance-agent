@@ -1674,6 +1674,13 @@ def get_stock_realtime_futu(symbol: str, market: str) -> dict:
         "涨跌额": last - prev_close,
         "涨跌幅": (last - prev_close) / prev_close * 100,
         "成交额": float(row["turnover"]) if pd.notna(row.get("turnover")) else None,
+        # 2026-09-01新增：量比/换手率——起因是AI模拟盘一次真实决策里说某支
+        # 美股"成交活跃"，但candidates当时只给了涨跌幅没给成交量相关数据，
+        # 拿真实Futu数据核对发现那支票当天量比其实只有0.8（低于日均量），
+        # "活跃"是AI自己编的，不是看数据得出的结论。加上这两个字段让AI
+        # 判断"活不活跃"时有真数字可查，不用凭感觉猜。
+        "量比": float(row["volume_ratio"]) if pd.notna(row.get("volume_ratio")) else None,
+        "换手率": float(row["turnover_rate"]) if pd.notna(row.get("turnover_rate")) else None,
         "更新时间": str(row["update_time"]),
         "数据源": "Futu实时",
     }
