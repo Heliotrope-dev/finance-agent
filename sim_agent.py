@@ -218,9 +218,16 @@ def _virtual_net_value(email: str, holdings_value_hkd: float) -> float:
 
 
 def _history_context_lines(email: str, holdings_value_hkd: float) -> list[str]:
-    """把最近几次运行的"决策前资产 vs 现在实际资产"摘要拼成几行文字，供
-    AI在这次决策时参考——这是"学习试错"这个说法在LLM agent场景下能落地
-    的实现方式，见文件头部说明，不是训练模型参数。
+    """把最近几次运行的"当时买卖了什么 + 决策前资产 vs 现在实际资产"摘要拼成
+    几行文字，供AI在这次决策时参考——这是"学习试错"这个说法在LLM agent场景下
+    能落地的实现方式，见文件头部说明，不是训练模型参数。
+
+    用户明确要求过"不是一直都是散户思维，要边炒股边总结套路、越买越像专家"——
+    只给一个笼统的"总资产变化了多少%"不够，那是现金+全部持仓混在一起的结果，
+    AI没法从里面反推"我当时挑的那几支票到底判断得准不准"。这里把当时具体
+    买卖了哪些标的一起带上（从signals_json里挑买入/卖出的行），让AI能把
+    "自己当时的判断"和"后续这段时间资产的实际走向"对上号，才有真的复盘的
+    基础，而不是空对空喊"我要更谨慎"或"我要更激进"。
     """
     runs = tracker.get_sim_agent_runs(email, limit=_HISTORY_CONTEXT_SIZE)
     if not runs:
@@ -232,11 +239,20 @@ def _history_context_lines(email: str, holdings_value_hkd: float) -> list[str]:
     for r in runs:
         before = r.get("assets_hkd_before")
         when = _to_cn_time_str(r.get("run_at"))
+        try:
+            sigs = json.loads(r.get("signals_json") or "[]")
+        except Exception:
+            sigs = []
+        acted = [s for s in sigs if s.get("action") in ("买入", "卖出")]
+        picks_text = "、".join(f"{s['action']}{s.get('name', s.get('symbol', ''))}" for s in acted) or "未操作"
         if before and current_assets:
             change_pct = (current_assets - before) / before * 100
-            lines.append(f"- {when}（HK${before:,.0f}起）：截至现在累计变化{change_pct:+.2f}%，当时的判断：{(r.get('reasoning_text') or '（无记录）')[:80]}")
+            lines.append(
+                f"- {when}（HK${before:,.0f}起，当时{picks_text}）：截至现在累计变化{change_pct:+.2f}%，"
+                f"当时的判断：{(r.get('reasoning_text') or '（无记录）')[:80]}"
+            )
         else:
-            lines.append(f"- {when}：{(r.get('reasoning_text') or '（无记录）')[:80]}")
+            lines.append(f"- {when}（当时{picks_text}）：{(r.get('reasoning_text') or '（无记录）')[:80]}")
     return lines
 
 
@@ -255,9 +271,22 @@ _AGENT_SYSTEM = f"""你是一个正在用虚拟资金自主管理富途模拟盘
 的买入会被系统直接拦截不执行，所以你自己也要心里有数，不要开出明显超预算的买入。
 
 你会看到：当前持仓明细（含浮动盈亏）、你的虚拟预算使用情况（已用多少、还剩多少额度）、
-候选股当前行情（只有现价/涨跌幅，没有基本面/新闻）、以及你自己过去几次决策后账户实际的资产
-变化（这是给你复盘用的——用来判断自己之前挑的标的/方向对不对、要不要调整思路，不是用来
-判断"该不该更保守"；亏了就复盘换个判断更准的方向，不是缩回去少操作）。
+候选股当前行情（只有现价/涨跌幅，没有基本面/新闻）、以及你自己过去几次决策——当时具体买卖
+了哪些标的、当时的判断理由、以及截至现在账户资产的实际变化。
+
+用户明确要求这不是"每次决策互不相关地随便选选"，而是要"边炒股边学习，哪里踩过坑、摸清楚
+套路，越操作越像一个真正懂行情的专家，不能一直是散户思维"。具体到每次决策，你应该先花几句
+话真正复盘历史记录，而不是走过场：
+- 对上一轮/前几轮买的标的，现在看是判断对了还是错了？如果错了，当时的理由错在哪个环节
+  （比如：把短期情绪波动当成了趋势启动、追高了明显缺乏安全边际的位置、选的标的其实成交
+  不够活跃只是看起来热门）？
+- 有没有反复出现的失误模式（比如总是在同一类题材/同一个价格区间判断失误）？如果有，这一轮
+  要明确避开，不要重蹈覆辙。
+- 有没有已经验证有效的判断路径（比如某类动能信号确实带来了正收益）？如果有，可以延续、
+  但不能盲目照搬（市场状态会变，同一招不会永远有效）。
+散户思维的典型表现是：每次决策都从零开始、跟着当天最热的新闻情绪追涨杀跌、赢了归功于自己
+判断准、亏了就归咎于运气不好而不去找真实原因。你要做的是相反的事——把每一轮的结果都当成
+一次真实的市场反馈，持续修正自己的判断框架，而不是每次都用同一套朴素的直觉重新来一遍。
 
 输出格式（必须严格遵守，不要输出这个格式之外的解释性文字混在信号行里）：
 先写一段简短的决策理由（100-200字，说清楚这次为什么这么操作，或者为什么选择不动），然后另起一行写：
@@ -374,16 +403,19 @@ def _run_cycle_locked(email: str) -> dict:
         sig_idx = text.find("交易信号:")
     reasoning_text = text[:sig_idx].strip() if sig_idx != -1 else text.strip()
 
-    # A股拦截——只在system prompt里说了"不要碰A股"，没有代码层面强制过；
-    # advisor._parse_trade_signals本身接受market="A"的行(它是给
-    # advise_portfolio那条允许A股的链路共用的解析器)，sim_trader.py的
-    # _MARKET_TRD字典也确实认得"A"这个市场，如果AI没听话给了一条A股信号，
-    # 会被真的送去execute_simulated_trades执行，不会被自然拦下来。跟
-    # 下面预算拦截同一个道理——不能只信prompt，这里也得代码层面真核实过。
-    off_market_signals = [s for s in signals if s.get("market") not in _AGENT_MARKETS and s.get("action") in ("买入", "卖出")]
+    # 真实故障纠偏（2026-09-01）：这里原来只拦A股（market not in _AGENT_MARKETS，
+    # 即不在("HK","US")里），漏了一种情况——AI手上还持有一支HK股票，但这一轮
+    # 只有US开盘（HK已收盘），AI对着这支HK持仓给了"卖出"信号，因为HK本身在
+    # _AGENT_MARKETS里，没被这道拦截挡住，直接送进了execute_simulated_trades，
+    # Futu对已收盘市场下的市价单不会真的成交（一直挂在SUBMITTED），但
+    # place_order本身返回RET_OK，代码把"下单被接受"当成"成交"处理，
+    # 结果虚拟现金台账多记了一笔根本没花出去/没收回来的钱，真实持仓也没变。
+    # 跟下面预算拦截同一个道理——不能只信prompt里"只交易港股和美股"这句话，
+    # 这里必须拦住"当前不在这一轮open_markets里"的市场，不能只拦A股。
+    off_market_signals = [s for s in signals if s.get("market") not in open_markets and s.get("action") in ("买入", "卖出")]
     if off_market_signals:
         _a_text = "、".join(f"{s['name']}（{s['symbol']}·{s.get('market')}）" for s in off_market_signals)
-        reasoning_text += f"\n\n（系统提示：以下不属于港股/美股，已被拦截未执行：{_a_text}）"
+        reasoning_text += f"\n\n（系统提示：以下不属于本轮开盘市场（{', '.join(open_markets)}），已被拦截未执行：{_a_text}）"
     # 不直接给signals重新赋值——跟下面预算拦截同一个原则，signals这个
     # 变量最后要完整原样写进log_sim_agent_run（含被拦截的这些），方便
     # 在"AI每次决策记录"里如实看到"AI试图操作了什么、系统拦了什么"，

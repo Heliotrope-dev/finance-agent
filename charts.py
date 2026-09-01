@@ -4,6 +4,10 @@
 跟 analysis.py 里 AI 的文字判断是两条独立的证据链。
 """
 
+from datetime import datetime
+from datetime import time as dtime
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -482,7 +486,7 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
     5分钟一个，刻度按5分钟画正合适；"周"/"月"视图跨度拉长后再按5分钟画
     刻度会挤成一团看不清，改成按天为单位、只显示月-日。
     """
-    df = pd.DataFrame(points).sort_values("run_at")
+    df = pd.DataFrame(points).sort_values("run_at").reset_index(drop=True)
     is_up = df["assets_hkd"].iloc[-1] >= df["assets_hkd"].iloc[0]
     line_color = UP_COLOR if is_up else DOWN_COLOR
 
@@ -494,15 +498,53 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
         annotation_font=dict(size=10, color=NEUTRAL_COLOR),
     )
 
+    # 用户明确要求"港美股都不能交易的时间段不用显示收益，因为一直不变一直是
+    # 直线"——快照本身只在开盘时段记录(sim_snapshot.py没开盘直接跳过不落库)，
+    # 但相邻两个交易时段之间（比如港股16:00收盘到美股21:30开盘这几个小时）
+    # 中间没有数据点，画连续折线时会拿收盘前最后一个点直接连到开盘后第一个
+    # 点，形成一条横跨休市时间的斜线——视觉上容易被误读成"这段时间也有真实
+    # 波动"。这里按采样节奏(5分钟)判断相邻点间隔，超过正常节奏一大截(20分钟，
+    # 留够抖动余量)就判定为跨休市的空档，插入一个NaN把线断开，两段各自成
+    # 独立线段，不画连接休市时段的假线。
+    _GAP_THRESHOLD = pd.Timedelta(minutes=20)
+    rows = [df.iloc[0].to_dict()]
+    for i in range(1, len(df)):
+        prev_t, cur_t = df.iloc[i - 1]["run_at"], df.iloc[i]["run_at"]
+        if cur_t - prev_t > _GAP_THRESHOLD:
+            rows.append({"run_at": prev_t + (cur_t - prev_t) / 2, "assets_hkd": float("nan")})
+        rows.append(df.iloc[i].to_dict())
+    df_plot = pd.DataFrame(rows)
+
     fig.add_trace(
         go.Scatter(
-            x=df["run_at"], y=df["assets_hkd"], mode="lines+markers",
+            x=df_plot["run_at"], y=df_plot["assets_hkd"], mode="lines+markers", connectgaps=False,
             line=dict(color=line_color, width=2.5, shape="spline", smoothing=0.35),
             marker=dict(size=5, color=line_color, line=dict(color="#fff", width=1)),
             fill="tozeroy", fillcolor=_hex_to_rgba(line_color, 0.08),
             hovertemplate="%{x|%m-%d %H:%M}<br>HK$%{y:,.0f}<extra></extra>",
         )
     )
+
+    # 用户明确要求"港美股交易开盘收盘时间用红色标注其他一律黑色"——在图上
+    # 用红色虚线标出这段时间范围内实际出现过的港股/美股开盘、收盘时刻，
+    # 其余轴刻度/文字保持默认黑色不动。用zoneinfo按当地时区真实换算，不
+    # 硬编码固定偏移——美股有夏令时，硬编码会有小半年是错的。"月"视图跨度
+    # 太长，几十条线会糊成一片，不画；"周"视图只画线不加文字注释，避免
+    # 好几天的标签叠在一起看不清；"天"视图数据点本来就密集，线+文字都加上。
+    if granularity in ("day", "week") and not df["run_at"].empty:
+        _dates = sorted({t.date() for t in df["run_at"]})
+        _cn = ZoneInfo("Asia/Shanghai")
+        for d in _dates:
+            for tz_name, label_prefix in (("Asia/Hong_Kong", "港股"), ("America/New_York", "美股")):
+                for t, suffix in ((dtime(9, 30), "开盘"), (dtime(16, 0), "收盘")):
+                    boundary = datetime.combine(d, t, tzinfo=ZoneInfo(tz_name)).astimezone(_cn)
+                    fig.add_vline(
+                        x=boundary, line=dict(color=UP_COLOR, width=1, dash="dash"),
+                        opacity=0.5,
+                        annotation_text=(f"{label_prefix}{suffix}" if granularity == "day" else None),
+                        annotation_font=dict(size=9, color=UP_COLOR),
+                        annotation_position="top",
+                    )
 
     last = df.iloc[-1]
     fig.add_annotation(
