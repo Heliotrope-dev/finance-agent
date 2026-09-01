@@ -15,8 +15,9 @@ from concurrent.futures import ThreadPoolExecutor
 import streamlit as st
 from openai import OpenAI
 
-_QWEN_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-_MODEL = "qwen3.7-flash"
+# 2026-09-01切到百炼Token Plan套餐专属端点，理由同advisor.py同一处改动。
+_QWEN_BASE = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+_MODEL = "qwen3.8-flash"
 
 
 def get_secret(key: str) -> str:

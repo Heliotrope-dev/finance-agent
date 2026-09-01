@@ -66,8 +66,14 @@ _SECRETS_PATH = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.t
 # 而且实测不需要靠堆高max_tokens才能避免空内容(2000 tokens就能给出完整
 # 回答)，没有DeepSeek那个"隐藏思考链吃预算"的老毛病。math-agent那边继续用
 # DeepSeek，没有一起切，是用户单独决定的，不要顺手改过去。
-_MODEL = "qwen3.7-flash"
-_QWEN_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+_MODEL = "qwen3.8-flash"
+# 2026-09-01切到百炼Token Plan订阅套餐专属端点——之前用的是DashScope通用
+# 端点+账户级按量付费余额，账户余额一旦欠费(哪怕只差几毛钱)所有调用直接
+# 403，跟买没买套餐无关；套餐本身有独立的Credits额度和专属Base URL/API Key，
+# 走这个端点消耗的是套餐额度，不再受账户级欠费影响（前提是套餐本身没到期/
+# 没用完）。qwen3.7-flash在这个套餐的可用模型列表里已经没有了，换成
+# qwen3.8-flash（套餐列表里现在有的flash档位）。
+_QWEN_BASE = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 
 # 多空辩论跨供应商（2026-08-25）：用户要求辩论的多空双方不能是同一个模型
 # 自己扮演两个角色，换成阿里千问（多头）+ 智谱（空头）两家真正独立的供应商，
