@@ -3677,7 +3677,7 @@ else:
         st.session_state.setdefault("_active_section", "首页")
 
         active_section = st.radio(
-            "分区", ["首页", "行情", "持仓", "回看"], key="_active_section", horizontal=True, label_visibility="collapsed",
+            "分区", ["首页", "行情", "持仓", "自选", "回看"], key="_active_section", horizontal=True, label_visibility="collapsed",
         )
 
         if active_section == "首页":
@@ -3724,6 +3724,10 @@ else:
             else:
                 _email = st.session_state["user_email"]
                 positions = get_positions(_email)
+                # 自选（shares=0，只关注不持仓）挪到独立的"自选"分区显示，这里
+                # 只处理真实持仓——之前两者混在同一个列表里，用户反馈新加的自选
+                # 股票"怎么跑到持仓里去了"，跟真金白银的仓位堆在一起分不清。
+                holding_items = [p for p in positions if (p.get("shares") or 0) > 0]
 
                 st.markdown(
                     "<style>"
@@ -3746,10 +3750,10 @@ else:
                 # 持仓"弹窗，没有单纯查一下行情的入口。build_multi_comparison
                 # （charts.py）之前写好了没接界面，这里补上入口：持仓至少2只时才
                 # 显示"对比"图标，三个图标并排。
-                if len(positions) >= 2:
+                if len(holding_items) >= 2:
                     title_col, compare_col, search_col, add_col = st.columns([9, 1, 1, 1], vertical_alignment="center")
                     if compare_col.button("", icon=":material/show_chart:", key="pos_compare_icon", type="tertiary", help="对比持仓走势"):
-                        _show_compare_dialog(positions)
+                        _show_compare_dialog(holding_items)
                 else:
                     title_col, search_col, add_col = st.columns([10, 1, 1], vertical_alignment="center")
                 if search_col.button("", icon=":material/search:", key="pos_search_icon", type="tertiary", help="搜索"):
@@ -3757,38 +3761,96 @@ else:
                 if add_col.button("", icon=":material/add:", key="pos_add_icon", type="tertiary", help="添加持仓"):
                     _show_add_position_dialog(_email)
 
-                if not positions:
+                if not holding_items:
                     st.write("")
                     _, mid_empty, _ = st.columns([1, 2, 1])
                     with mid_empty:
                         st.markdown(
                             "<div style='text-align:center;color:var(--fa-muted);padding:20px 0 10px'>"
-                            "还没有持仓或关注的股票<br>"
-                            "<span style='font-size:0.82rem'>点右上角的 + 按钮添加</span>"
+                            "还没有持仓<br>"
+                            "<span style='font-size:0.82rem'>点右上角的 + 按钮添加，填了股数/金额才算持仓——"
+                            "不填股数会加进「自选」分区</span>"
                             "</div>",
                             unsafe_allow_html=True,
                         )
 
-                if positions:
+                if holding_items:
                     # 环形图 | 持仓列表，左右各半——环形图不用@st.fragment(run_every=3)
                     # （见_render_positions_donut docstring：Plotly图3秒重绘会闪烁），
                     # 右边列表沿用原来的3秒自动刷新fragment，两边各自独立刷新节奏。
                     donut_col, list_col = st.columns([1, 1])
                     with donut_col:
-                        _render_positions_donut(positions)
+                        _render_positions_donut(holding_items)
                     with list_col:
                         # 用户反馈持仓一般也就几只，市场筛选(全部/A股/港股/美股)没有实际
                         # 必要，反而多一层点击——去掉筛选，统一直接展示全部持仓。
-                        _render_position_rows(positions, _email)
+                        _render_position_rows(holding_items, _email)
 
                     st.divider()
                     pnl_col, ai_col = st.columns([1, 1])
                     with pnl_col:
-                        _render_positions_today_pnl(positions)
+                        _render_positions_today_pnl(holding_items)
                         st.divider()
                         _render_max_capital_input(_email)
                     with ai_col:
-                        _render_portfolio_advice(_email, positions)
+                        _render_portfolio_advice(_email, holding_items)
+
+        elif active_section == "自选":
+            if not st.session_state.get("logged_in"):
+                st.write("")
+                _, mid_empty, _ = st.columns([1, 2, 1])
+                with mid_empty:
+                    st.markdown(
+                        "<div style='text-align:center;color:var(--fa-muted);padding:40px 0 10px'>"
+                        "自选是个人功能，需要登录后使用<br>"
+                        "<span style='font-size:0.82rem'>行情/详情页/AI分析等其它功能无需登录即可查看</span>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+                    if st.button("登录 / 注册", use_container_width=True, key="_watch_login_btn"):
+                        st.session_state["guest_mode"] = False
+                        st.rerun()
+            else:
+                _email = st.session_state["user_email"]
+                # 自选＝positions表里shares=0的行（"只关注不持仓"），跟持仓
+                # 是同一张表，靠shares区分，不是独立的表——见add_watch_only。
+                watch_items = [p for p in get_positions(_email) if (p.get("shares") or 0) == 0]
+
+                # 复用持仓分区那套圆形图标按钮样式（见上面"持仓"分支同款CSS的
+                # 注释）——两个分区各自独立渲染，键名前缀不同，样式要各放一份。
+                st.markdown(
+                    "<style>"
+                    "[class*='st-key-watch_search_icon'] button, [class*='st-key-watch_add_icon'] button {"
+                    "  display: flex; align-items: center; justify-content: center;"
+                    "  height: 44px; min-height: 44px; width: 44px; min-width: 44px;"
+                    "  padding: 0; border-radius: 50% !important;"
+                    "}"
+                    "[class*='st-key-watch_search_icon'] span[data-testid='stIconMaterial'],"
+                    "[class*='st-key-watch_add_icon'] span[data-testid='stIconMaterial'] {"
+                    "  font-size: 1.6rem !important;"
+                    "}"
+                    "</style>",
+                    unsafe_allow_html=True,
+                )
+                _, search_col, add_col = st.columns([10, 1, 1], vertical_alignment="center")
+                if search_col.button("", icon=":material/search:", key="watch_search_icon", type="tertiary", help="搜索"):
+                    _show_stock_search_dialog(_email)
+                if add_col.button("", icon=":material/add:", key="watch_add_icon", type="tertiary", help="添加自选"):
+                    _show_add_position_dialog(_email)
+
+                if not watch_items:
+                    st.write("")
+                    _, mid_empty, _ = st.columns([1, 2, 1])
+                    with mid_empty:
+                        st.markdown(
+                            "<div style='text-align:center;color:var(--fa-muted);padding:20px 0 10px'>"
+                            "还没有自选股票<br>"
+                            "<span style='font-size:0.82rem'>点右上角的 + 按钮添加，弹窗里不填股数/金额即为自选</span>"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    _render_position_rows(watch_items, _email)
 
         elif active_section == "回看":
             _render_accuracy_dashboard(_uemail)
