@@ -460,3 +460,25 @@ def build_position_donut(holdings: list[dict], total_value_cny: float) -> go.Fig
         showlegend=False,
     )
     return fig
+
+
+def build_sim_equity_curve(points: list[dict]) -> go.Figure:
+    """AI模拟盘收益曲线——points是[{"run_at": ISO时间字符串, "assets_hkd": 浮点数}]，
+    按sim_agent每次运行时的资产快照点连线。数据点是"每次AI决策前的资产"，不是
+    分钟级K线，早期数据稀疏是正常的（agent刚上线，只在开盘时段每15分钟才有一个
+    点），不用插值编造中间点，稀疏就如实画成稀疏。"""
+    df = pd.DataFrame(points).sort_values("run_at")
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=df["run_at"], y=df["assets_hkd"], mode="lines+markers",
+            line=dict(color=UP_COLOR, width=2), marker=dict(size=4),
+            hovertemplate="%{x}<br>HK$%{y:,.0f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        height=280,
+        margin=dict(l=10, r=10, t=10, b=10),
+        yaxis_title="总资产（港币）",
+    )
+    return fig

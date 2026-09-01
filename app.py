@@ -64,12 +64,13 @@ from tracker import (
     add_search_history, get_search_history, get_latest_leaderboard, get_advice_accuracy, get_score_band_backtest,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
-    get_ai_sim_trading, set_ai_sim_trading, get_simulated_orders,
+    get_ai_sim_trading, set_ai_sim_trading, get_simulated_orders, get_sim_agent_runs,
 )
 import sim_trader
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
     build_benchmark_comparison, build_return_histogram, build_multi_comparison, build_position_donut,
+    build_sim_equity_curve,
 )
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
@@ -2553,6 +2554,130 @@ def _render_ai_sim_trading(email: str):
                 )
 
 
+def _render_ai_sim_dashboard(email: str):
+    """回看页——2026-09-01用户明确要求"回看页全部改成AI模拟炒股，我需要
+    看到它的持仓、收益和相关的所有交易记录"，完全取代原来的AI判断准确率
+    追踪（_render_accuracy_dashboard函数还留着，只是导航不再调用它——
+    用户是要"完全替换"这个入口，不是要删掉底层历史数据，函数和数据表都
+    保留，只是不在这个入口展示）。
+
+    展示的是sim_agent.py那条每15分钟一次的自主决策链路（只交易港股/美股，
+    A股不参与，起始本金约十万港币——由用户自己在富途App里设置，这里没法
+    通过代码改），不是持仓页那个"跟着每天17:30组合分析走"的模拟盘（那个
+    继续在持仓页自己的开关那块，两条链路各自独立）。
+    """
+    if not st.session_state.get("logged_in"):
+        st.write("")
+        _, mid_empty, _ = st.columns([1, 2, 1])
+        with mid_empty:
+            st.markdown(
+                "<div style='text-align:center;color:var(--fa-muted);padding:40px 0 10px'>"
+                "回看是个人功能，需要登录后使用<br>"
+                "<span style='font-size:0.82rem'>行情/详情页/AI分析等其它功能无需登录即可查看</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("登录 / 注册", use_container_width=True, key="_review_page_login_btn"):
+                st.session_state["guest_mode"] = False
+                st.rerun()
+        return
+
+    st.caption(
+        "这是内置AI（千问）用虚拟资金自主管理的模拟盘——只交易港股/美股（A股不参与），"
+        "起始本金约十万港币，在开盘时段每15分钟自主决定要不要买卖，不需要你手动操作。"
+        "这里如实展示它的持仓、收益和完整交易记录，仅供观察AI决策能力，不构成投资建议。"
+    )
+
+    enabled = get_ai_sim_trading(email)
+    new_enabled = st.toggle("AI自主模拟交易", value=enabled, key=f"_ai_sim_dash_toggle_{email}")
+    if new_enabled != enabled:
+        set_ai_sim_trading(email, new_enabled)
+        st.rerun()
+    if not enabled:
+        st.caption("当前关闭——打开后AI会在下一个港股/美股开盘的15分钟节点开始自主交易。")
+        return
+
+    with st.spinner("读取模拟盘状态..."):
+        try:
+            snapshot = sim_trader.get_agent_snapshot()
+        except Exception as e:
+            st.error(f"模拟盘状态读取失败：{e}")
+            snapshot = None
+
+    runs = get_sim_agent_runs(email, limit=200)
+    equity_points = [
+        {"run_at": r["run_at"], "assets_hkd": r["assets_hkd_before"]}
+        for r in runs if r.get("assets_hkd_before") is not None
+    ]
+
+    if snapshot:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("模拟盘总资产（港币，港股+美股加总）", f"HK${snapshot['total_assets_hkd']:,.0f}")
+        with col2:
+            if equity_points:
+                first = min(equity_points, key=lambda p: p["run_at"])["assets_hkd"]
+                if first:
+                    change_pct = (snapshot["total_assets_hkd"] - first) / first * 100
+                    st.metric("累计收益率（相对第一次记录）", f"{change_pct:+.2f}%")
+        if snapshot["skipped_markets"]:
+            st.caption(f"以下市场暂时没查到模拟账户：{'、'.join(snapshot['skipped_markets'])}")
+
+    if len(equity_points) >= 2:
+        st.plotly_chart(build_sim_equity_curve(equity_points), use_container_width=True)
+    else:
+        st.caption("收益曲线数据还在积累——AI每次运行会记一个资产快照点，多跑几次（开盘时段每15分钟一次）后这里会出现走势图。")
+
+    if snapshot and snapshot["positions"]:
+        st.markdown("**当前持仓**")
+        for p in snapshot["positions"]:
+            pl_color = UP_COLOR if (p["pl_val"] or 0) >= 0 else DOWN_COLOR
+            pl_text = f"{p['pl_val']:+,.0f} {p['currency']}" if p["pl_val"] is not None else "—"
+            st.markdown(
+                f"<div style='display:flex;justify-content:space-between;padding:4px 0'>"
+                f"<span>{_esc(p['name'])}（{_esc(p['code'])}）· {p['qty']:g}股</span>"
+                f"<span style='color:{pl_color}'>{pl_text}</span></div>",
+                unsafe_allow_html=True,
+            )
+    elif snapshot:
+        st.caption("当前空仓。")
+
+    st.divider()
+    st.markdown("**AI每次决策记录**")
+    if not runs:
+        st.caption("还没有运行记录——开盘时段每15分钟会自动跑一次。")
+    else:
+        for r in runs[:20]:
+            when = (r.get("run_at") or "")[:19].replace("T", " ")
+            title = f"{when} · {r['status']}" + (f" · {r['note']}" if r.get("note") else "")
+            with st.expander(title):
+                if r.get("reasoning_text"):
+                    st.markdown(_esc(r["reasoning_text"]).replace("\n", "<br>"), unsafe_allow_html=True)
+                try:
+                    sigs = json.loads(r.get("signals_json") or "[]")
+                except Exception:
+                    sigs = []
+                actionable = [s for s in sigs if s.get("action") in ("买入", "卖出")]
+                for s in actionable:
+                    st.caption(f"{s['action']} {s['name']}（{s['symbol']}·{s['market']}）{s['shares']:g}股")
+
+    st.divider()
+    st.markdown("**完整下单记录**")
+    orders = get_simulated_orders(email, limit=100)
+    if not orders:
+        st.caption("还没有下单记录。")
+    else:
+        for o in orders:
+            status_color = {"成功": UP_COLOR, "失败": DOWN_COLOR, "跳过": NEUTRAL_COLOR}.get(o["status"], NEUTRAL_COLOR)
+            st.markdown(
+                f"<div style='padding:4px 0'>{o['created_at'][:19].replace('T',' ')} · "
+                f"{_esc(o['name'] or o['symbol'])}（{_esc(o['symbol'])}·{_esc(o['market'])}）· {_esc(o['action'])} · "
+                f"<span style='color:{status_color}'>{_esc(o['status'])}</span>"
+                + (f" · {_esc(o['note'])}" if o["note"] else "") + "</div>",
+                unsafe_allow_html=True,
+            )
+
+
 def _render_positions_donut(positions: list):
     """持仓占比环形图。只统计真正持仓(shares>0)，纯关注(shares=0)不占份额。
     不用@st.fragment(run_every=3)——Plotly图3秒重绘会明显闪烁（见持仓分析
@@ -3956,7 +4081,10 @@ else:
                     _confirm_sell_dialog(_email, _sell_target["item"], _sell_target["market"], _sell_target["cur_price"])
 
         elif active_section == "回看":
-            _render_accuracy_dashboard(_uemail)
+            # 2026-09-01用户明确要求"回看那边全部改成AI模拟炒股"——完全
+            # 替换掉原来的AI判断准确率追踪入口，_render_accuracy_dashboard
+            # 函数本身和它依赖的历史数据都还在，只是不再从这个入口调用。
+            _render_ai_sim_dashboard(_uemail)
 
         _render_ai_assistant()
 
