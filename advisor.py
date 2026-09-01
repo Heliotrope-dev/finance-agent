@@ -596,14 +596,36 @@ def _triage_pool(pool: list[dict], keep_n: int) -> list[dict]:
     return passed[:keep_n]
 
 
-def _leaderboard(judged: list[dict], n: int = _LEADERBOARD_SIZE) -> list[dict]:
+def _leaderboard(judged: list[dict], n: int = _LEADERBOARD_SIZE, market_cap: int | None = None) -> list[dict]:
     """2026-08-25新增：三个市场混排的综合得分排行榜，取代"每个市场固定
     前3"——用户明确要求数量不用锁死、好的自然上榜、不好的不硬凑。只取有
     score的条目参与排名（None的排不进去，不是judge_stock没给，就是解析
-    失败，不能当0分处理，见tracker.get_latest_leaderboard同一条注释）。"""
+    失败，不能当0分处理，见tracker.get_latest_leaderboard同一条注释）。
+
+    market_cap（2026-09-01新增，默认None不生效）：某个市场当天判断出来的
+    分数普遍偏高时，纯按分数排序会让前N名被同一个市场包圆——用户反馈过
+    两次"首页推荐股排行榜/微信简报怎么全是港股"，不是bug，是这几个候选
+    池那天恰好某个市场分数普遍更高，但纯score排序体现不出"给用户看的这份
+    名单该覆盖多个市场"这个诉求。market_cap给一个每个市场最多能占的席位数
+    上限，超过的名额让给分数稍低但来自其他市场的候选——只在明确要展示
+    "跨市场"名单的场合传这个参数（首页推荐股排行榜、微信简报的港美股前5），
+    "综合得分排行榜Top10"这种本来就是"好的自然上榜"定位的场合不传，维持
+    原样不受影响。"""
     scored = [j for j in judged if j.get("score") is not None]
     scored.sort(key=lambda j: j["score"], reverse=True)
-    return scored[:n]
+    if market_cap is None:
+        return scored[:n]
+    result: list[dict] = []
+    market_count: dict[str, int] = {}
+    for j in scored:
+        if len(result) >= n:
+            break
+        m = j.get("market")
+        if market_count.get(m, 0) >= market_cap:
+            continue
+        result.append(j)
+        market_count[m] = market_count.get(m, 0) + 1
+    return result
 
 
 def judge_watchlist() -> list[dict]:
@@ -1643,7 +1665,9 @@ def main():
             e["technical_signal"], e["action"], e["market"], e["name"], source="watchlist",
             score=e.get("score"),
         )
-    watchlist_board = _leaderboard(watchlist_judged, _WATCHLIST_LEADERBOARD_SIZE)
+    # market_cap=3——用户反馈过"首页推荐股排行榜怎么全是港股"，见_leaderboard
+    # 的market_cap参数说明，这份名单要覆盖多个市场，不能被单一市场包圆。
+    watchlist_board = _leaderboard(watchlist_judged, _WATCHLIST_LEADERBOARD_SIZE, market_cap=3)
     print(f"（热门观察池：{len(watchlist_judged)} 支已更新，首页推荐股排行榜取前{len(watchlist_board)}）\n")
     # 用户明确要求这份排行榜同步到微信（OpenClaw读取本脚本stdout转发的那条
     # 简报）——跟下面screen_candidates那份"综合得分排行榜"用同样的章节格式/
@@ -1687,7 +1711,7 @@ def main():
     # 微信简报用的"港美股综合得分前5"，格式跟上面一致，agentTurn那边只要
     # 原样转述这一段就行，不用自己做筛选/排序判断，从源头上排除误判空间。
     hk_us_judged = [e for e in judged if e.get("market") in ("HK", "US")]
-    hk_us_board = _leaderboard(hk_us_judged, 5)
+    hk_us_board = _leaderboard(hk_us_judged, 5, market_cap=3)
     print(f"==================== 港美股综合得分前 {len(hk_us_board)}（不含A股，微信简报用这份） ====================")
     if hk_us_board:
         for i, e in enumerate(hk_us_board, 1):
