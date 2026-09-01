@@ -1680,6 +1680,21 @@ def main():
     for i, e in enumerate(board, 1):
         print(_fmt_entry(e, rank=i))
 
+    # 用户明确要求微信简报"不要都是港股，是港美股综合打分前五名"——之前
+    # 让负责转发微信的那个agentTurn cron自己从上面的混排榜单里现场剔除A股、
+    # 重新排序取前5，结果它读串了行（把上面"首页推荐股排行榜"那份不同的
+    # 榜单内容也混进来了），不可靠。改成这里直接算好、单独打一段专门给
+    # 微信简报用的"港美股综合得分前5"，格式跟上面一致，agentTurn那边只要
+    # 原样转述这一段就行，不用自己做筛选/排序判断，从源头上排除误判空间。
+    hk_us_judged = [e for e in judged if e.get("market") in ("HK", "US")]
+    hk_us_board = _leaderboard(hk_us_judged, 5)
+    print(f"==================== 港美股综合得分前 {len(hk_us_board)}（不含A股，微信简报用这份） ====================")
+    if hk_us_board:
+        for i, e in enumerate(hk_us_board, 1):
+            print(_fmt_entry(e, rank=i))
+    else:
+        print("（本次港股/美股候选都没有产出有效得分，跳过。）\n")
+
     print(f"（本次共对 {len(judged)} 只候选做了完整判断，全部记录进数据库。以上为数据驱动的参考意见，不构成投资建议，请自行判断。）")
 
 
