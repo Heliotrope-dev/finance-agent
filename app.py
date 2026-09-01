@@ -3836,10 +3836,14 @@ else:
 
             st.divider()
             with st.expander("历史回看"):
-                # 完整的统计/趋势/日历热力图挪到主内容区的独立"回看"分区了
-                # （见_render_accuracy_dashboard）——侧边栏这里只留一个摘要
-                # 数字+跳转入口，不再重复维护一份统计展示代码。补录逻辑
-                # 抽成了_backfill_due_reviews，跟"回看"页共用同一份节流。
+                # 完整的统计/趋势/日历热力图原来在主内容区独立的"回看"分区
+                # （_render_accuracy_dashboard），2026-09-01那个分区改名
+                # "AI模拟炒股"、内容也换成了AI自主模拟盘展示，不再是准确率
+                # 完整版——"查看完整回看→"这个跳转按钮去掉了，点过去会是
+                # 完全不相关的内容，不能留着一个指向错地方的链接。
+                # _render_accuracy_dashboard函数和它的数据都还在，只是现在
+                # 没有入口能跳到它的完整版，只留这里的摘要数字。补录逻辑
+                # 抽成了_backfill_due_reviews。
                 if not st.session_state.get("logged_in"):
                     st.caption("登录后可以看AI过去说得准不准。")
                 else:
@@ -3852,9 +3856,6 @@ else:
                         )
                     else:
                         st.caption("还没有满7天可回看的记录。")
-                    if st.button("查看完整回看 →", use_container_width=True, key="_goto_review_page"):
-                        st.session_state["_active_section"] = "回看"
-                        st.rerun()
 
             with st.expander("应用指南"):
                 st.markdown(
@@ -3947,7 +3948,7 @@ else:
         st.session_state.setdefault("_active_section", "首页")
 
         active_section = st.radio(
-            "分区", ["首页", "行情", "持仓", "自选", "回看"], key="_active_section", horizontal=True, label_visibility="collapsed",
+            "分区", ["首页", "行情", "持仓", "自选", "AI模拟炒股"], key="_active_section", horizontal=True, label_visibility="collapsed",
         )
 
         if active_section == "首页":
@@ -4144,10 +4145,11 @@ else:
                 if _sell_target and (_sell_target["item"].get("shares") or 0) <= 0:
                     _confirm_sell_dialog(_email, _sell_target["item"], _sell_target["market"], _sell_target["cur_price"])
 
-        elif active_section == "回看":
-            # 2026-09-01用户明确要求"回看那边全部改成AI模拟炒股"——完全
-            # 替换掉原来的AI判断准确率追踪入口，_render_accuracy_dashboard
-            # 函数本身和它依赖的历史数据都还在，只是不再从这个入口调用。
+        elif active_section == "AI模拟炒股":
+            # 2026-09-01用户明确要求"回看那边全部改成AI模拟炒股"，分区
+            # 名字本身也在同一天改成"AI模拟炒股"——完全替换掉原来的AI判断
+            # 准确率追踪入口，_render_accuracy_dashboard函数本身和它依赖
+            # 的历史数据都还在，只是不再从这个入口调用。
             _render_ai_sim_dashboard(_uemail)
 
         _render_ai_assistant()
