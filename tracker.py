@@ -246,6 +246,18 @@ def init_db():
         if "ai_sim_trading" not in us_cols:
             c.execute("ALTER TABLE user_settings ADD COLUMN ai_sim_trading INTEGER NOT NULL DEFAULT 0")
 
+        # sim_virtual_cash_hkd：AI模拟盘自主决策(sim_agent.py)的虚拟现金
+        # 余额——2026-09-01用户要求"总资金十万港币"，但富途模拟账户本金
+        # 没法改（客服说"理论无上限"），只能在这个agent自己的逻辑里另开
+        # 一本虚拟账（不是走真实的富途现金余额）。NULL表示还没初始化，
+        # 第一次运行时设成_VIRTUAL_BUDGET_HKD；之后每次买卖成功，
+        # sim_agent.py按估算金额扣减/增加这个字段，跟持仓当前市值加总
+        # 就是"虚拟净值"，用来算真正反映"如果只给AI十万港币"的收益率
+        # ——不能直接用富途账户真实总资产，那里面绝大部分是AI碰不到的
+        # 闲置资金，混进去会让收益率完全失真。
+        if "sim_virtual_cash_hkd" not in us_cols:
+            c.execute("ALTER TABLE user_settings ADD COLUMN sim_virtual_cash_hkd REAL")
+
         # simulated_orders：AI模拟盘每次自动下单的执行记录——富途自己的订单
         # 历史会被清理/查询接口只能看近期，这里单独留一份，让"回看"页能展示
         # 完整的历史执行记录，不依赖富途那边保留多久。
@@ -524,6 +536,25 @@ def get_ai_sim_trading(email: str) -> bool:
     with closing(_conn()) as c:
         row = c.execute("SELECT ai_sim_trading FROM user_settings WHERE email = ?", (email,)).fetchone()
         return bool(row[0]) if row else False
+
+
+def get_sim_virtual_cash(email: str) -> float | None:
+    """None表示还没初始化过（第一次跑sim_agent.py之前）。"""
+    init_db()
+    with closing(_conn()) as c:
+        row = c.execute("SELECT sim_virtual_cash_hkd FROM user_settings WHERE email = ?", (email,)).fetchone()
+        return row[0] if row else None
+
+
+def set_sim_virtual_cash(email: str, amount: float):
+    init_db()
+    with closing(_conn()) as c:
+        c.execute(
+            "INSERT INTO user_settings (email, sim_virtual_cash_hkd, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(email) DO UPDATE SET sim_virtual_cash_hkd = excluded.sim_virtual_cash_hkd, updated_at = excluded.updated_at",
+            (email, amount, datetime.now(timezone.utc).isoformat()),
+        )
+        c.commit()
 
 
 def log_simulated_order(

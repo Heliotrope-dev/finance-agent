@@ -67,6 +67,7 @@ from tracker import (
     get_ai_sim_trading, set_ai_sim_trading, get_simulated_orders, get_sim_agent_runs,
 )
 import sim_trader
+import sim_agent
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
     build_benchmark_comparison, build_return_histogram, build_multi_comparison, build_position_donut,
@@ -603,6 +604,33 @@ def _esc(s) -> str:
     if s is None:
         return ""
     return html.escape(str(s), quote=True)
+
+
+_CN_TZ = timezone(timedelta(hours=8))
+
+
+def _to_cn_dt(iso_str: str) -> datetime | None:
+    """tracker.py里run_at/created_at统一存的是datetime.now(timezone.utc).isoformat()
+    ——数据库存UTC是对的(不该跟着服务器本地时区存，见data_sources.cn_now()
+    同一个教训)，但界面上给用户看的必须是北京时间，2026-09-01用户反馈AI
+    模拟盘的收益曲线/决策记录时间戳显示的是UTC（比如凌晨4点多），跟他自己
+    的时区对不上，这里统一转换。返回datetime对象而不是格式化字符串——
+    图表x轴需要真正的时间类型，不能传字符串给Plotly猜。
+    """
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_CN_TZ)
+    except (ValueError, TypeError):
+        return None
+
+
+def _to_cn_time_str(iso_str: str) -> str:
+    dt = _to_cn_dt(iso_str)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else (iso_str or "")[:19].replace("T", " ")
 
 
 def _chat_bubble(role: str, text: str) -> str:
@@ -2546,7 +2574,7 @@ def _render_ai_sim_trading(email: str):
             for o in orders:
                 status_color = {"成功": UP_COLOR, "失败": DOWN_COLOR, "跳过": NEUTRAL_COLOR}.get(o["status"], NEUTRAL_COLOR)
                 st.markdown(
-                    f"<div style='padding:4px 0'>{o['created_at'][:19].replace('T',' ')} · "
+                    f"<div style='padding:4px 0'>{_to_cn_time_str(o['created_at'])} · "
                     f"{_esc(o['name'] or o['symbol'])}（{_esc(o['symbol'])}·{_esc(o['market'])}）· {_esc(o['action'])} · "
                     f"<span style='color:{status_color}'>{_esc(o['status'])}</span>"
                     + (f" · {_esc(o['note'])}" if o["note"] else "") + "</div>",
@@ -2605,20 +2633,28 @@ def _render_ai_sim_dashboard(email: str):
             snapshot = None
 
     runs = get_sim_agent_runs(email, limit=200)
-    equity_points = [
-        {"run_at": r["run_at"], "assets_hkd": r["assets_hkd_before"]}
-        for r in runs if r.get("assets_hkd_before") is not None
-    ]
+    equity_points = []
+    for r in runs:
+        if r.get("assets_hkd_before") is None:
+            continue
+        _dt = _to_cn_dt(r.get("run_at"))
+        if _dt is None:
+            continue
+        equity_points.append({"run_at": _dt, "assets_hkd": r["assets_hkd_before"]})
 
     if snapshot:
+        # 展示的是虚拟净值(持仓市值+虚拟现金)，不是富途账户真实总资产——
+        # 账户里躺着港股/美股各上百万闲置资金，AI碰不到也不该算进"AI管理
+        # 的十万港币"这个概念里，见sim_agent._virtual_net_value的说明。
+        net_value = sim_agent._virtual_net_value(email, snapshot["holdings_value_hkd"])
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("模拟盘总资产（港币，港股+美股加总）", f"HK${snapshot['total_assets_hkd']:,.0f}")
+            st.metric("虚拟净值（十万港币起始，港股+美股加总）", f"HK${net_value:,.0f}")
         with col2:
             if equity_points:
                 first = min(equity_points, key=lambda p: p["run_at"])["assets_hkd"]
                 if first:
-                    change_pct = (snapshot["total_assets_hkd"] - first) / first * 100
+                    change_pct = (net_value - first) / first * 100
                     st.metric("累计收益率（相对第一次记录）", f"{change_pct:+.2f}%")
         if snapshot["skipped_markets"]:
             st.caption(f"以下市场暂时没查到模拟账户：{'、'.join(snapshot['skipped_markets'])}")
@@ -2648,7 +2684,7 @@ def _render_ai_sim_dashboard(email: str):
         st.caption("还没有运行记录——开盘时段每15分钟会自动跑一次。")
     else:
         for r in runs[:20]:
-            when = (r.get("run_at") or "")[:19].replace("T", " ")
+            when = _to_cn_time_str(r.get("run_at"))
             title = f"{when} · {r['status']}" + (f" · {r['note']}" if r.get("note") else "")
             with st.expander(title):
                 if r.get("reasoning_text"):

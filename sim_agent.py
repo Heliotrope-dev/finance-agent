@@ -14,7 +14,7 @@
 """
 import json
 import os
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
 from zoneinfo import ZoneInfo
@@ -43,6 +43,15 @@ _MARKET_HOURS = {
 # 依然存在、依然会在快照里展示余额，只是这条自主决策链路不会主动碰它。
 _AGENT_MARKETS = ("HK", "US")
 
+# 2026-09-01用户明确要求"总资金十万港币"——但富途模拟账户本金没法通过
+# 任何接口或App设置改成这个具体数字（客服回复是"理论无上限"，账户里实际
+# 躺着港股100万+美股100万等值资金），用户明确要求"让AI自己控制一下"：
+# 这里不是靠AI自觉，是代码层面的硬预算——AI能动用的仓位规模上限固定按
+# 这个虚拟数字算，买入前会拿"当前已用仓位市值+这笔预计花费"跟这个上限比，
+# 超了就不下单，不管AI自己怎么说。真实账户里那些用不到的钱，跟这个agent
+# 的决策逻辑无关，只是账户碰巧有这么多，不代表这个agent的可用资金规模。
+_VIRTUAL_BUDGET_HKD = 100_000
+
 # 每个开盘市场喂给AI的候选股数量——每小时跑一次，不能像advise_portfolio
 # 那样带财务摘要/新闻做深度分析（那样跑一次要几分钟、几十次AI调用，一小时
 # 一次的节奏耗不起），这里只给"名称/代码/现价/涨跌幅"这种一眼行情，AI基于
@@ -52,6 +61,25 @@ _CANDIDATES_PER_MARKET = 8
 # 每次决策喂给AI的历史战绩条数——太多会把prompt撑得很长还没有额外信息量
 # （早期几次的参考价值不如最近几次），5条足够体现"最近是涨是跌"这个趋势。
 _HISTORY_CONTEXT_SIZE = 5
+
+
+_CN_TZ = timezone(timedelta(hours=8))
+
+
+def _to_cn_time_str(iso_str: str) -> str:
+    """数据库存的run_at是UTC(datetime.now(timezone.utc).isoformat())——这里
+    只是给AI看的prompt文本用，不是给最终用户的界面，但跟app.py那边统一
+    改成北京时间展示，避免自己在prompt里写"04:30"这种跟真实交易时段对不
+    上的时间，AI理解起来也别扭。"""
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_CN_TZ).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return iso_str[:16].replace("T", " ")
 
 
 def _market_is_open(market: str) -> bool:
@@ -94,7 +122,101 @@ def _build_candidates(open_markets: list[str]) -> list[dict]:
     return candidates
 
 
-def _history_context_lines(email: str) -> list[str]:
+def _fx_rates() -> tuple[float, float]:
+    """(USD兑HKD, CNY兑HKD)——只服务于虚拟预算的估算/记账，不追求精确到
+    分，接口都失败时用近似兜底值，不能让预算控制因为汇率接口挂了就整个
+    失效（宁可用一个大致对的数字继续保守放行，也不能没了汇率就放弃拦截）。
+    """
+    import data_sources as ds
+
+    usd_cny, _n1 = ds.get_fx_rate("USD")
+    hkd_cny, _n2 = ds.get_fx_rate("HKD")
+    usd_hkd = (usd_cny / hkd_cny) if (usd_cny and hkd_cny) else 8.6
+    cny_hkd = (1 / hkd_cny) if hkd_cny else 1.08
+    return usd_hkd, cny_hkd
+
+
+def _estimate_amount_hkd(signal: dict, shares: float, price_map: dict, usd_hkd: float, cny_hkd: float) -> float:
+    """一笔买卖预计涉及的金额(折HKD)——优先用candidates里这次决策时真实
+    拉到的实时价格(比AI自己估的amount_cny准)，candidates里没有这个标的
+    (AI选了候选池之外的股票)才退回用amount_cny粗略折算。"""
+    price = price_map.get((signal["symbol"], signal["market"]))
+    if price:
+        rate = 1.0 if signal["market"] == "HK" else usd_hkd
+        return price * shares * rate
+    return (signal.get("amount_cny") or 0) * cny_hkd
+
+
+def _apply_budget_limit(signals: list[dict], candidates: list[dict], holdings_value_hkd: float) -> tuple[list[dict], list[dict]]:
+    """买入信号按_VIRTUAL_BUDGET_HKD做硬性拦截，卖出/不动不受影响（卖出只
+    会腾出额度，不会超支）。按AI给出的顺序依次核对，额度不够了后面的买入
+    直接丢弃，不是按金额排序挑"划算的"——AI给信号的顺序本身通常已经体现了
+    优先级，这里不该越俎代庖重新排序。
+    """
+    price_map = {(c["symbol"], c["market"]): c["price"] for c in candidates}
+    usd_hkd, cny_hkd = _fx_rates()
+
+    remaining = _VIRTUAL_BUDGET_HKD - holdings_value_hkd
+    kept, dropped = [], []
+    for s in signals:
+        if s.get("action") != "买入":
+            kept.append(s)
+            continue
+        est_cost_hkd = _estimate_amount_hkd(s, s["shares"], price_map, usd_hkd, cny_hkd)
+        if est_cost_hkd <= remaining:
+            kept.append(s)
+            remaining -= est_cost_hkd
+        else:
+            dropped.append(s)
+    return kept, dropped
+
+
+def _settle_virtual_cash(email: str, kept_signals: list[dict], exec_results: list[dict], candidates: list[dict]) -> float:
+    """只对真正下单成功的信号结算虚拟现金——预算检查只是"预计"，真正扣钱
+    以是否成功下单为准，不能纸上谈兵（比如lot_size取整后不足一手被
+    sim_trader跳过的买入，不该扣虚拟现金，那笔钱根本没花出去）。用
+    exec_results里的shares_ordered(真实下单股数，可能因取整跟AI原话不完全
+    一致)而不是AI原始给的shares，金额算得更准。返回结算后的新虚拟现金
+    余额（已经写入数据库，调用方不用再存一次）。
+    """
+    usd_hkd, cny_hkd = _fx_rates()
+    price_map = {(c["symbol"], c["market"]): c["price"] for c in candidates}
+    signal_map = {s["symbol"]: s for s in kept_signals}
+
+    cash = tracker.get_sim_virtual_cash(email)
+    if cash is None:
+        cash = _VIRTUAL_BUDGET_HKD
+
+    for r in exec_results:
+        if r.get("status") != "成功":
+            continue
+        s = signal_map.get(r["symbol"])
+        if not s:
+            continue
+        shares = r.get("shares") or 0
+        amount_hkd = _estimate_amount_hkd(s, shares, price_map, usd_hkd, cny_hkd)
+        if s["action"] == "买入":
+            cash -= amount_hkd
+        elif s["action"] == "卖出":
+            cash += amount_hkd
+
+    tracker.set_sim_virtual_cash(email, cash)
+    return cash
+
+
+def _virtual_net_value(email: str, holdings_value_hkd: float) -> float:
+    """虚拟净值 = 当前持仓市值(精确、实时) + 虚拟现金余额(近似记账，见
+    _settle_virtual_cash)。这是"如果只给AI十万港币"这个概念下真正该看的
+    数字，不能用富途账户真实总资产——那里面绝大部分是AI碰不到的闲置
+    资金，混进去收益率会完全失真。
+    """
+    cash = tracker.get_sim_virtual_cash(email)
+    if cash is None:
+        cash = _VIRTUAL_BUDGET_HKD
+    return holdings_value_hkd + cash
+
+
+def _history_context_lines(email: str, holdings_value_hkd: float) -> list[str]:
     """把最近几次运行的"决策前资产 vs 现在实际资产"摘要拼成几行文字，供
     AI在这次决策时参考——这是"学习试错"这个说法在LLM agent场景下能落地
     的实现方式，见文件头部说明，不是训练模型参数。
@@ -103,15 +225,12 @@ def _history_context_lines(email: str) -> list[str]:
     if not runs:
         return ["（还没有历史运行记录，这是第一次决策，没有过去战绩可参考）"]
 
-    try:
-        current_assets = sim_trader.get_agent_snapshot()["total_assets_hkd"]
-    except Exception:
-        current_assets = None
+    current_assets = _virtual_net_value(email, holdings_value_hkd)
 
     lines = []
     for r in runs:
         before = r.get("assets_hkd_before")
-        when = (r.get("run_at") or "")[:16].replace("T", " ")
+        when = _to_cn_time_str(r.get("run_at"))
         if before and current_assets:
             change_pct = (current_assets - before) / before * 100
             lines.append(f"- {when}（HK${before:,.0f}起）：截至现在累计变化{change_pct:+.2f}%，当时的判断：{(r.get('reasoning_text') or '（无记录）')[:80]}")
@@ -120,12 +239,17 @@ def _history_context_lines(email: str) -> list[str]:
     return lines
 
 
-_AGENT_SYSTEM = """你是一个正在用虚拟资金自主管理富途模拟盘的投资agent，账户起始本金约十万港币，
-只交易港股和美股（A股不在你的操作范围内，就算候选或持仓信息里出现也不要碰），目标是长期跑赢
-大盘，不是每次都要交易——没有把握就"不动"，频繁交易会侵蚀模拟盘的长期表现（跟真实交易一样，
-这是在训练你形成正确的交易纪律，不是鼓励你多操作显得"在干活"）。
+_AGENT_SYSTEM = f"""你是一个正在用虚拟资金自主管理富途模拟盘的投资agent，只交易港股和美股（A股
+不在你的操作范围内，就算候选或持仓信息里出现也不要碰），目标是长期跑赢大盘，不是每次都要
+交易——没有把握就"不动"，频繁交易会侵蚀模拟盘的长期表现（跟真实交易一样，这是在训练你形成
+正确的交易纪律，不是鼓励你多操作显得"在干活"）。
 
-你会看到：当前持仓明细（含浮动盈亏）、账户现金（港股/美股两个独立资金池，都折算成港币展示）、
+你的虚拟预算是港币{_VIRTUAL_BUDGET_HKD:,.0f}元，这是你能动用的总规模上限（已建仓位市值+
+还没用的现金合计不能超过这个数），不是账户里显示的全部资金——账户本身可能显示有更多余额，
+那是系统给的，不属于你的可用范围，你只用把自己当成手里只有这么多钱在做决策就行。超出预算
+的买入会被系统直接拦截不执行，所以你自己也要心里有数，不要开出明显超预算的买入。
+
+你会看到：当前持仓明细（含浮动盈亏）、你的虚拟预算使用情况（已用多少、还剩多少额度）、
 候选股当前行情（只有现价/涨跌幅，没有基本面/新闻）、以及你自己过去几次决策后账户实际的资产
 变化（这是给你复盘用的——如果最近几次操作后资产在跌，说明策略需要更保守或调整方向；如果在
 涨，可以适度延续当前思路，但不要因为涨了就盲目加大手笔）。
@@ -176,7 +300,8 @@ def _run_cycle_locked(email: str) -> dict:
         return {"status": "失败", "note": str(e)}
 
     candidates = _build_candidates(open_markets)
-    history_lines = _history_context_lines(email)
+    holdings_value_hkd = snapshot.get("holdings_value_hkd", 0.0)
+    history_lines = _history_context_lines(email, holdings_value_hkd)
 
     holdings_lines = []
     for p in snapshot["positions"]:
@@ -184,11 +309,16 @@ def _run_cycle_locked(email: str) -> dict:
         holdings_lines.append(f"- {p['name']}（{p['code']}）：持有{p['qty']:g}股，浮动盈亏{pl_text}")
     holdings_text = "\n".join(holdings_lines) if holdings_lines else "（当前空仓）"
 
-    cash_lines = [
-        f"- {m}市场：{info['assets_native']:,.0f} {info['currency']}（约HK${info['assets_hkd']:,.0f}）"
-        for m, info in snapshot["markets"].items()
-    ]
-    cash_text = "\n".join(cash_lines) if cash_lines else "（资金信息暂时获取不到）"
+    # 预算文案给AI看的是"虚拟额度"，不是账户里真实躺着的港股/美股各百万
+    # 现金——见_AGENT_SYSTEM和_VIRTUAL_BUDGET_HKD的注释，账户本金没法通过
+    # API/App设置改成十万港币，只能靠这层软约束+下面的硬性拦截。
+    remaining_hkd = _VIRTUAL_BUDGET_HKD - holdings_value_hkd
+    budget_text = (
+        f"虚拟预算总额：HK${_VIRTUAL_BUDGET_HKD:,.0f}\n"
+        f"已用于持仓（按当前市值）：HK${holdings_value_hkd:,.0f}\n"
+        f"还剩可用额度：HK${remaining_hkd:,.0f}"
+        + ("（部分持仓汇率暂时获取不到，实际占用可能比这个数字更高，买入要更保守）" if snapshot.get("holdings_value_partial") else "")
+    )
 
     candidates_text = "\n".join(
         f"- {c['name']}（{c['symbol']}·{c['market']}）：现价{c['price']:.2f}，涨跌幅{c['pct_chg']:+.2f}%"
@@ -198,7 +328,7 @@ def _run_cycle_locked(email: str) -> dict:
 
     user_content = (
         f"当前开盘市场：{'、'.join(open_markets)}\n\n"
-        f"账户资金（各市场独立资金池，不能互相调用）：\n{cash_text}\n\n"
+        f"{budget_text}\n\n"
         f"当前持仓：\n{holdings_text}\n\n"
         f"候选股行情（仅供参考，也可以选择不在这些里面操作，只要是当前开盘市场的股票都可以）：\n{candidates_text}\n\n"
         f"你过去几次决策后的实际战绩（用于复盘）：\n" + "\n".join(history_lines)
@@ -217,11 +347,13 @@ def _run_cycle_locked(email: str) -> dict:
         )
         text = resp.choices[0].message.content or ""
     except Exception as e:
-        tracker.log_sim_agent_run(email, open_markets, snapshot["total_assets_hkd"], "", "[]", "失败", f"AI调用失败：{e}")
+        net_value = _virtual_net_value(email, holdings_value_hkd)
+        tracker.log_sim_agent_run(email, open_markets, net_value, "", "[]", "失败", f"AI调用失败：{e}")
         return {"status": "失败", "note": str(e)}
 
     if not text.strip():
-        tracker.log_sim_agent_run(email, open_markets, snapshot["total_assets_hkd"], "", "[]", "失败", "AI返回空内容")
+        net_value = _virtual_net_value(email, holdings_value_hkd)
+        tracker.log_sim_agent_run(email, open_markets, net_value, "", "[]", "失败", "AI返回空内容")
         return {"status": "失败", "note": "AI返回空内容"}
 
     signals = advisor._parse_trade_signals(text)
@@ -230,18 +362,28 @@ def _run_cycle_locked(email: str) -> dict:
         sig_idx = text.find("交易信号:")
     reasoning_text = text[:sig_idx].strip() if sig_idx != -1 else text.strip()
 
+    # 硬性预算拦截——不能只信AI自己说的"我会控制在预算内"，必须代码层面
+    # 真的核实过再放行，见_apply_budget_limit的docstring。
+    kept_signals, dropped_signals = _apply_budget_limit(signals, candidates, holdings_value_hkd)
+    if dropped_signals:
+        _dropped_text = "、".join(f"{s['name']}（{s['symbol']}）{s['shares']:g}股" for s in dropped_signals)
+        reasoning_text += f"\n\n（系统提示：以下买入超出十万港币虚拟预算，已被拦截未执行：{_dropped_text}）"
+
     try:
-        exec_results = sim_trader.execute_simulated_trades(email, signals)
+        exec_results = sim_trader.execute_simulated_trades(email, kept_signals)
     except Exception as e:
         exec_results = []
         reasoning_text += f"\n\n（下单执行失败：{e}）"
 
+    net_value_after = _settle_virtual_cash(email, kept_signals, exec_results, candidates) + holdings_value_hkd
+
     tracker.log_sim_agent_run(
-        email, open_markets, snapshot["total_assets_hkd"], reasoning_text,
+        email, open_markets, net_value_after, reasoning_text,
         json.dumps(signals, ensure_ascii=False), "完成",
-        f"{len(exec_results)}条信号，其中执行成功{sum(1 for r in exec_results if r.get('status') == '成功')}条",
+        f"{len(exec_results)}条信号，其中执行成功{sum(1 for r in exec_results if r.get('status') == '成功')}条"
+        + (f"，{len(dropped_signals)}条超预算被拦截" if dropped_signals else ""),
     )
-    return {"status": "完成", "reasoning": reasoning_text, "signals": signals, "executed": exec_results}
+    return {"status": "完成", "reasoning": reasoning_text, "signals": signals, "dropped": dropped_signals, "executed": exec_results}
 
 
 if __name__ == "__main__":

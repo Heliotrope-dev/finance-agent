@@ -246,14 +246,17 @@ def get_agent_snapshot() -> dict:
 
             ret2, pos = trd.position_list_query(trd_env=ft.TrdEnv.SIMULATE, acc_id=int(acc_id))
             if ret2 == ft.RET_OK and not pos.empty:
+                rate = _rate_to_hkd.get(currency)
                 for _, p in pos.iterrows():
                     if float(p["qty"] or 0) == 0:
                         continue
+                    market_val = float(p["market_val"]) if p.get("market_val") not in (None, "N/A") else None
                     positions.append({
                         "market": market, "code": p["code"], "name": p.get("stock_name") or p["code"],
                         "qty": float(p["qty"]),
                         "cost_price": float(p["cost_price"]) if p.get("cost_price") not in (None, "N/A") else None,
-                        "market_val": float(p["market_val"]) if p.get("market_val") not in (None, "N/A") else None,
+                        "market_val": market_val,
+                        "market_val_hkd": (market_val * rate) if (market_val is not None and rate) else None,
                         "pl_val": float(p["pl_val"]) if p.get("pl_val") not in (None, "N/A") else None,
                         "currency": currency,
                     })
@@ -262,4 +265,21 @@ def get_agent_snapshot() -> dict:
         finally:
             trd.close()
 
-    return {"total_assets_hkd": total_assets_hkd, "markets": markets_info, "positions": positions, "skipped_markets": skipped_markets}
+    # 持仓总市值(折HKD)——sim_agent.py的虚拟预算约束(用户要求"理论无上限的
+    # 富途账户里，让AI自己控制在约十万港币规模")要用这个数字做硬性拦截，
+    # 不能只让AI嘴上说控制预算，代码这边也要能核实"当前占用了多少额度"，
+    # 缺失汇率的持仓不计入(不能当0处理，那样会低估占用、放行不该放行的
+    # 买入)，如实通过holdings_value_partial标记这种情况。
+    holdings_value_hkd = 0.0
+    holdings_value_partial = False
+    for p in positions:
+        if p.get("market_val_hkd") is not None:
+            holdings_value_hkd += p["market_val_hkd"]
+        else:
+            holdings_value_partial = True
+
+    return {
+        "total_assets_hkd": total_assets_hkd, "markets": markets_info, "positions": positions,
+        "skipped_markets": skipped_markets, "holdings_value_hkd": holdings_value_hkd,
+        "holdings_value_partial": holdings_value_partial,
+    }
