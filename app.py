@@ -64,7 +64,9 @@ from tracker import (
     add_search_history, get_search_history, get_latest_leaderboard, get_advice_accuracy, get_score_band_backtest,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
+    get_ai_sim_trading, set_ai_sim_trading, get_simulated_orders,
 )
+import sim_trader
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
     build_benchmark_comparison, build_return_histogram, build_multi_comparison, build_position_donut,
@@ -2491,6 +2493,66 @@ def _render_max_capital_input(email: str):
         st.success("已保存。")
 
 
+def _render_ai_sim_trading(email: str):
+    """AI模拟交易开关+模拟盘快照——2026-09-01用户明确要求"让内置AI模拟
+    买卖"，对接的是富途账号自带的SIMULATE模拟盘（参照富途App自己的"模拟
+    买入"按钮），不涉及真实资金、不需要交易密码，见sim_trader.py开头的
+    说明。默认关闭，开关状态存在user_settings.ai_sim_trading，打开后
+    advise_portfolio每天17:30生成组合信号时会自动往模拟盘下单。
+    """
+    enabled = get_ai_sim_trading(email)
+    new_enabled = st.toggle(
+        "AI自动模拟交易（接富途模拟盘，不涉及真实资金）", value=enabled, key=f"_ai_sim_toggle_{email}",
+    )
+    if new_enabled != enabled:
+        set_ai_sim_trading(email, new_enabled)
+        st.rerun()
+
+    if not enabled:
+        st.caption("关闭状态——每天17:30的组合分析只给参考信号，不会真的下单到模拟盘。")
+        return
+
+    st.caption("已开启——每天17:30组合分析生成的买卖信号会自动同步到富途模拟盘（A股/港股/美股各自独立的SIMULATE账户）。")
+
+    with st.spinner("读取模拟盘状态..."):
+        try:
+            snapshot = sim_trader.get_sim_snapshot()
+        except Exception as e:
+            st.error(f"模拟盘状态读取失败：{e}")
+            snapshot = None
+
+    if snapshot:
+        st.metric("模拟盘总资产（折人民币，三个市场独立资金池加总仅供参考规模）", f"¥{snapshot['total_assets_cny']:,.0f}")
+        if snapshot["skipped_markets"]:
+            st.caption(f"以下市场的模拟账户暂时没查到，未计入：{'、'.join(snapshot['skipped_markets'])}")
+        if snapshot["positions"]:
+            st.caption("模拟盘当前持仓")
+            for p in snapshot["positions"]:
+                pl_color = UP_COLOR if (p["pl_val"] or 0) >= 0 else DOWN_COLOR
+                pl_text = f"{p['pl_val']:+,.0f} {p['currency']}" if p["pl_val"] is not None else "—"
+                st.markdown(
+                    f"<div style='display:flex;justify-content:space-between;padding:4px 0'>"
+                    f"<span>{_esc(p['name'])}（{_esc(p['code'])}）· {p['qty']:g}股</span>"
+                    f"<span style='color:{pl_color}'>{pl_text}</span></div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("模拟盘当前没有持仓。")
+
+    orders = get_simulated_orders(email, limit=20)
+    if orders:
+        with st.expander(f"最近{len(orders)}条模拟下单记录"):
+            for o in orders:
+                status_color = {"成功": UP_COLOR, "失败": DOWN_COLOR, "跳过": NEUTRAL_COLOR}.get(o["status"], NEUTRAL_COLOR)
+                st.markdown(
+                    f"<div style='padding:4px 0'>{o['created_at'][:19].replace('T',' ')} · "
+                    f"{_esc(o['name'] or o['symbol'])}（{_esc(o['symbol'])}·{_esc(o['market'])}）· {_esc(o['action'])} · "
+                    f"<span style='color:{status_color}'>{_esc(o['status'])}</span>"
+                    + (f" · {_esc(o['note'])}" if o["note"] else "") + "</div>",
+                    unsafe_allow_html=True,
+                )
+
+
 def _render_positions_donut(positions: list):
     """持仓占比环形图。只统计真正持仓(shares>0)，纯关注(shares=0)不占份额。
     不用@st.fragment(run_every=3)——Plotly图3秒重绘会明显闪烁（见持仓分析
@@ -3820,6 +3882,8 @@ else:
                         _render_positions_today_pnl(holding_items)
                         st.divider()
                         _render_max_capital_input(_email)
+                        st.divider()
+                        _render_ai_sim_trading(_email)
                     with ai_col:
                         _render_portfolio_advice(_email, holding_items)
 

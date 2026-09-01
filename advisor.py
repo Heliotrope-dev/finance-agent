@@ -1335,10 +1335,15 @@ _SIGNAL_ACTIONS = ("买入", "卖出", "不动")
 def _parse_trade_signals(text: str) -> list[dict]:
     """从AI输出的"交易信号"区块里解析出结构化的买卖信号——这是"先只调研+
     搭好架子，不接真实下单"这个决定的核心产物：把现在这种一段话式的建议
-    升级成可以直接照着操作的结构化数据（标的/方向/股数/金额），但下单
-    这个动作还是用户自己去券商手动做，这里不调用、也不import任何富途
-    交易接口（OpenSecTradeContext/place_order那一套），纯粹是文本解析+
-    展示。格式不对的行跳过，不强行凑数据，宁可信号少也不能编。
+    升级成可以直接照着操作的结构化数据（标的/方向/股数/金额）。这个函数
+    本身只做文本解析，不调用任何富途交易接口，格式不对的行跳过，不强行
+    凑数据，宁可信号少也不能编。
+
+    2026-09-01更新：这里解析出的signals现在多了一个可选去处——调用方
+    advise_portfolio如果检测到用户打开了"AI模拟交易"开关，会把这批信号
+    转手给sim_trader.execute_simulated_trades去富途SIMULATE模拟盘下单。
+    那是真实下单（只是模拟盘、不涉及真金白银），跟这里"纯解析不下单"
+    不矛盾——下单逻辑独立在sim_trader.py里，不在这个函数里。
     """
     # 只在"交易信号"这个表头本身上切一刀，不能对结果再切第二刀——之前是
     # 连续调用两次.split()，第二次是想兼容半角冒号表头，但两次split都是
@@ -1546,6 +1551,20 @@ def advise_portfolio(email: str) -> dict | None:
     analysis_text = text[:sig_idx].rstrip() if sig_idx != -1 else text
 
     tracker.log_portfolio_advice(email, total_value_cny, holdings_json, analysis_text, signals_json)
+
+    # 2026-09-01用户明确要求"让内置AI模拟买卖"——默认关闭，用户在持仓页自己
+    # 打开开关才会走到这里。只对接富途自己的SIMULATE模拟盘（见sim_trader.py
+    # 开头的说明），不是真实下单，跟_parse_trade_signals文档字符串里"不接
+    # 真实下单"那句话不矛盾：那句话说的是REAL环境，这里从头到尾没出现过
+    # TrdEnv.REAL。单条信号失败不影响这次advise_portfolio整体返回，模拟盘
+    # 执行失败不该让组合分析这次白跑。
+    if tracker.get_ai_sim_trading(email):
+        try:
+            import sim_trader
+            sim_trader.execute_simulated_trades(email, signals)
+        except Exception:
+            pass
+
     return {"email": email, "total_value_cny": total_value_cny, "analysis_text": analysis_text, "signals": signals}
 
 

@@ -234,6 +234,39 @@ def init_db():
             )
             """
         )
+        # ai_sim_trading：2026-09-01用户明确要求"让内置AI模拟买卖"——开关默认
+        # 关闭(0)，用户自己在持仓页打开后，advisor.py每天17:30生成组合交易
+        # 信号时才会真的去调用sim_trader.execute_simulated_trades往富途的
+        # SIMULATE模拟盘下单。这是对_parse_trade_signals文档字符串里那句
+        # "不接真实下单"的一次明确的、用户主动要求的方向调整——只对接富途
+        # 自己的模拟盘（不涉及真实资金/不需要交易解锁密码，实测过SIMULATE
+        # 环境下单不需要unlock_trade），不是接真实交易。
+        us_cols = [r[1] for r in c.execute("PRAGMA table_info(user_settings)").fetchall()]
+        if "ai_sim_trading" not in us_cols:
+            c.execute("ALTER TABLE user_settings ADD COLUMN ai_sim_trading INTEGER NOT NULL DEFAULT 0")
+
+        # simulated_orders：AI模拟盘每次自动下单的执行记录——富途自己的订单
+        # 历史会被清理/查询接口只能看近期，这里单独留一份，让"回看"页能展示
+        # 完整的历史执行记录，不依赖富途那边保留多久。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS simulated_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                market TEXT NOT NULL,
+                action TEXT NOT NULL,
+                shares_signal REAL NOT NULL,
+                shares_ordered REAL NOT NULL DEFAULT 0,
+                order_id TEXT NOT NULL DEFAULT '',
+                acc_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
 
         # 从watchlist表一次性迁移进positions，shares/cost_total都是0(纯关注)。
         # UNIQUE(email,symbol)保证INSERT OR IGNORE天然幂等，每次启动跑一遍
@@ -437,6 +470,51 @@ def get_max_capital(email: str) -> float | None:
     with closing(_conn()) as c:
         row = c.execute("SELECT max_capital_cny FROM user_settings WHERE email = ?", (email,)).fetchone()
         return row[0] if row else None
+
+
+def set_ai_sim_trading(email: str, enabled: bool):
+    init_db()
+    with closing(_conn()) as c:
+        c.execute(
+            "INSERT INTO user_settings (email, ai_sim_trading, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(email) DO UPDATE SET ai_sim_trading = excluded.ai_sim_trading, updated_at = excluded.updated_at",
+            (email, int(enabled), datetime.now(timezone.utc).isoformat()),
+        )
+        c.commit()
+
+
+def get_ai_sim_trading(email: str) -> bool:
+    init_db()
+    with closing(_conn()) as c:
+        row = c.execute("SELECT ai_sim_trading FROM user_settings WHERE email = ?", (email,)).fetchone()
+        return bool(row[0]) if row else False
+
+
+def log_simulated_order(
+    email: str, symbol: str, name: str, market: str, action: str,
+    shares_signal: float, shares_ordered: float, order_id: str, acc_id: str,
+    status: str, note: str = "",
+) -> None:
+    init_db()
+    with closing(_conn()) as c:
+        c.execute(
+            "INSERT INTO simulated_orders "
+            "(email, symbol, name, market, action, shares_signal, shares_ordered, order_id, acc_id, status, note, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (email, symbol, name, market, action, shares_signal, shares_ordered, order_id, acc_id, status, note,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        c.commit()
+
+
+def get_simulated_orders(email: str, limit: int = 50) -> list[dict]:
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM simulated_orders WHERE email = ? ORDER BY created_at DESC LIMIT ?", (email, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def log_analysis(
