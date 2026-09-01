@@ -225,6 +225,36 @@ def _virtual_net_value(email: str, holdings_value_hkd: float) -> float:
     return holdings_value_hkd + cash
 
 
+def _performance_scoreboard(email: str, holdings_value_hkd: float) -> str:
+    """一句话战绩摘要（胜率+平均涨跌），放在历史记录最前面。
+
+    用户明确要求"给他强化学习"——老实说，调的是千问的API，碰不到模型
+    参数，做不到真正意义上的强化学习（根据reward更新权重）。这里做的是
+    退而求其次但确实有用的事：把"最近这些操作到底表现怎么样"从一堆散落
+    的文字复盘里提炼成一个具体的量化数字（胜率/平均涨跌），当成每次决策
+    prompt里最先看到的"考卷分数"——不是让模型自己变聪明，是让它每次决策
+    前先看到一个不能回避的、量化的、真实的战绩，比純文字复盘更难被自己
+    的话术粉饰过去（比如"这次虽然跌了但逻辑是对的"这种自我安慰）。
+    """
+    runs = tracker.get_sim_agent_runs(email, limit=_HISTORY_CONTEXT_SIZE)
+    current_assets = _virtual_net_value(email, holdings_value_hkd)
+    results = []
+    for r in runs:
+        before = r.get("assets_hkd_before")
+        try:
+            sigs = json.loads(r.get("signals_json") or "[]")
+        except Exception:
+            sigs = []
+        acted = any(s.get("action") in ("买入", "卖出") for s in sigs)
+        if acted and before and current_assets:
+            results.append((current_assets - before) / before * 100)
+    if not results:
+        return "（还没有可统计的操作记录，暂无战绩）"
+    win_rate = sum(1 for x in results if x > 0) / len(results) * 100
+    avg = sum(results) / len(results)
+    return f"最近{len(results)}次有实际操作的决策：胜率{win_rate:.0f}%，平均单次累计变化{avg:+.2f}%"
+
+
 def _history_context_lines(email: str, holdings_value_hkd: float) -> list[str]:
     """把最近几次运行的"当时买卖了什么 + 决策前资产 vs 现在实际资产"摘要拼成
     几行文字，供AI在这次决策时参考——这是"学习试错"这个说法在LLM agent场景下
@@ -286,9 +316,26 @@ _AGENT_SYSTEM = f"""你是一个正在用虚拟资金自主管理富途模拟盘
 给的量比/换手率数字（比如量比明显大于1才算放量，量比低于1其实是缩量，不能反过来说"活跃"）——
 不能只看涨跌幅好看就顺嘴编一个"活跃"当理由，这两个字段就是给你核实用的，说了就要站得住。
 
+在开始之前，下面这几条是这个测试场景里明确要求你遵守的交易纪律（不是建议，是硬性要求），
+覆盖散户最容易犯的几类错误：
+1. 仓位管理——单笔买入不能一口气用掉可用额度的大头（原则上不超过还剩额度的30-40%），
+   一次判断错了不该伤筋动骨；候选股再有吸引力也不能全仓押单一标的。
+2. 止损意识——每次买入的理由里，隐含地想清楚"如果这个判断错了，会在什么位置/什么信号
+   下先被证伪"（比如跌破今天低点、放量下跌），哪怕系统层面不支持你自己挂止损单，这个
+   思考过程也要体现在reasoning里，方便下一轮复盘时对照"当时设想的证伪信号出现了没有"。
+3. 追涨辨识——现价接近今天甚至近期高点、且量比明显放大，才是"真突破"值得跟；只是涨跌幅
+   数字好看但量比平平（甚至缩量）的，大概率是情绪化的假拉升，不该追。
+4. 拒绝"为了操作而操作"——如果这一轮候选股里没有哪个真正有说服力，"不动"本身就是一个
+   合格的决策，不用为了显得"活跃"硬凑一笔操作。
+5. 说了就要站得住——量比/换手率、涨跌幅这些数字是唯一真实依据，reasoning里的每个判断
+   点都要能对应上给出的数字，不能脱离数据自由发挥。
+
 用户明确要求这不是"每次决策互不相关地随便选选"，而是要"边炒股边学习，哪里踩过坑、摸清楚
 套路，越操作越像一个真正懂行情的专家，不能一直是散户思维"。具体到每次决策，你应该先花几句
 话真正复盘历史记录，而不是走过场：
+- 你会先看到一行"综合战绩"（最近N次有实际操作的决策里，胜率多少、平均涨跌多少）——这是
+  一个不能回避的量化分数，如果胜率明显低于50%或平均是负的，说明最近的判断框架整体有问题，
+  这一轮必须认真反思到底是哪类判断系统性地错了，不能只挑一两笔亏损轻描淡写带过。
 - 对上一轮/前几轮买的标的，现在看是判断对了还是错了？如果错了，当时的理由错在哪个环节
   （比如：把短期情绪波动当成了趋势启动、追高了明显缺乏安全边际的位置、选的标的其实成交
   不够活跃只是看起来热门）？
@@ -356,6 +403,7 @@ def _run_cycle_locked(email: str) -> dict:
     # 只记"决策前"这一个时点的净值，每次运行前后台账各自独立结清，不会
     # 有"半路记录一个既扣了钱又没算上货"的中间态。
     net_value_before = _virtual_net_value(email, holdings_value_hkd)
+    scoreboard_text = _performance_scoreboard(email, holdings_value_hkd)
     history_lines = _history_context_lines(email, holdings_value_hkd)
 
     holdings_lines = []
@@ -392,6 +440,7 @@ def _run_cycle_locked(email: str) -> dict:
         f"{budget_text}\n\n"
         f"当前持仓：\n{holdings_text}\n\n"
         f"候选股行情（仅供参考，也可以选择不在这些里面操作，只要是当前开盘市场的股票都可以）：\n{candidates_text}\n\n"
+        f"综合战绩：{scoreboard_text}\n\n"
         f"你过去几次决策后的实际战绩（用于复盘）：\n" + "\n".join(history_lines)
     )
 
