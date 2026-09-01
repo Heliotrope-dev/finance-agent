@@ -23,6 +23,7 @@ from data_sources import (
     get_index_intraday_a,
     get_stock_history,
     get_stock_realtime,
+    get_stock_realtime_futu_batch,
     check_stock_valid,
     get_financial_abstract,
     get_stock_news,
@@ -2957,13 +2958,24 @@ def _render_position_rows(position_items: list, _email: str):
     # 边取数据边画一行，用户反馈"一个一个蹦出来很慢"。取数据本身的耗时省不掉
     # （网络请求），但至少不会让用户看着页面一行一行往外挤，而是等一下之后
     # 整批一起出现，观感上干脆很多。
-    def _fetch_one(item):
+    def _fetch_one(item, hk_us_quotes: dict):
         item_market = item.get("market", "A")
         symbol = item["symbol"]
-        try:
-            wspot = get_stock_realtime(symbol, market=item_market)
-        except Exception:
-            wspot = {}
+        if item_market in ("HK", "US"):
+            wspot = hk_us_quotes.get((symbol, item_market))
+            if wspot is None:
+                # 批量查询里没这支（比如这次快照请求整体失败），退回单独查
+                # 一次兜底——只是个别情况，不会像"每支都单独查"那样再次
+                # 撞上限流。
+                try:
+                    wspot = get_stock_realtime(symbol, market=item_market)
+                except Exception:
+                    wspot = {}
+        else:
+            try:
+                wspot = get_stock_realtime(symbol, market=item_market)
+            except Exception:
+                wspot = {}
         closes = _fetch_sparkline_closes(symbol, item_market)
         return (item, item_market, symbol, wspot, closes)
 
@@ -2980,7 +2992,25 @@ def _render_position_rows(position_items: list, _email: str):
         # 统一截止时间/避免线程堆积的实现细节抽到了共享的
         # _run_concurrent_with_deadline（见它的docstring——那里记录了同一个
         # 教训：per-future timeout会被排队顺序绕过，必须用整批统一的deadline）。
-        results = _run_concurrent_with_deadline(position_items, _fetch_one, timeout=4)
+        #
+        # 真实故障修复（2026-09-01）：这里之前是每支股票各自单独调
+        # get_stock_realtime，港股/美股都走get_market_snapshot单只查询——
+        # 20支股票、每3秒刷新一次，等于每30秒约200次get_market_snapshot
+        # 调用，直接撞上Futu"每30秒最多60次"的限流，请求卡住不返回，页面
+        # 表现为长时间转圈("自选页死机")。改成先把所有港股/美股代码一次性
+        # 打包进一个get_stock_realtime_futu_batch调用，每次刷新固定只占用
+        # 1次调用额度，跟持仓/自选列表里有多少支股票无关。
+        hk_us_items = [
+            (it["symbol"], it.get("market", "A")) for it in position_items if it.get("market", "A") in ("HK", "US")
+        ]
+        try:
+            hk_us_quotes = get_stock_realtime_futu_batch(hk_us_items) if hk_us_items else {}
+        except Exception:
+            hk_us_quotes = {}
+
+        results = _run_concurrent_with_deadline(
+            position_items, lambda item: _fetch_one(item, hk_us_quotes), timeout=4,
+        )
         rows = []
         for i, item in enumerate(position_items):
             if i in results:

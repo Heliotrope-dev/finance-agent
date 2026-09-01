@@ -1647,18 +1647,10 @@ def get_data_source_health() -> dict:
     return {"futu": futu_status, "熔断记录": breakers}
 
 
-def get_stock_realtime_futu(symbol: str, market: str) -> dict:
-    """走本地 Futu OpenD 网关拿真实时快照，只支持港股/美股（A股无权限）。
-
-    market 检查放在最前面——A股走这函数是必然返回空的，没必要为此白连一次 Futu。
-    """
-    if market not in ("HK", "US"):
-        return {}
-    code = f"HK.{symbol}" if market == "HK" else f"US.{symbol}"
-    ret, data = _futu_call(lambda ctx: ctx.get_market_snapshot([code]), default=(None, None))
-    if ret != ft.RET_OK or data is None or data.empty:
-        return {}
-    row = data.iloc[0]
+def _futu_snapshot_row_to_dict(symbol: str, row) -> dict:
+    """把get_market_snapshot返回的一行原始数据整理成这个项目统一的实时行情
+    字典格式——get_stock_realtime_futu(单只)和get_stock_realtime_futu_batch
+    (批量)共用同一份映射逻辑，不要两处各写一份、以后加字段容易漏改一处。"""
     prev_close = float(row["prev_close_price"])
     last = float(row["last_price"])
     if not prev_close:
@@ -1692,6 +1684,49 @@ def get_stock_realtime_futu(symbol: str, market: str) -> dict:
         "更新时间": str(row["update_time"]),
         "数据源": "Futu实时",
     }
+
+
+def get_stock_realtime_futu(symbol: str, market: str) -> dict:
+    """走本地 Futu OpenD 网关拿真实时快照，只支持港股/美股（A股无权限）。
+
+    market 检查放在最前面——A股走这函数是必然返回空的，没必要为此白连一次 Futu。
+    """
+    if market not in ("HK", "US"):
+        return {}
+    code = f"HK.{symbol}" if market == "HK" else f"US.{symbol}"
+    ret, data = _futu_call(lambda ctx: ctx.get_market_snapshot([code]), default=(None, None))
+    if ret != ft.RET_OK or data is None or data.empty:
+        return {}
+    return _futu_snapshot_row_to_dict(symbol, data.iloc[0])
+
+
+def get_stock_realtime_futu_batch(items: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """一次get_market_snapshot调用查一批港股/美股的实时行情（A股不支持，
+    调用方自己过滤）——2026-09-01真实故障修复：持仓/自选页那个每3秒刷新
+    的fragment之前是每支股票各自单独调get_stock_realtime_futu，20支股票
+    3秒刷新一次就是每30秒约200次get_market_snapshot调用，而Futu这个接口
+    限流是"每30秒最多60次"，实测直接命中限流报错("获取市场快照频率太高")，
+    请求卡住不返回，页面表现为长时间转圈/"死机"。改成一次性把所有代码
+    打包进一个get_market_snapshot调用，不管清单里有多少支股票，每次刷新
+    只占用1次调用额度。
+    """
+    codes = [f"HK.{s}" if m == "HK" else f"US.{s}" for s, m in items if m in ("HK", "US")]
+    if not codes:
+        return {}
+    ret, data = _futu_call(lambda ctx: ctx.get_market_snapshot(codes), default=(None, None))
+    if ret != ft.RET_OK or data is None or data.empty:
+        return {}
+    result: dict[tuple[str, str], dict] = {}
+    code_to_item = {(f"HK.{s}" if m == "HK" else f"US.{s}"): (s, m) for s, m in items if m in ("HK", "US")}
+    for _, row in data.iterrows():
+        item = code_to_item.get(row["code"])
+        if not item:
+            continue
+        symbol, market = item
+        parsed = _futu_snapshot_row_to_dict(symbol, row)
+        if parsed:
+            result[item] = parsed
+    return result
 
 
 @st.cache_data(ttl=300, show_spinner=False)
