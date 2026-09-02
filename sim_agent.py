@@ -152,8 +152,31 @@ def _estimate_amount_hkd(signal: dict, shares: float, price_map: dict, usd_hkd: 
     return (signal.get("amount_cny") or 0) * cny_hkd
 
 
+def _symbol_from_code(code: str) -> str:
+    """持仓快照里的code带市场前缀（如"US.META"/"HK.02685"），信号/候选股里
+    的symbol不带前缀（"META"/"02685"）——两边要按symbol对齐时统一去掉前缀，
+    跟sim_trader._to_futu_code反过来的逻辑对应。"""
+    for prefix in ("HK.", "US.", "SH.", "SZ."):
+        if code.upper().startswith(prefix):
+            return code[len(prefix):]
+    return code
+
+
+# 单一标的的持仓市值（旧仓+这次新买）不能超过虚拟预算的这个比例——真实
+# 故障(2026-09-02复盘发现)：_apply_budget_limit原来只拦"这一笔买入会不会
+# 花超剩余额度"，没有拦"这一笔买完之后这支票会不会占了整个账户的大头"。
+# 实测复盘时发现：META这支票不是靠一笔大单买的，是靠2026-09-01那天好几次
+# 决策里分别各买1-4股这种小单，每笔单独看都在"不超过剩余额度30-40%"的
+# 规则以内，但因为是同一支票反复加，累计下来占到了当时账户市值的四成多，
+# 明显违背"不能全仓押单一标的"这条第五步里已经写的原则——问题是原有的
+# 那条规则只管住了"单次下手的力度"，没管住"这支票累计占比"，两者不是一回事，
+# 前者防的是"一把梭"，后者防的是"蚂蚁搬家式的隐性集中"，都要拦。
+_MAX_SINGLE_POSITION_PCT = 0.30
+
+
 def _apply_budget_limit(
     signals: list[dict], candidates: list[dict], holdings_value_hkd: float, virtual_cash_hkd: float,
+    positions: list[dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """买入信号按_VIRTUAL_BUDGET_HKD做硬性拦截，卖出/不动不受影响（卖出只
     会腾出额度，不会超支）。按AI给出的顺序依次核对，额度不够了后面的买入
@@ -167,10 +190,26 @@ def _apply_budget_limit(
     一路买成了-2.6万，账户彻底失真。现在同时看两个上限，取更紧的那个：
     一是不能超过100k的名义总预算，二是不能超过账上真实还有的现金——
     后者是这次真正缺的那道闸，没有它，"名义预算没超"不等于"真的有钱付"。
+
+    同一天(2026-09-02)复盘又发现第二个缺口，一并补上：单支标的的累计持仓
+    也要设上限（_MAX_SINGLE_POSITION_PCT），不能只看"这一笔够不够钱买"，
+    见上面这个常量的注释。这里按symbol+market把已有持仓市值(HKD)加总，
+    买入信号如果会让这支票的（旧仓+这笔）总市值超过上限，直接拦截——
+    跟总预算拦截同一个原则，不能只信AI自己说"我会分散"，代码层面要真的
+    核实。positions传None（比如老调用方还没升级）时这层检查直接跳过，
+    不影响原有的总预算拦截继续生效。
     """
     price_map = {(c["symbol"], c["market"]): c["price"] for c in candidates}
     usd_hkd, cny_hkd = _fx_rates()
 
+    existing_by_symbol: dict[tuple[str, str], float] = {}
+    if positions:
+        for p in positions:
+            sym = _symbol_from_code(p.get("code", ""))
+            key = (sym, p.get("market"))
+            existing_by_symbol[key] = existing_by_symbol.get(key, 0.0) + (p.get("market_val_hkd") or 0.0)
+
+    max_single_position_hkd = _VIRTUAL_BUDGET_HKD * _MAX_SINGLE_POSITION_PCT
     remaining = min(_VIRTUAL_BUDGET_HKD - holdings_value_hkd, virtual_cash_hkd)
     kept, dropped = [], []
     for s in signals:
@@ -178,11 +217,19 @@ def _apply_budget_limit(
             kept.append(s)
             continue
         est_cost_hkd = _estimate_amount_hkd(s, s["shares"], price_map, usd_hkd, cny_hkd)
+        key = (s["symbol"], s["market"])
+        projected_position_hkd = existing_by_symbol.get(key, 0.0) + est_cost_hkd
+        if projected_position_hkd > max_single_position_hkd:
+            # 浅拷贝加个提示字段，不改动signals里的原始dict（那份原样要
+            # 完整写进log_sim_agent_run，见调用方注释）。
+            dropped.append({**s, "_drop_reason": "集中度"})
+            continue
         if est_cost_hkd <= remaining:
             kept.append(s)
             remaining -= est_cost_hkd
+            existing_by_symbol[key] = projected_position_hkd
         else:
-            dropped.append(s)
+            dropped.append({**s, "_drop_reason": "预算"})
     return kept, dropped
 
 
@@ -373,6 +420,16 @@ _AGENT_SYSTEM = f"""你是一个正在用虚拟资金自主管理富途模拟盘
 位置/什么信号下先被证伪"（比如跌破今天低点、放量下跌）——哪怕系统层面不支持你自己挂
 止损单，这个思考过程也要体现在reasoning里，方便下一轮复盘时对照"当时设想的证伪信号
 出现了没有"，也方便下一轮真正执行第四步的止损检查。
+
+真实教训(2026-09-02复盘)：不要只盯着"这一笔买多大"，还要看"这支票加完这一笔之后累计
+占了多大比例"——之前出现过对同一支标的连续好几轮各买一小笔，每笔单独看都不大、都在
+上面这条单笔上限以内，但因为反复加仓同一支票，几天下来这一支票累计占到了账户四成多，
+实质上就是变相的全仓单押，跟一次性重仓没有本质区别，只是过程更隐蔽。所以决定买入前，
+先看一眼"当前持仓"里这支票是不是已经有仓位、有多大——如果加上这一笔会让这支票的
+累计持仓明显超过虚拟预算的三成，就不该再加，哪怕这一笔本身金额不大、哪怕这支票这次
+的信号看起来很强；这时候更合理的选择是要么不加仓、要么去看看别的标的分散一下。系统
+层面也会做这道硬性拦截（超过三成会被直接拒绝执行），但你自己判断时就该把这条规则
+内化进去，不要每次都被系统事后拦下来才知道，那样浪费一次本可以更有效使用的决策机会。
 
 每笔交易都有真实的富途手续费（佣金/平台费/印花税等，港股大约几十港币起，美股也有固定
 费用），频繁小额进出会被手续费明显侵蚀收益——不要为了"保持活跃"去做金额很小、预期
@@ -596,10 +653,25 @@ def _run_cycle_locked(email: str) -> dict:
     current_cash = tracker.get_sim_virtual_cash(email)
     if current_cash is None:
         current_cash = _VIRTUAL_BUDGET_HKD
-    kept_signals, dropped_signals = _apply_budget_limit(tradeable_signals, candidates, holdings_value_hkd, current_cash)
+    kept_signals, dropped_signals = _apply_budget_limit(
+        tradeable_signals, candidates, holdings_value_hkd, current_cash, snapshot.get("positions"),
+    )
     if dropped_signals:
-        _dropped_text = "、".join(f"{s['name']}（{s['symbol']}）{s['shares']:g}股" for s in dropped_signals)
-        reasoning_text += f"\n\n（系统提示：以下买入超出十万港币虚拟预算，已被拦截未执行：{_dropped_text}）"
+        _budget_dropped = [s for s in dropped_signals if s.get("_drop_reason") != "集中度"]
+        _concentration_dropped = [s for s in dropped_signals if s.get("_drop_reason") == "集中度"]
+        if _budget_dropped:
+            _dropped_text = "、".join(f"{s['name']}（{s['symbol']}）{s['shares']:g}股" for s in _budget_dropped)
+            reasoning_text += f"\n\n（系统提示：以下买入超出十万港币虚拟预算，已被拦截未执行：{_dropped_text}）"
+        if _concentration_dropped:
+            # 见_apply_budget_limit/_MAX_SINGLE_POSITION_PCT的docstring——这个
+            # 提示专门跟预算超支分开说，因为对AI来说这是两类完全不同的教训：
+            # 预算超支是"钱不够"，集中度超限是"钱够但不该全押这一支"，混在
+            # 一起讲AI没法从提示里学到正确的那条规律。
+            _c_text = "、".join(f"{s['name']}（{s['symbol']}）{s['shares']:g}股" for s in _concentration_dropped)
+            reasoning_text += (
+                f"\n\n（系统提示：以下买入会让该标的累计持仓超过虚拟预算的"
+                f"{_MAX_SINGLE_POSITION_PCT:.0%}（单一标的集中度上限），已被拦截未执行：{_c_text}）"
+            )
 
     try:
         exec_results = sim_trader.execute_simulated_trades(email, kept_signals)
