@@ -19,6 +19,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import advisor
+import sim_trader
 import tracker
 
 _CN_TZ = timezone(timedelta(hours=8))
@@ -87,6 +88,11 @@ def build_daily_report(email: str) -> dict:
         "win_rate": win_rate,
         "best": best, "worst": worst,
         "total_fee_hkd": total_fee_hkd,
+        # 2026-09-02新增：完整的"有操作"决策清单(时间升序)，配合每支变化%——
+        # 早上那份print_report只挑最好/最差各一条，晚上8:30用户明确要求的
+        # "详细版"要看到当天每一次操作，不只是两个极端，所以把results
+        # 原样带出去，不在这里重复算一遍。
+        "all_acted": sorted(results, key=lambda x: x[0].get("run_at") or ""),
     }
 
 
@@ -132,7 +138,73 @@ def print_report(email: str):
         print("\n（今天没有实际操作，不写入长期经验记录）")
 
 
+def print_detailed_report(email: str):
+    """2026-09-02新增：用户明确要求"晚上八点半需要详细版汇报"，跟早上
+    print_report(8:10播报，只挑最好/最差各一条)是两个不同定位——早上是
+    "开盘前一句话回顾"，这份是"收盘后完整复盘"，要看到当天每一次操作
+    （不是只看两个极端）、当前每一笔实际持仓、剩余现金，不只是净值涨跌
+    这一个数字。同样不经过AI，纯数据拼接（跟print_report同一个原则，
+    见文件头部说明），保证数字是真实查出来的，不是AI编的。
+    """
+    d = build_daily_report(email)
+    print("==================== AI模拟盘详细复盘（晚间版） ====================")
+    if d["start_net"] is not None and d["end_net"] is not None:
+        change = d["end_net"] - d["start_net"]
+        change_pct = change / d["start_net"] * 100 if d["start_net"] else 0
+        print(f"净值：HK${d['start_net']:,.0f} → HK${d['end_net']:,.0f}（{change:+,.0f}，{change_pct:+.2f}%）")
+    else:
+        print("净值：过去24小时没有快照数据（可能今天两个市场都没开盘）")
+    print(f"决策次数：{d['run_count']}（其中有实际操作{d['acted_count']}次），成交订单{d['order_count']}笔，累计手续费HK${d['total_fee_hkd']:,.2f}")
+    print(f"胜率（有操作的决策里，后续净值比决策前高的比例）：{d['win_rate']:.0f}%" if d["win_rate"] is not None else "胜率：暂无可统计的操作记录")
+
+    print("\n---- 今天每一次实际操作 ----")
+    if d["all_acted"]:
+        for r, c in d["all_acted"]:
+            t = _to_cn(r.get("run_at"))
+            try:
+                sigs = json.loads(r.get("signals_json") or "[]")
+            except Exception:
+                sigs = []
+            acted_sigs = [s for s in sigs if s.get("action") in ("买入", "卖出")]
+            sig_line = "、".join(f"{s.get('action')}{s.get('name') or s.get('symbol')}{s.get('shares', '')}股" for s in acted_sigs) or "（信号明细缺失）"
+            print(f"[{t.strftime('%H:%M') if t else '--:--'}] {sig_line} —— 事后净值变化{_fmt_pct(c)}")
+            reasoning = (r.get("reasoning_text") or "")[:150]
+            if reasoning:
+                print(f"  理由摘要：{reasoning}")
+    else:
+        print("（今天没有实际操作）")
+
+    print("\n---- 当前实际持仓（含账户现价重估的浮动盈亏） ----")
+    try:
+        snap = sim_trader.get_agent_snapshot()
+        positions = snap.get("positions") or []
+        if positions:
+            for p in positions:
+                pl = p.get("pl_val")
+                pl_text = f"{pl:+.2f}{p['currency']}" if pl is not None else "—"
+                mv = p.get("market_val_hkd")
+                mv_text = f"HK${mv:,.0f}" if mv is not None else "—"
+                print(f"  {p['name']}（{p['code']}）{p['qty']:g}股，市值{mv_text}，浮动盈亏{pl_text}")
+        else:
+            print("  （当前空仓）")
+        cash = tracker.get_sim_virtual_cash(email)
+        print(f"剩余虚拟现金：HK${cash:,.0f}" if cash is not None else "剩余虚拟现金：未知")
+        print(f"持仓总市值：HK${snap.get('holdings_value_hkd', 0):,.0f}")
+    except Exception as e:
+        print(f"（读取当前持仓快照失败：{e!r}）")
+
+    lessons = tracker.get_sim_agent_lessons(email, limit=3)
+    if lessons:
+        print("\n---- 最近几天的长期复盘记录 ----")
+        for l in lessons:
+            print(f"  {l.get('lesson_text', '')[:150]}")
+
+
 if __name__ == "__main__":
-    print_report(advisor._EMAIL)
+    import sys
+    if "--detailed" in sys.argv:
+        print_detailed_report(advisor._EMAIL)
+    else:
+        print_report(advisor._EMAIL)
     import os
     os._exit(0)
