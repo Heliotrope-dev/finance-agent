@@ -152,16 +152,26 @@ def _estimate_amount_hkd(signal: dict, shares: float, price_map: dict, usd_hkd: 
     return (signal.get("amount_cny") or 0) * cny_hkd
 
 
-def _apply_budget_limit(signals: list[dict], candidates: list[dict], holdings_value_hkd: float) -> tuple[list[dict], list[dict]]:
+def _apply_budget_limit(
+    signals: list[dict], candidates: list[dict], holdings_value_hkd: float, virtual_cash_hkd: float,
+) -> tuple[list[dict], list[dict]]:
     """买入信号按_VIRTUAL_BUDGET_HKD做硬性拦截，卖出/不动不受影响（卖出只
     会腾出额度，不会超支）。按AI给出的顺序依次核对，额度不够了后面的买入
     直接丢弃，不是按金额排序挑"划算的"——AI给信号的顺序本身通常已经体现了
     优先级，这里不该越俎代庖重新排序。
+
+    真实故障(2026-09-02)：原来这里只按"100k减去当前持仓市值"算剩余额度，
+    完全没看virtual_cash_hkd这个真实现金余额还剩多少——持仓市值会跟着
+    真实行情涨跌波动，哪怕现金已经花超了、余额已经是负数，只要"持仓市值
+    暂时低于100k"，这个检查就会继续放行新的买入，实测虚拟现金被这样
+    一路买成了-2.6万，账户彻底失真。现在同时看两个上限，取更紧的那个：
+    一是不能超过100k的名义总预算，二是不能超过账上真实还有的现金——
+    后者是这次真正缺的那道闸，没有它，"名义预算没超"不等于"真的有钱付"。
     """
     price_map = {(c["symbol"], c["market"]): c["price"] for c in candidates}
     usd_hkd, cny_hkd = _fx_rates()
 
-    remaining = _VIRTUAL_BUDGET_HKD - holdings_value_hkd
+    remaining = min(_VIRTUAL_BUDGET_HKD - holdings_value_hkd, virtual_cash_hkd)
     kept, dropped = [], []
     for s in signals:
         if s.get("action") != "买入":
@@ -541,8 +551,12 @@ def _run_cycle_locked(email: str) -> dict:
     tradeable_signals = [s for s in signals if s not in off_market_signals]
 
     # 硬性预算拦截——不能只信AI自己说的"我会控制在预算内"，必须代码层面
-    # 真的核实过再放行，见_apply_budget_limit的docstring。
-    kept_signals, dropped_signals = _apply_budget_limit(tradeable_signals, candidates, holdings_value_hkd)
+    # 真的核实过再放行，见_apply_budget_limit的docstring（现在同时看真实
+    # 现金余额，不能只看"持仓市值有没有超过100k"）。
+    current_cash = tracker.get_sim_virtual_cash(email)
+    if current_cash is None:
+        current_cash = _VIRTUAL_BUDGET_HKD
+    kept_signals, dropped_signals = _apply_budget_limit(tradeable_signals, candidates, holdings_value_hkd, current_cash)
     if dropped_signals:
         _dropped_text = "、".join(f"{s['name']}（{s['symbol']}）{s['shares']:g}股" for s in dropped_signals)
         reasoning_text += f"\n\n（系统提示：以下买入超出十万港币虚拟预算，已被拦截未执行：{_dropped_text}）"
