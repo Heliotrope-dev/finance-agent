@@ -27,7 +27,20 @@ def get_secret(key: str) -> str:
         return os.environ.get(key, "")
 
 
+@st.cache_resource(show_spinner=False)
 def _client() -> OpenAI:
+    """2026-09-02修复聊天卡顿：这里之前每次调用都new一个OpenAI(...)，而
+    OpenAI客户端底层是httpx.Client，new一次就意味着一次全新的TCP+TLS
+    握手（这个项目连的是百炼cn-beijing这个跨区端点，握手本身就有实打实
+    的网络延迟）。analysis.py/advisor.py同样的写法问题不大——那两处是
+    用户点一下按钮才触发一次的单轮分析，一次性的握手开销不明显；这里
+    是多轮连续对话，一个会话里发10条消息就是10次重新握手，每条消息都要
+    白白多等一次连接建立，这才是用户反馈"聊天卡"的真正原因，不是模型
+    生成慢。用st.cache_resource把这个客户端缓存成整个app共享的单例，
+    底层连接池能被keep-alive复用，同一个会话后续消息不用再重新握手。
+    OpenAI/httpx客户端本身是线程安全、可并发复用的，缓存成单例没有
+    每次话请求状态互相污染的风险。
+    """
     key = get_secret("QWEN_API_KEY")
     if not key:
         raise RuntimeError("未配置 QWEN_API_KEY。")

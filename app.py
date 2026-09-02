@@ -2019,11 +2019,17 @@ def _render_ai_assistant():
             with bubble_box:
                 st.markdown(_chat_bubble("user", prompt), unsafe_allow_html=True)
                 placeholder = st.empty()
-                # 2026-08-30新增：先占位显示"正在想"的三点动画，再开始真正的
-                # 请求——stream_reply现在会先做一次不流式的工具调用探测
-                # （见assistant.py），实测这一步单独就要4-10秒，这段时间内
-                # 原来占位符是空的，看起来跟卡死一样。这里让用户在等待的
-                # 第一时间就看到"AI收到了、正在处理"，不是真的加速请求本身。
+                # 2026-08-30新增：先占位显示"正在想"的三点动画，让用户在等
+                # 首个字符流出来之前就看到"AI收到了、正在处理"，不是真的
+                # 加速请求本身。（这里原来的注释说stream_reply会先做一次
+                # 不流式的工具调用探测、单独要4-10秒——那是2026-08-30重写
+                # 之前的旧实现，写重写说明时忘了同步删这段注释，2026-09-02
+                # 排查聊天卡顿时读到assistant.py现在的代码才发现对不上，
+                # 一并订正。现在的stream_reply从第一次请求就是流式+带
+                # tools，不需要工具时首字延迟就是模型本身的生成延迟，见
+                # assistant.py stream_reply的文档字符串。真正拖慢多轮
+                # 聊天的是_client()每次都重新握手连接，已在assistant.py
+                # 同一天的改动里修掉。）
                 placeholder.markdown(_typing_indicator_html(), unsafe_allow_html=True)
                 reply = ""
                 try:
