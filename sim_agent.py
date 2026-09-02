@@ -603,7 +603,18 @@ def _run_cycle_locked(email: str) -> dict:
     )
 
     try:
-        resp = advisor._client().chat.completions.create(
+        # max_retries=0+timeout=60：2026-09-02排查advisor.py那边"千问对
+        # 特定内容会挂住不返回"的真实故障时顺带查到：这里的调用之前也没设
+        # 超时，只靠openai SDK的默认超时(600秒)兜底——这个agent是每15分钟
+        # 触发一次的决策循环，一次AI调用扛到10分钟才失败，会让接下来至少
+        # 一次cron触发因为抢不到_LOCK_PATH文件锁而被跳过（"上一轮还没跑
+        # 完"），跟这个15分钟节奏完全不匹配。同样踩过的坑：只加per-call的
+        # timeout不够，advisor._client()构造时配了max_retries=2，SDK自己
+        # 会在这个timeout失败后原样重试2次，实际耗时会变成timeout的三倍，
+        # 这里用.with_options(max_retries=0)一并关掉——失败了就走下面except
+        # 分支老实记一条"AI调用失败"，等下一次cron自然触发，好过占着锁
+        # 等参数×3倍的时间。
+        resp = advisor._client().with_options(max_retries=0, timeout=60).chat.completions.create(
             model=advisor._MODEL,
             messages=[
                 {"role": "system", "content": _AGENT_SYSTEM},

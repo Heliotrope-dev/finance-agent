@@ -44,7 +44,17 @@ def _client() -> OpenAI:
     key = get_secret("QWEN_API_KEY")
     if not key:
         raise RuntimeError("未配置 QWEN_API_KEY。")
-    return OpenAI(api_key=key, base_url=_QWEN_BASE, max_retries=2)
+    # timeout=60/max_retries=0：2026-09-02排查advisor.py那边"千问对特定
+    # 持仓票的内容会挂住不返回，一等能等120秒以上"的真实故障时顺带查到，
+    # 这个客户端之前也没配超时，只靠SDK默认的600秒兜底——这里是用户直接
+    # 盯着看的聊天悬浮窗，真遇到同类卡住，用户会看着"思考中"转60秒都不
+    # 知道还是不是坏了，比10分钟好但也不该无限等。60秒对这里max_tokens=
+    # 1200的聊天场景（比advisor.py那边8000 tokens的深度判断轻得多）留了
+    # 足够余量。max_retries原来是2——同一处真实踩坑：只加timeout不关掉
+    # SDK自己的重试，一次60秒的挂起会被原样重试2次，用户实际要等接近
+    # 180秒才会看到"回答失败"，这里一并关掉，卡住了就快速失败，好过让
+    # 用户对着"思考中"干等三倍时间。
+    return OpenAI(api_key=key, base_url=_QWEN_BASE, max_retries=0, timeout=60)
 
 
 _SYSTEM_PROMPT_TEMPLATE = """你是"投研站"网站里的AI助手，一个小圆形按钮，用户点开

@@ -880,7 +880,30 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
     data_context = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary)
 
     def _call_stance(client, model, system_prompt):
-        resp = client.chat.completions.create(
+        # 真实故障(2026-09-02)：持仓页"英伟达/阿里巴巴/美光科技/亚马逊/
+        # SpaceX/台积电"这6支自选长期"AI持仓判断"栏一直空着，复盘查到
+        # 是这里——千问的BULL论证对着这几支的数据context（同样的数据
+        # 直接单独调千问也复现过）会挂住不返回，既不报错也不超时，实测
+        # 单独调用等了120秒以上都没有任何响应。
+        #
+        # 第一次修复只加了per-call的timeout=45（不改max_retries），部署后
+        # 实测还是在60.1秒失败——排查发现_client()/_zhipu_client()在客户端
+        # 构造时就配了max_retries=2/1（见那两个函数），openai SDK对超时
+        # 这类瞬时错误默认会自动重试，per-call的timeout是"每次尝试"的超时，
+        # 不是"这次调用总共"的超时，一次挂起失败会被原样重试。
+        #
+        # 第二次修复加了.with_options(max_retries=0)关掉SDK自己的重试，
+        # 部署后实测NVDA还是卡在60.2秒失败——单独把这个timeout降到10秒
+        # 测过，确认能在10.8秒正常收到APITimeoutError（机制本身是work的），
+        # 说明问题不在"超时不生效"，而在"预算不够用"：45秒的主力供应商
+        # 超时+失败后再等一次真实的兜底供应商调用（实测8秒左右，但网络
+        # 状况不稳定时可能更长），两段加起来经常逼近甚至超过下面_fetch_
+        # stance外层60秒的deadline，导致兜底调用还没跑完，外层就已经放弃
+        # 等待了——不是没兜底，是留给兜底的时间太紧张。这里把主力超时收到
+        # 30秒（配合下面外层deadline从60秒放宽到90秒），给兜底调用留出
+        # 足够从容的时间窗口，不再是同一个数字既当"主力超时"又顶着"整体
+        # deadline"用。
+        resp = client.with_options(max_retries=0, timeout=30).chat.completions.create(
             model=model,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": data_context}],
             max_tokens=4000,  # 论据比最终判断的六段结构化输出短得多，但同样的空内容坑保底调高一点
@@ -893,50 +916,80 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
         return text
 
     def _fetch_stance(spec):
-        system_prompt, client, model, is_primary = spec
-        # 空头这边配置了智谱但调用失败（没配key/网络问题/超时）时，回落到
-        # 千问——保证辩论功能本身不会因为一家供应商的问题整个报废，退化成
-        # "两边都用千问"而不是直接跳过这支股票的判断。is_primary标记这一条
-        # 本来就是主线供应商，失败了没有更下游的兜底可回落，直接抛出。
+        system_prompt, client, model, fallback_client, fallback_model = spec
+        # 一方失败（没配key/网络问题/超时/像上面那样直接卡住不返回）时回落到
+        # 另一方——保证辩论功能不会因为单一供应商这次抽风就整个报废。原来
+        # 只有空头(智谱)有这层回落（回落到千问），多头(千问)失败直接放弃，
+        # 是2026-09-01写辩论功能时的疏漏：默认"千问是主线供应商，理论上更
+        # 稳"，但2026-09-02实测发现千问对特定内容（英伟达/阿里巴巴等几支
+        # 票的数据context）会真的卡死不返回，这时候多头没有更下游的兜底，
+        # 整次辩论直接失败，这几支持仓因此永远判断不出来。现在两边对称：
+        # 谁失败了都回落到另一家真正独立的供应商重试一次，不再区分"主线/
+        # 备线"，两边天生就是互为兜底的关系。
         if client is None:
-            if is_primary:
-                raise RuntimeError("主线供应商未配置")
-            return _call_stance(_client(), _MODEL, system_prompt)
+            return _call_stance(fallback_client, fallback_model, system_prompt)
         try:
             return _call_stance(client, model, system_prompt)
         except Exception:
-            if is_primary:
+            if fallback_client is None:
                 raise
-            return _call_stance(_client(), _MODEL, system_prompt)
+            return _call_stance(fallback_client, fallback_model, system_prompt)
 
-    # 多头：阿里千问；空头：智谱——两家真正独立的供应商各自只看原始数据
-    # 单独出论证，互相看不到对方，不是同一个模型左右手互搏。
+    # 多头：阿里千问，失败回落智谱；空头：智谱，失败回落千问——两家真正独立
+    # 的供应商各自只看原始数据单独出论证，互相看不到对方，不是同一个模型
+    # 左右手互搏；哪一方这次掉链子，都能被另一家接住，不会白白牺牲一整次
+    # 辩论判断。
+    # timeout=90（见_call_stance里的注释：主力超时30秒+兜底调用需要的时间，
+    # 90秒留了足够余量，不再跟主力超时的秒数强绑在一起）。
     stance_results = _run_concurrent_with_deadline(
-        [(_BULL_SYSTEM, _client(), _MODEL, True), (_BEAR_SYSTEM, _zhipu_client(), _ZHIPU_MODEL, False)],
-        _fetch_stance, timeout=60, max_workers=2,
+        [
+            (_BULL_SYSTEM, _client(), _MODEL, _zhipu_client(), _ZHIPU_MODEL),
+            (_BEAR_SYSTEM, _zhipu_client(), _ZHIPU_MODEL, _client(), _MODEL),
+        ],
+        _fetch_stance, timeout=90, max_workers=2,
     )
     if 0 not in stance_results or 1 not in stance_results:
-        raise RuntimeError("多空论证生成失败（可能是网络/AI调用超时），跳过这次辩论判断。")
+        raise RuntimeError("多空论证生成失败（可能是网络/AI调用超时，双方供应商都没能在预算内给出结果），跳过这次辩论判断。")
     bull_text, bear_text = stance_results[0], stance_results[1]
 
     final_user_content = f"{data_context}\n\n多头论证：\n{bull_text}\n\n空头论证：\n{bear_text}"
     system_prompt = _JUDGE_SYSTEM + (_HOLDING_ADDENDUM if holding else "") + _DEBATE_JUDGE_ADDENDUM
 
-    # 裁判用_client()/_MODEL(千问)——2026-08-26曾经短暂换成DeepSeek第三方
-    # （理由见上面模块级注释），但团队决定两个项目都彻底不用DeepSeek，改回来。
-    # 裁判跟多头选手同一供应商这个理论上的偏袒问题目前没有更好的解法（智谱
-    # 已经是空头那边独立供应商了，裁判用智谱只是把偏袒方向倒过来，不是真的
-    # 消除），暂时接受这个局限。
-    resp = _client().chat.completions.create(
-        model=_MODEL,
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": final_user_content}],
-        max_tokens=8000,
-        temperature=0.3,
-        stream=False,
-    )
-    text = resp.choices[0].message.content or ""
-    if not text.strip():
-        raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
+    # 裁判优先用_client()/_MODEL(千问)——2026-08-26曾经短暂换成DeepSeek
+    # 第三方（理由见上面模块级注释），但团队决定两个项目都彻底不用
+    # DeepSeek，改回来。裁判跟多头选手同一供应商这个理论上的偏袒问题目前
+    # 没有更好的解法（智谱已经是空头那边独立供应商了，裁判用智谱只是把
+    # 偏袒方向倒过来，不是真的消除），暂时接受这个局限。
+    #
+    # 真实故障(2026-09-02)：加了上面bull/bear两边的兜底+timeout之后，
+    # 复测发现BABA这支票的论证阶段能正常跑完，但到了裁判这一步千问
+    # 还是稳定在90秒超时失败（实测133.8秒才抛出APITimeoutError，含论证
+    # 阶段耗时）——说明千问对某些内容的问题不只出现在论证阶段，裁判这步
+    # 同样会踩到。裁判之前完全没有备用供应商，一超时这支票直接判断失败，
+    # 前面两次AI调用（论证阶段）全部白跑。这里补上跟论证阶段同样的兜底
+    # 思路：千问失败就换智谱重新裁决一次，不再是"没有更下游的兜底"，
+    # 跟上面_fetch_stance的设计原则一致——即使增加了理论上的裁判/空头
+    # 同供应商偏袒，也好过这支票直接判断失败、前面的论证白做。
+    def _call_judge(client, model):
+        resp = client.with_options(max_retries=0, timeout=90).chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": final_user_content}],
+            max_tokens=8000,
+            temperature=0.3,
+            stream=False,
+        )
+        text = resp.choices[0].message.content or ""
+        if not text.strip():
+            raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
+        return text
+
+    try:
+        text = _call_judge(_client(), _MODEL)
+    except Exception:
+        zhipu = _zhipu_client()
+        if zhipu is None:
+            raise
+        text = _call_judge(zhipu, _ZHIPU_MODEL)
     action = _extract_action(text)
     return {
         "action": action, "score": _extract_score(text), "fundamental_verdict": text,
@@ -949,7 +1002,18 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
                  valuation_summary: str = "", holding: bool = False) -> dict:
     user_content = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary)
     system_prompt = _JUDGE_SYSTEM + _HOLDING_ADDENDUM if holding else _JUDGE_SYSTEM
-    resp = _client().chat.completions.create(
+    # max_retries=0+timeout=90：真实故障(2026-09-02)排查judge_stock_with_
+    # debate那边的卡死问题时顺带发现——这里的.create()调用同样从来没设过
+    # 超时，是同一类风险（见_call_stance/judge_stock_with_debate最终裁判
+    # 那两处同样的注释，包括"只加timeout不关client级别的max_retries=2会
+    # 被SDK自己重试2次抵消"这个真实踩坑）。这个函数被screen候选池初筛
+    # （20支并发）和watchlist观察池判断（20支并发）两条批量路径复用，
+    # 一旦某支票也踩中类似NVDA那种"AI调用挂住不返回"的情况，会占着一个
+    # worker线程直到批次整体的deadline(400/900秒)才被放弃等待，而且线程
+    # 本身还是泄漏的，拖累同一批次里排在后面的其它候选股。90秒是这个
+    # 函数在正常情况下（8000 max_tokens）观察到的合理上限的宽松倍数，
+    # 不是精确测出来的极限值。
+    resp = _client().with_options(max_retries=0, timeout=90).chat.completions.create(
         model=_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -1265,9 +1329,10 @@ def _backfill_due_advice() -> int:
 
 def advise_positions() -> list[dict]:
     """持仓判断——跟screen候选不同，这是"要不要卖"的仓位管理判断
-    (holding=True，见judge_stock的_HOLDING_ADDENDUM)。结果只落库给网站
-    持仓页面用，不进每日微信简报正文——用户明确说过不用在微信里报持仓
-    这块，微信简报的定位是"发现新机会"，持仓走网站页面自己看。这里覆盖
+    (holding=True，见judge_stock的_HOLDING_ADDENDUM)。结果落库给网站
+    持仓页面用，2026-09-02用户改主意后也同步进12:30那条微信简报（见
+    run_positions_advice的print部分）——早先"不进微信"是用户当时明确
+    要求的，这次是新的明确要求，覆盖过去那条。这里覆盖
     positions表里的全部行，不分真实持仓(shares>0)还是纯关注/自选
     (shares<=0)——用户明确要求"每个自选股每天都同步分析一下"，自选本来
     就该跟持仓享受同一份判断。
@@ -1647,7 +1712,18 @@ def run_positions_advice():
             e["technical_signal"], e["action"], e["market"], e["name"], source="position",
             score=e.get("score"),
         )
-    print(f"（持仓判断：{len(position_results)} 只已更新，结果在网站持仓页面查看，不进微信简报）\n")
+    # 2026-09-02用户改主意，明确要求这份12:30的持仓/自选判断也要同步进
+    # 微信（之前那句"不进微信简报"是更早一次明确要求，这次是新的明确
+    # 要求覆盖过去）——之前这里只打一行汇总数字，微信那条agentTurn cron
+    # 没有真实内容可读。改成跟17:30"投研顾问"同一个套路，逐条打印
+    # 完整判断（复用_fmt_entry，格式跟另一份简报保持一致），下游cron
+    # 直接读这段文本组织成微信消息。
+    print(f"==================== 持仓/自选AI判断 共{len(position_results)}支 ====================")
+    if position_results:
+        for e in position_results:
+            print(_fmt_entry(e))
+    else:
+        print("（本次持仓/自选判断全部失败，跳过。）\n")
 
 
 def main():
