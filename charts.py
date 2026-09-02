@@ -567,7 +567,7 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
 
     last = df.iloc[-1]
     fig.add_annotation(
-        x=last["run_at"], y=last["assets_hkd"], text=f"HK${last['assets_hkd']:,.0f}",
+        x=last["run_at"], y=last["assets_hkd"], text=f"${last['assets_hkd']:,.0f}",
         showarrow=True, arrowhead=0, arrowcolor=line_color, ax=0, ay=-28,
         font=dict(size=12, color=line_color, weight="bold"),
         bgcolor="rgba(255,255,255,0.92)", bordercolor=line_color, borderwidth=1, borderpad=3,
@@ -586,7 +586,7 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
         height=300,
         margin=dict(l=10, r=10, t=36, b=10),
         yaxis=dict(
-            title="总资产（港币）", range=[y_min - y_pad, y_max + y_pad],
+            title="总资产（美元）", range=[y_min - y_pad, y_max + y_pad],
             gridcolor="rgba(0,0,0,0.06)", zeroline=False,
         ),
         xaxis=dict(
