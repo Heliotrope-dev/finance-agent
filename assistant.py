@@ -181,7 +181,9 @@ def build_context(email: str | None) -> str:
         pass
 
     try:
-        board = tracker.get_latest_leaderboard(limit=5, source="watchlist")
+        # market_quota跟app.py首页那份排行榜保持一致，不然AI聊天里说的
+        # 榜单跟用户在网页上看到的对不上。
+        board = tracker.get_latest_leaderboard(limit=5, source="watchlist", market_quota={"US": 3, "HK": 2})
         rows = board.get("leaderboard") or []
         if rows:
             # 只有分数+动作答不出"为什么排第一"这类问题——之前AI被问到这个

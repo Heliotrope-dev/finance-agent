@@ -1325,7 +1325,34 @@ def get_latest_advice(limit_per_market: int = 3) -> dict:
     return result
 
 
-def get_latest_leaderboard(limit: int = 10, source: str = "screen") -> dict:
+def _apply_market_quota(rows: list[dict], limit: int, quota: dict[str, int]) -> list[dict]:
+    """2026-09-02新增：rows已经按score降序排好——quota给每个市场留的最多
+    席位数，按score从高到低分别往对应市场的桶里放，桶满了就不再收这个
+    市场的（多出来的进others，只有配额没收满时才拿来补位）。用户明确
+    反馈过"推荐股排行榜五个全是港股"，这天恰好港股候选普遍打分更高，
+    纯score排序会把美股全挤出前5——不是bug，是分数确实那样，但用户要的
+    是"港美都有、美股占大头"这个固定诉求，不是"分数说了算"，所以需要
+    显式配额而不是像advisor.py._leaderboard那样只设一个"每个市场最多
+    几席"的上限（那种只保证不被单一市场包圆，不保证哪个市场占大头）。
+    """
+    buckets: dict[str, list[dict]] = {m: [] for m in quota}
+    others: list[dict] = []
+    for r in rows:
+        m = r.get("market")
+        if m in buckets and len(buckets[m]) < quota[m]:
+            buckets[m].append(r)
+        else:
+            others.append(r)
+    result = [r for m in quota for r in buckets[m]]
+    for r in others:
+        if len(result) >= limit:
+            break
+        result.append(r)
+    result.sort(key=lambda r: r["score"], reverse=True)
+    return result[:limit]
+
+
+def get_latest_leaderboard(limit: int = 10, source: str = "screen", market_quota: dict[str, int] | None = None) -> dict:
     """2026-08-25新增：三个市场混排的综合得分排行榜，取代"每个市场固定
     前3"的老逻辑——用户明确要求"好的就上，不好不出现也没事"，不要求每个
     市场凑数量。取同一批（最近一次跑advisor.py那天）里score不为空的记录，
@@ -1348,6 +1375,13 @@ def get_latest_leaderboard(limit: int = 10, source: str = "screen") -> dict:
     截图发现"小米集团"同时出现在#1和#3）。改成先按symbol取当天最新一条
     （MAX(id)，id自增等价于按时间取最新），再排分数，跟get_position_advice
     "每个symbol取最近一条"是同一个模式。
+
+    market_quota（2026-09-02新增，默认None不生效）：{市场: 最多几席}——用户
+    明确反馈"首页推荐股排行榜五个全是港股"，要求"港美都有、美股占大头"，
+    这是一个固定诉求，不是"分数排出来是什么就是什么"。传了这个参数就不再
+    是单纯score DESC LIMIT，而是先按_apply_market_quota分配。app.py/
+    assistant.py两处首页排行榜的source="watchlist"调用都传这个，source=
+    "screen"（私人微信简报的综合得分Top10）不传，维持"好的自然上榜"不变。
     """
     init_db()
     with closing(_conn()) as c:
@@ -1358,6 +1392,11 @@ def get_latest_leaderboard(limit: int = 10, source: str = "screen") -> dict:
         if latest is None:
             return {"run_date": None, "leaderboard": []}
         run_date = latest["created_at"][:10]
+        # market_quota要在全量候选里挑，不能先用SQL LIMIT截断到limit条
+        # （截断早了美股候选可能压根没进这批行，配额也补不回来）。这批
+        # 候选本来就是一天的观察池（约120支封顶），全取出来在Python里
+        # 排序/分配的开销可以忽略。
+        sql_limit = 100000 if market_quota else limit
         rows = c.execute(
             """
             SELECT * FROM advice WHERE source = ? AND created_at LIKE ? AND score IS NOT NULL
@@ -1367,9 +1406,12 @@ def get_latest_leaderboard(limit: int = 10, source: str = "screen") -> dict:
             )
             ORDER BY score DESC LIMIT ?
             """,
-            (source, f"{run_date}%", source, f"{run_date}%", limit),
+            (source, f"{run_date}%", source, f"{run_date}%", sql_limit),
         ).fetchall()
-    return {"run_date": run_date, "leaderboard": [dict(r) for r in rows]}
+    board = [dict(r) for r in rows]
+    if market_quota:
+        board = _apply_market_quota(board, limit, market_quota)
+    return {"run_date": run_date, "leaderboard": board}
 
 
 def get_watchlist_verdict_for_symbol(symbol: str, source: str = "watchlist") -> dict:

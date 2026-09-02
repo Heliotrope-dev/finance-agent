@@ -1818,7 +1818,10 @@ def _render_advice_section():
         # 要求首页这块要能天天复现、事后可核对，不是每天看着完全不一样的
         # 候选。原来的screen_candidates()仍然在跑，只是不再喂首页，继续
         # 只进私人微信简报。
-        data = get_latest_leaderboard(limit=5, source="watchlist")
+        # market_quota={"US":3,"HK":2}：2026-09-02用户明确反馈"五个全是
+        # 港股"，要求"港美都有、美股占大头"——见tracker.get_latest_
+        # leaderboard的market_quota参数说明。
+        data = get_latest_leaderboard(limit=5, source="watchlist", market_quota={"US": 3, "HK": 2})
     except Exception:
         st.caption("候选数据暂时读取失败。")
         return

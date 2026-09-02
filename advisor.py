@@ -1701,9 +1701,15 @@ def main():
             e["technical_signal"], e["action"], e["market"], e["name"], source="watchlist",
             score=e.get("score"),
         )
-    # market_cap=3——用户反馈过"首页推荐股排行榜怎么全是港股"，见_leaderboard
-    # 的market_cap参数说明，这份名单要覆盖多个市场，不能被单一市场包圆。
-    watchlist_board = _leaderboard(watchlist_judged, _WATCHLIST_LEADERBOARD_SIZE, market_cap=3)
+    # 2026-09-02从market_cap=3升级成明确配额——用户反馈过两次"首页推荐股
+    # 排行榜怎么全是港股"，market_cap只保证"不被单一市场包圆"，不保证
+    # "美股占大头"这个用户明确提的固定诉求；改用tracker._apply_market_quota
+    # 跟app.py首页/assistant.py聊天窗那两处用的同一套配额逻辑，微信简报
+    # 里这份榜单才能跟网页上看到的一致。
+    watchlist_board = tracker._apply_market_quota(
+        [j for j in watchlist_judged if j.get("score") is not None],
+        _WATCHLIST_LEADERBOARD_SIZE, {"US": 3, "HK": 2},
+    )
     print(f"（热门观察池：{len(watchlist_judged)} 支已更新，首页推荐股排行榜取前{len(watchlist_board)}）\n")
     # 用户明确要求这份排行榜同步到微信（OpenClaw读取本脚本stdout转发的那条
     # 简报）——跟下面screen_candidates那份"综合得分排行榜"用同样的章节格式/
