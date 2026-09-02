@@ -76,6 +76,26 @@ def _a_share_prefix(symbol: str) -> str:
     return "SH"
 
 
+_MARKET_PREFIXES = ("HK.", "US.", "SH.", "SZ.")
+
+
+def _strip_market_prefix(symbol: str) -> str:
+    """去掉AI信号里可能带的市场前缀，返回纯代码。
+
+    2026-09-02修真实bug：之前只有_to_futu_code内部临时去前缀来拼下单代码，
+    去完之后这个"干净"的symbol没有回写给调用方——_execute_one记录到
+    simulated_orders表的还是signal里原始未处理的symbol。结果生产库里
+    同一支票（小米集团-W/量化派）的下单历史时而是"01810"时而是"HK.01810"，
+    两种格式混着出现，因为AI每次生成信号时symbol字段里带不带前缀不固定。
+    这个函数抽出来给_to_futu_code和_execute_one共用同一份"干净"symbol，
+    保证下单代码和落库记录用的是同一个值。
+    """
+    for prefix in _MARKET_PREFIXES:
+        if symbol.upper().startswith(prefix):
+            return symbol[len(prefix):]
+    return symbol
+
+
 def _to_futu_code(symbol: str, market: str) -> str:
     # 真实故障(2026-09-01)：AI偶尔会在信号里把市场前缀也写进symbol字段本身
     # (比如给出"US.META"而不是"META")，advisor._parse_trade_signals不会
@@ -83,10 +103,7 @@ def _to_futu_code(symbol: str, market: str) -> str:
     # 不存在的代码，下单直接报"美股找不到"失败。这里防御性地先把symbol
     # 开头已经带着的市场前缀去掉，不管AI给没给前缀，最终拼出来的都是
     # 正确的单一前缀代码。
-    for prefix in ("HK.", "US.", "SH.", "SZ."):
-        if symbol.upper().startswith(prefix):
-            symbol = symbol[len(prefix):]
-            break
+    symbol = _strip_market_prefix(symbol)
     if market == "HK":
         return f"HK.{symbol}"
     if market == "US":
@@ -126,7 +143,9 @@ def _get_lot_size(qot, code: str) -> int:
 
 
 def _execute_one(qot, trd, email: str, market: str, acc_id: str, signal: dict) -> dict:
-    symbol = signal["symbol"]
+    # 先在这里统一去掉symbol可能带的市场前缀，后面下单代码(code)和落库记录
+    # 用的都是同一个干净symbol，不会再出现同一支票记录时而带前缀时而不带的情况。
+    symbol = _strip_market_prefix(signal["symbol"])
     name = signal.get("name", "")
     action = signal["action"]
     shares_signal = signal["shares"]
