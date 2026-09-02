@@ -2440,9 +2440,16 @@ def _render_index_detail(name: str, code: str, market: str):
         _render_overall_summary(st.session_state[idx_summary_key])
 
 
-@st.fragment(run_every=3)
+@st.fragment(run_every=10)
 def _render_positions_today_pnl(positions: list):
-    """今日收益，要求实时同步——跟_render_position_rows一样每3秒刷新。
+    """今日收益，要求实时同步——跟_render_position_rows一样每10秒刷新
+    （2026-09-02从3秒调宽到10秒：批量化之后单次调用变1次了，但两个
+    fragment(这个+_render_position_rows)各自每3秒都打一次批量请求，
+    加起来每30秒仍要吃掉20次调用额度，占富途"每30秒最多60次"限流的
+    1/3，叠加sim_agent/sim_snapshot那两个后台cron或者别的手动查询，
+    还是有概率撞限流导致页面卡住。10秒是参考AI模拟炒股那个页面
+    （建HK+US两个市场连接更重，特意选了15秒）定的，肉眼感知不到明显
+    延迟，调用量降到6次/30秒，给别的并发查询留足余量）。
 
     2026-09-01真实故障纠偏：这里原来靠"get_stock_realtime本身@st.cache_data
     (ttl=3)，同一只股票3秒内被两个fragment各查一次第二次命中缓存"这个隐性
@@ -2547,8 +2554,9 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
     任何自动刷新机制，只有用户手动触发rerun（切tab/点按钮）才会重新查询
     Futu账户，之前看到的数字不是错的（跟当时的实时行情核对过是对的），
     只是页面不会自己动。这里用run_every=15秒刷新——比持仓页真实持仓那个
-    3秒刷新（_render_position_rows）更保守，因为这里每次刷新要建HK+US
-    两个市场的Futu交易连接，比单纯查行情更重，没必要跟那边一样逐秒刷新。
+    10秒刷新（_render_position_rows，2026-09-02从3秒调宽到10秒，见那边
+    注释）还要更保守一点，因为这里每次刷新要建HK+US两个市场的Futu交易
+    连接，比单纯查行情更重。
     历史决策记录/下单记录/图表不放在这个fragment里——那些只有AI每15分钟
     跑一次才会变，没必要跟着这里一起抖。
     """
@@ -2906,9 +2914,12 @@ def _render_portfolio_advice(email: str, positions: list):
             st.rerun()
 
 
-@st.fragment(run_every=3)
+@st.fragment(run_every=10)
 def _render_position_rows(position_items: list, _email: str):
-    """持仓列表本体单独做成 fragment，价格/涨跌幅每3秒自己刷新，效仿长桥的
+    """持仓列表本体单独做成 fragment，价格/涨跌幅每10秒自己刷新（2026-09-02
+    从3秒调宽到10秒，理由见_render_positions_today_pnl同一处注释——批量化
+    之后单次调用变1次了，但3秒刷新叠加另一个同页fragment，还是有撞富途
+    限流的空间，10秒能大幅降低这个概率，肉眼感知不到明显延迟），效仿长桥的
     紧凑列表样式：名称代码 + 迷你走势图 + 现价/成交额 + 涨跌幅色块 + 删除键。
     数字真变了背景闪一下（复用详情页那套red/green flash动画）。每行用
     st.container(border=True)包起来，整行都是一个卡片。
@@ -2924,7 +2935,7 @@ def _render_position_rows(position_items: list, _email: str):
         st.caption("这个分类下暂时没有持仓。")
         return
 
-    st.caption("每 3 秒自动刷新")
+    st.caption("每 10 秒自动刷新")
 
     st.markdown(
         _PRICE_FLASH_CSS
