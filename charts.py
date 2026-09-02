@@ -479,8 +479,11 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
 
     颜色跟着这个项目"红涨绿跌"的既定约定动态选——不能像K线图那样固定用UP_COLOR
     画线，净值曲线本身有涨有跌，固定红色在净值下跌时会跟"红=涨"这个全局约定
-    自相矛盾、误导用户。baseline画一条起始十万港币的虚线参考——用户一眼就能
-    看出"现在比起点高还是低"，不用自己心算差值。
+    自相矛盾、误导用户。baseline画一条起始本金的虚线参考——用户一眼就能
+    看出"现在比起点高还是低"，不用自己心算差值。2026-09-02起baseline/points
+    传进来的都已经是美元口径的数字（调用方app.py._render_ai_sim_dashboard
+    统一折算过），这个函数本身不做任何币种换算，只是照单画图、标签固定用
+    "$"前缀。
 
     granularity（"day"/"week"/"month"）控制X轴刻度密度——"天"视图数据点是
     5分钟一个，刻度按5分钟画正合适；"周"/"月"视图跨度拉长后再按5分钟画
@@ -494,7 +497,7 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
 
     fig.add_hline(
         y=baseline, line=dict(color=NEUTRAL_COLOR, width=1, dash="dot"),
-        annotation_text=f"起始 HK${baseline:,.0f}", annotation_position="top left",
+        annotation_text=f"起始 ${baseline:,.0f}", annotation_position="top left",
         annotation_font=dict(size=10, color=NEUTRAL_COLOR),
     )
 
@@ -523,7 +526,7 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
             line=dict(color=line_color, width=2.5, shape="spline", smoothing=0.35),
             marker=dict(size=5, color=line_color, line=dict(color="#fff", width=1)),
             fill="tozeroy", fillcolor=_hex_to_rgba(line_color, 0.08),
-            hovertemplate="%{x|%m-%d %H:%M}<br>HK$%{y:,.0f}<extra></extra>",
+            hovertemplate="%{x|%m-%d %H:%M}<br>$%{y:,.0f}<extra></extra>",
         )
     )
 

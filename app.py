@@ -2581,8 +2581,20 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
 
     # 虚拟现金和持仓市值分开展示，不只给一个合并数字——用户明确要求
     # 能看清"钱花出去多少变成了股票、还剩多少现金"，不是只有一个净值
-    # 黑箱数字。总额(=两者之和)标注清楚"十万港币起始"这个基准，这个
-    # 基准数字本身不会变，变的是净值相对它涨跌了多少。
+    # 黑箱数字。总额(=两者之和)标注清楚起始基准，这个基准数字本身不会变，
+    # 变的是净值相对它涨跌了多少——2026-09-02用户明确要求"起始值设成
+    # 一万美金重新来过"，标签直接读sim_agent._VIRTUAL_BUDGET_HKD，不再
+    # 写死"十万港币"这个已经过期的数字，以后基准数字再变也不用记得回来
+    # 改这里的文案。
+    #
+    # 2026-09-02用户进一步明确要求"所有东西都以美元计价不要用港币了"——
+    # 内部记账（tracker/sim_trader/sim_agent那一整套）继续用港币做统一
+    # 结算币种不动（港股本来就是港币计价，改成内部按美元记账要连带改
+    # 数据库schema和大量已经跑通的历史数据，风险跟收益不成比例）；这里
+    # 只改显示层，读到的还是港币金额，展示前统一除以USD_HKD_RATE换算成
+    # 美元再打印"$"前缀，用户在页面上看到的从头到尾都是美元，感知不到
+    # 背后其实是港币记账。
+    _usd_rate = sim_trader.USD_HKD_RATE
     holdings_value = snapshot["holdings_value_hkd"]
     virtual_cash = get_sim_virtual_cash(email)
     if virtual_cash is None:
@@ -2591,16 +2603,19 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("虚拟现金（剩余可用）", f"HK${virtual_cash:,.0f}")
+        st.metric("虚拟现金（剩余可用）", f"${virtual_cash / _usd_rate:,.0f}")
     with col2:
-        st.metric("持仓市值", f"HK${holdings_value:,.0f}")
+        st.metric("持仓市值", f"${holdings_value / _usd_rate:,.0f}")
     with col3:
-        st.metric("总额（起始十万港币）", f"HK${net_value:,.0f}")
+        st.metric("总额（起始$10,000）", f"${net_value / _usd_rate:,.0f}")
 
     if equity_points:
+        # equity_points里的assets_hkd已经是折算成美元的数字（见调用方
+        # _render_ai_sim_dashboard里的说明），这里net_value还是原始港币，
+        # 两边要换算成同一个币种才能相减，不然百分比会算错。
         first = min(equity_points, key=lambda p: p["run_at"])["assets_hkd"]
         if first:
-            change_pct = (net_value - first) / first * 100
+            change_pct = (net_value / _usd_rate - first) / first * 100
             st.metric("累计收益率（相对第一次记录）", f"{change_pct:+.2f}%")
     if snapshot["skipped_markets"]:
         st.caption(f"以下市场暂时没查到模拟账户：{'、'.join(snapshot['skipped_markets'])}")
@@ -2615,7 +2630,7 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
         block = pnl.get(key)
         with col:
             if block:
-                st.metric(label, f"HK${block['change']:+,.0f}", f"{block['pct']:+.2f}%")
+                st.metric(label, f"${block['change'] / _usd_rate:+,.0f}", f"{block['pct']:+.2f}%")
             else:
                 st.metric(label, "暂无数据")
 
@@ -2624,7 +2639,13 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
         st.markdown("**当前持仓**")
         for p in snapshot["positions"]:
             pl_color = UP_COLOR if (p["pl_val"] or 0) >= 0 else DOWN_COLOR
-            pl_text = f"{p['pl_val']:+,.0f} {p['currency']}" if p["pl_val"] is not None else "—"
+            # pl_val是持仓自己原始币种(HKD港股/USD美股)的浮盈亏，统一换成美元
+            # 展示——港股仓位除以汇率折成美元，美股仓位本来就是美元不用转。
+            if p["pl_val"] is not None:
+                pl_usd = p["pl_val"] if p["currency"] == "USD" else p["pl_val"] / _usd_rate
+                pl_text = f"${pl_usd:+,.2f}"
+            else:
+                pl_text = "—"
             st.markdown(
                 f"<div style='display:flex;justify-content:space-between;padding:4px 0'>"
                 f"<span>{_esc(p['name'])}（{_esc(p['code'])}）· {p['qty']:g}股</span>"
@@ -2643,9 +2664,10 @@ def _render_ai_sim_dashboard():
     保留，只是不在这个入口展示）。
 
     展示的是sim_agent.py那条每15分钟一次的自主决策链路（只交易港股/美股，
-    A股不参与，起始本金约十万港币——由用户自己在富途App里设置，这里没法
-    通过代码改），不是持仓页那个"跟着每天17:30组合分析走"的模拟盘（那个
-    继续在持仓页自己的开关那块，两条链路各自独立）。
+    A股不参与，起始本金1万美金，2026-09-02从十万港币改的——内部记账仍按
+    港币结算，页面展示层统一折成美元，见_render_ai_sim_live_snapshot里
+    _usd_rate那处说明），不是持仓页那个"跟着每天17:30组合分析走"的模拟盘
+    （那个继续在持仓页自己的开关那块，两条链路各自独立）。
 
     2026-09-01用户明确要求"其他用户都能看见，就是让他们看内置AI靠不靠谱
     的"——这不是per-user数据，是同一个固定账号(sim_agent.advisor._EMAIL)
@@ -2660,7 +2682,7 @@ def _render_ai_sim_dashboard():
 
     st.caption(
         "这是内置AI（千问）用虚拟资金自主管理的模拟盘——只交易港股/美股（A股不参与），"
-        "起始本金约十万港币，在开盘时段每15分钟自主决定要不要买卖，不需要你手动操作。"
+        "起始本金1万美金，在开盘时段每15分钟自主决定要不要买卖，不需要你手动操作。"
         "这里如实展示它的持仓、收益和完整交易记录，仅供观察AI决策能力，不构成投资建议。"
     )
 
@@ -2676,7 +2698,13 @@ def _render_ai_sim_dashboard():
         _dt = _to_cn_dt(s.get("snapshot_at"))
         if _dt is None:
             continue
-        equity_points.append({"run_at": _dt, "assets_hkd": s["net_value_hkd"]})
+        # assets_hkd这个key名字留着没改（改名字要连带改_render_ai_sim_
+        # live_snapshot/build_sim_equity_curve两处读这个key的地方，纯粹
+        # 增加改动面）——但存进去的值已经是折算成美元后的数字，2026-09-02
+        # "所有东西都以美元计价"这条要求下，这个列表从产生的那一刻起
+        # 就是美元口径，下游不管是算百分比（比例跟单位无关，不受影响）
+        # 还是画图表（直接就是美元数字，不用再转一次）都不用关心这件事。
+        equity_points.append({"run_at": _dt, "assets_hkd": s["net_value_hkd"] / sim_trader.USD_HKD_RATE})
 
     _render_ai_sim_live_snapshot(email, equity_points)
 
@@ -2704,7 +2732,9 @@ def _render_ai_sim_dashboard():
             granularity = "month"
         if len(windowed) >= 2:
             st.plotly_chart(
-                build_sim_equity_curve(windowed, baseline=sim_agent._VIRTUAL_BUDGET_HKD, granularity=granularity),
+                build_sim_equity_curve(
+                    windowed, baseline=sim_agent._VIRTUAL_BUDGET_HKD / sim_trader.USD_HKD_RATE, granularity=granularity,
+                ),
                 use_container_width=True,
             )
         else:
@@ -3935,7 +3965,7 @@ else:
                     "点卡片进详情页，点 × 卖出或取消关注。\n\n"
                     "**AI模拟炒股**\n\n"
                     "内置AI（千问）用虚拟资金自主管理一个模拟盘——只交易港股/美股（A股不参与），"
-                    "起始本金约十万港币，在开盘时段每15分钟自主决定要不要买卖，不需要手动操作，"
+                    "起始本金1万美金，在开盘时段每15分钟自主决定要不要买卖，不需要手动操作，"
                     "这里能看到它的持仓、收益曲线和完整交易记录，仅供观察AI决策能力，"
                     "不构成投资建议。（2026-09-01之前这个分区叫「历史回看」、展示的是下面这条"
                     "方向一致率统计，改版后挪到了侧边栏摘要，主分区换成了这个。）\n\n"
