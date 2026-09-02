@@ -351,6 +351,24 @@ def init_db():
             """
         )
 
+        # sim_agent_lessons：AI模拟盘的长期经验教训——2026-09-02用户明确要求
+        # "他也要学习，想让他变强大"。sim_agent.py每次决策时能看到的历史只有
+        # 最近_HISTORY_CONTEXT_SIZE(5)次的短期战绩，跨天/跨周的规律性教训看
+        # 不到。这张表是每天一条、由sim_agent_report.py用真实数据机械算出来
+        # 的日度复盘(胜率/盈亏/当天最典型的一笔对/错决策)，不是AI临时编的，
+        # sim_agent.py后续会把最近几条也塞进prompt，让"学习"这件事有一个
+        # 比短期战绩更长的记忆窗口。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sim_agent_lessons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                lesson_text TEXT NOT NULL
+            )
+            """
+        )
+
         # 从watchlist表一次性迁移进positions，shares/cost_total都是0(纯关注)。
         # UNIQUE(email,symbol)保证INSERT OR IGNORE天然幂等，每次启动跑一遍
         # 无副作用，不会覆盖已经有真实持仓数据的行。
@@ -691,6 +709,35 @@ def get_equity_snapshots(email: str, limit: int = 500) -> list[dict]:
         c.row_factory = sqlite3.Row
         rows = c.execute(
             "SELECT * FROM sim_equity_snapshots WHERE email = ? ORDER BY snapshot_at DESC LIMIT ?", (email, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def log_sim_agent_lesson(email: str, lesson_text: str) -> int:
+    init_db()
+    with closing(_conn()) as c:
+        cur = c.execute(
+            "INSERT INTO sim_agent_lessons (email, created_at, lesson_text) VALUES (?, ?, ?)",
+            (email, datetime.now(timezone.utc).isoformat(), lesson_text),
+        )
+        # 只留最近30条——日度复盘攒太久意义不大(市场状态会变，半年前的
+        # "教训"未必还适用)，超过的旧记录自动清掉，跟其它sim_agent相关表
+        # 同一个道理。
+        c.execute(
+            "DELETE FROM sim_agent_lessons WHERE email = ? AND id NOT IN "
+            "(SELECT id FROM sim_agent_lessons WHERE email = ? ORDER BY created_at DESC LIMIT 30)",
+            (email, email),
+        )
+        c.commit()
+        return cur.lastrowid
+
+
+def get_sim_agent_lessons(email: str, limit: int = 7) -> list[dict]:
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM sim_agent_lessons WHERE email = ? ORDER BY created_at DESC LIMIT ?", (email, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
