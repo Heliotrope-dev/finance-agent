@@ -1739,6 +1739,32 @@ def main():
             score=e.get("score"),
         )
 
+    # 2026-09-02用户明确要求"首页推荐股排行榜不要只盯着今日热门股，扩大到
+    # 大多数港美股去挖潜力股"——之前首页/微信简报的"推荐股排行榜"只从
+    # source="watchlist"（每天固定从热度榜/涨跌幅榜取的~120支热门股，见
+    # judge_watchlist/_build_watchlist）里选，候选来源天然被"今天有没有上
+    # 热度榜"这一件事卡住了，哪怕某支股票基本面扎实、只是今天没上榜，也
+    # 永远进不了这份候选池，日复一日在同一批热门股里打转。
+    #
+    # 这里不新增候选来源、不加大热度榜数量（加大热度榜规模还是"热门股"逻辑，
+    # 解决不了"挖潜力股"这个诉求）——screen_candidates()本来就是靠市值/PE/
+    # 盈利增速在全市场（美股港股各500支候选池）做的真实量化初筛，跟热度
+    # 完全无关，是覆盖面广得多的候选来源，而且上面已经花了AI调用把它判断
+    # 完了（只喂私人微信简报，首页从来没用过这份判断结果，等于白白算出来
+    # 却没被首页利用）。这里把同一份judged结果也以source="watchlist"多写
+    # 一份进advice表——不花一次额外AI调用，首页/AI咨询窗/微信简报用的
+    # get_latest_leaderboard(source="watchlist")天然就会在同一天的候选池里
+    # 同时看到"今天的热门股"和"全市场筛出来的潜力股"，按分数一起竞争排名。
+    # 同一支股票如果两边都判断到了，tracker.get_latest_leaderboard按symbol
+    # 取MAX(id)（这批写在后面，id更大）自然生效，不会同一支股票占两个名次。
+    for e in judged:
+        tracker.log_advice(
+            _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
+            e["technical_signal"], e["action"], e["market"], e["name"], source="watchlist",
+            score=e.get("score"),
+        )
+    print(f"（全市场量化筛选的{len(judged)}支候选已并入首页推荐股候选池，不再只从今日热门股里选）\n")
+
     # 三个市场混排的综合得分排行榜，取代原来"每个市场固定Top3"——好的自然
     # 排上去，某个市场这次没有靠谱标的就不会被硬凑数量占榜。
     board = _leaderboard(judged, _LEADERBOARD_SIZE)
