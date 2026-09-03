@@ -1554,8 +1554,15 @@ _HOME_MAP_MARKERS = [
     # 不是get_multi_index_snapshot。
     ("恒生指数", "HK", 22.0, 114.0),
     ("上证指数", "A", 38.0, 110.0),          # 真实上海在(31,121)，往西北挪一点跟恒生/日经拉开
-    ("标普500", "US", 40.0, -95.0),
-    ("纳斯达克100", "US", 48.0, -122.0),
+    # 2026-09-04浏览器实测修真实bug：纳斯达克100原来放在经度-122（美国西海岸），
+    # 而地图固定在setView([12,25], 2)、可视西边界只到经度-102左右——也就是说
+    # 这个指数的标记一直在可视范围外，线上从来没显示出来过，首页说好的11个
+    # 指数实际只看得到10个。当初把它往西拉是为了跟标普500的标签错开，但错开
+    # 用经度就会顶到边界，改用纬度错开：两者经度只差7度(约20px)，纬度差15度
+    # (墨卡托投影下约56px)，比38px的标签高度还大，照样不会重叠。标普500
+    # 同时从-95往东挪到-88，给自己的标签留出不被左边界裁掉的余量。
+    ("标普500", "US", 33.0, -88.0),
+    ("纳斯达克100", "US", 48.0, -95.0),
     ("日经225", "GLOBAL", 36.0, 142.0),
     ("富时100", "GLOBAL", 54.0, -3.0),
     ("德国DAX", "GLOBAL", 40.0, 15.0),        # 真实德国大约在(47-55,6-15)；上一版(51,10)纬度跟富时100(54,-3)太接近，标签框在地图上挤在一起重叠，往南挪到意大利/亚得里亚海附近拉开纬度差(14)，跟富时100不再重叠
@@ -1648,7 +1655,6 @@ def _render_home_map():
             )
 
     markers_js = []
-    marker_coords = []
     for name, mkt, lat, lon in _HOME_MAP_MARKERS:
         if mkt == "GLOBAL":
             idx = global_idx.get(name)
@@ -1677,7 +1683,6 @@ def _render_home_map():
             label = f"<a href='{href}' target='_top' style='cursor:pointer;text-decoration:none'>{inner}</a>"
         else:
             label = inner
-        marker_coords.append([lat, lon])
         if name in _HOME_MAP_TENCENT_CODE:
             # 存进tcMarkers，供后面的JS轮询按名字找到这个marker原地更新图标。
             markers_js.append(
@@ -1715,18 +1720,30 @@ def _render_home_map():
     }}).addTo(map);
     var tcMarkers = {{}};
     {' '.join(markers_js)}
-    // 视野改成按"实际画出来的这些图标"自适应，不再写死setView([12,25],2)。
-    // 写死的问题：标记最西是纽约(-74)、最东是悉尼(151)，跨度225度，而
-    // zoom=2下能显示的经度跨度取决于容器有多宽——窗口一窄，两端的标签就
-    // 被容器的overflow:hidden裁掉半截，实际看到的是"谱500"和右边缘只剩
-    // 半个的"澳大利亚A"。fitBounds带padding能保证不管窗口多宽，所有图标
-    // 连同它们68px宽的标签都完整落在可视范围内。maxZoom限制在2，避免图标
-    // 少的时候(某个数据源挂了)反而放大到街道级别。
-    var _bounds = L.latLngBounds({json.dumps(marker_coords)});
-    function fitAll() {{ map.fitBounds(_bounds, {{padding: [40, 44], maxZoom: 2, animate: false}}); }}
-    fitAll();
-    // 窗口尺寸变化时重新适配——容器宽度变了，能容纳的经度跨度也变了。
-    window.addEventListener('resize', function() {{ map.invalidateSize(); fitAll(); }});
+    // 标签默认以坐标点为中心(iconAnchor=[34,38]，Leaflet据此设inline的
+    // margin-left:-34px)，靠近地图左右边界的标记因此有一半落在容器外，被
+    // overflow:hidden裁掉——实测左边"标普500"只剩"谱500"、右边"日经225"
+    // 被切掉13px。这里不动标记位置，只把越界的那几个标签沿水平方向推回
+    // 容器内（改margin-left即可，等价于临时改iconAnchor的x）。
+    // 为什么不用fitBounds自适应：试过，经度跨度在zoom=2下塞不进容器宽度，
+    // Leaflet会退到zoom=1，亚洲那一簇指数全糊成一团，比裁切更难看。
+    function clampLabels() {{
+        var el = document.getElementById('home-map');
+        var mapLeft = el.getBoundingClientRect().left, W = el.clientWidth;
+        document.querySelectorAll('#home-map .leaflet-marker-icon').forEach(function(ic) {{
+            ic.style.marginLeft = '-34px';   // 先还原成默认居中再量，避免反复累加
+            var b = ic.getBoundingClientRect();
+            var left = b.left - mapLeft, right = b.right - mapLeft, shift = 0;
+            if (left < 2) shift = 2 - left;
+            else if (right > W - 2) shift = (W - 2) - right;
+            if (shift) ic.style.marginLeft = (-34 + shift) + 'px';
+        }});
+    }}
+    clampLabels();
+    // 容器尺寸变化时让Leaflet重新测量（否则瓦片留白），并重新收边。
+    window.addEventListener('resize', function() {{ map.invalidateSize(); clampLabels(); }});
+    // 拖动地图会把原本在中间的标记带到边界上，同样要重新收边。
+    map.on('moveend', clampLabels);
 
     var codeToName = {json.dumps(code_to_name)};
     var hrefByName = {json.dumps(href_by_name)};
@@ -1735,6 +1752,7 @@ def _render_home_map():
         fetch('https://qt.gtimg.cn/q={",".join(tencent_codes)}')
             .then(function(r) {{ return r.text(); }})
             .then(function(text) {{
+                var needClamp = false;
                 text.split(';').forEach(function(line) {{
                     line = line.trim();
                     if (!line) return;
@@ -1763,7 +1781,11 @@ def _render_home_map():
                         ? "<a href='" + href + "' target='_top' style='cursor:pointer;text-decoration:none'>" + inner + "</a>"
                         : inner;
                     tcMarkers[name].setIcon(L.divIcon({{html: html, className: '', iconSize: [68, 38], iconAnchor: [34, 38]}}));
+                    needClamp = true;
                 }});
+                // setIcon整个重建了divIcon，Leaflet会把margin-left重置回默认的
+                // -34px，边缘那几个标签一刷新就又被裁掉——重建过就重新收一次边。
+                if (needClamp) clampLabels();
             }})
             .catch(function(e) {{}});
     }}
