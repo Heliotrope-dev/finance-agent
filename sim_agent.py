@@ -754,6 +754,29 @@ def _run_cycle_locked(email: str) -> dict:
         return {"status": "失败", "note": "AI返回空内容"}
 
     signals = advisor._parse_trade_signals(text)
+    # 在源头把symbol统一成"不带市场前缀"的写法。AI每次生成信号时带不带前缀
+    # 完全看心情，同一支票时而"ORCL"时而"US.ORCL"（sim_trader._strip_market_prefix
+    # 的docstring里记过这个现象），而下游好几处都是按symbol字符串去对齐的，
+    # 格式一不一致直接决定对不对得上：
+    #
+    # 1. _settle_virtual_cash用{s["symbol"]: s}去匹配exec_results里的symbol，
+    #    而_execute_one返回的是去过前缀的纯代码——AI一旦写了"US.ORCL"就匹配
+    #    不上，整笔交易的虚拟现金结算被静默跳过（连手续费都不扣）。真实故障
+    #    (2026-09-04复盘)：翻最近30轮，带前缀的成交轮次3次、结算成功0次；
+    #    不带前缀的4次、结算成功4次，7比7完全相关。富途模拟盘那边是真的
+    #    成交了、持仓真的变了，只有虚拟现金台账没动，页面上的"虚拟现金/
+    #    总额/累计收益率"就这么一点点飘走了。
+    # 2. _estimate_amount_hkd按(symbol, market)查candidates里的实时价，对不上
+    #    就退回用AI自己估的amount_cny——预算拦截因此用的是个粗糙数字。
+    # 3. _apply_budget_limit的existing_by_symbol是用_symbol_from_code(去前缀)
+    #    从持仓里建的，signal带前缀就查不到已有仓位，集中度上限那道闸等于
+    #    对这些信号失效。
+    #
+    # 与其在这三处各修各的，不如在信号刚解析出来时就归一化一次——后面所有
+    # 按symbol对齐的地方自然都对得上，也跟sim_trader落库/下单用的是同一份写法。
+    for _s in signals:
+        if _s.get("symbol"):
+            _s["symbol"] = sim_trader._strip_market_prefix(_s["symbol"])
     sig_idx = text.find("交易信号：")
     if sig_idx == -1:
         sig_idx = text.find("交易信号:")
