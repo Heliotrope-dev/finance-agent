@@ -1,6 +1,6 @@
 """AI模拟盘自主交易agent——2026-09-01用户明确要求"全自动、AI自己在模拟盘上
 炒股、学习、试错"。这跟sim_trader.execute_simulated_trades（跟着advisor.py
-每天17:30那次组合分析的信号走）是两条独立的执行路径：这里是每15分钟触发一次
+每天17:30那次组合分析的信号走）是两条独立的执行路径：这里是每5分钟触发一次
 的自主决策循环，AI自己看当前持仓/现金/候选股行情/过去的操作战绩，自己决定
 买卖，不依赖组合分析那条链路。
 
@@ -38,7 +38,7 @@ _MARKET_HOURS = {
 }
 
 # 2026-09-01用户明确要求"仅需要在港美股开盘阶段思考就行"——自主决策循环
-# 只看这两个市场是否开盘，A股不参与这个每15分钟一次的自主交易（A股T+1
+# 只看这两个市场是否开盘，A股不参与这个每5分钟一次的自主交易（A股T+1
 # 不能当日回转，跟这个高频动量交易的节奏本来就不搭）。A股的SIMULATE账户
 # 依然存在、依然会在快照里展示余额，只是这条自主决策链路不会主动碰它。
 _AGENT_MARKETS = ("HK", "US")
@@ -274,16 +274,20 @@ def _apply_budget_limit(
         key = (s["symbol"], s["market"])
         projected_position_hkd = existing_by_symbol.get(key, 0.0) + est_cost_hkd
         if projected_position_hkd > max_single_position_hkd:
-            # 浅拷贝加个提示字段，不改动signals里的原始dict（那份原样要
-            # 完整写进log_sim_agent_run，见调用方注释）。
-            dropped.append({**s, "_drop_reason": "集中度"})
+            # 拦截原因直接写回signals里的原始dict，不再用浅拷贝——这份dict最后
+            # 要原样写进log_sim_agent_run，而"哪几条被拦了"恰恰只有写进去才留得
+            # 下来。原来只把原因留在拷贝里，落库的那份没有任何标记，页面和下一轮
+            # 的复盘历史就没法把"AI想买"和"真的买到了"分开，见调用方那段真实故障。
+            s["_drop_reason"] = "集中度"
+            dropped.append(s)
             continue
         if est_cost_hkd <= remaining:
             kept.append(s)
             remaining -= est_cost_hkd
             existing_by_symbol[key] = projected_position_hkd
         else:
-            dropped.append({**s, "_drop_reason": "预算"})
+            s["_drop_reason"] = "预算"
+            dropped.append(s)
     return kept, dropped
 
 
@@ -397,7 +401,20 @@ def _history_context_lines(email: str, holdings_value_hkd: float) -> list[str]:
         except Exception:
             sigs = []
         acted = [s for s in sigs if s.get("action") in ("买入", "卖出")]
-        picks_text = "、".join(f"{s['action']}{s.get('name', s.get('symbol', ''))}" for s in acted) or "未操作"
+        # 只有真正成交的才算"当时操作了什么"。真实故障(2026-09-04复盘)：被预算
+        # 拦下来的买入一股都没买进去，这里却照样写成"当时买入甲骨文"，连续十几轮
+        # 都这么写，AI就真的照着这份假账复盘，得出"ORCL连续加仓弹性不足"这种
+        # 结论——它一股都没加过仓。喂给AI的战绩必须是真发生过的交易，否则这个
+        # "学习试错"的循环学的全是空对空。被拦截的另外单独交代，那是另一类
+        # 教训（钱不够/超集中度），对AI同样有用，但不能混进"我操作了什么"里。
+        # 老记录没有_drop_reason/_executed这两个字段，按老口径当已成交处理。
+        done = [s for s in acted if not s.get("_drop_reason") and s.get("_executed", True)]
+        blocked = [s for s in acted if s.get("_drop_reason")]
+        picks_text = "、".join(f"{s['action']}{s.get('name', s.get('symbol', ''))}" for s in done) or "未操作"
+        if blocked:
+            picks_text += "；被系统拦截未成交：" + "、".join(
+                f"{s['action']}{s.get('name', s.get('symbol', ''))}（{s['_drop_reason']}）" for s in blocked
+            )
         if before and current_assets:
             change_pct = (current_assets - before) / before * 100
             lines.append(
@@ -625,12 +642,28 @@ def _run_cycle_locked(email: str) -> dict:
 
     # 预算文案给AI看的是"虚拟额度"，不是账户里真实躺着的港股/美股各百万
     # 现金——见_AGENT_SYSTEM和_VIRTUAL_BUDGET_HKD的注释，账户本金没法通过
-    # API/App设置改成十万港币，只能靠这层软约束+下面的硬性拦截。
-    remaining_hkd = _VIRTUAL_BUDGET_HKD - holdings_value_hkd
+    # API/App设置改成虚拟预算那个数，只能靠这层软约束+下面的硬性拦截。
+    #
+    # 真实故障(2026-09-04复盘)：这里原来只报"预算总额-持仓市值"这一个剩余额度，
+    # 没报账上还剩多少虚拟现金，但_apply_budget_limit真正放行时用的是这两者的
+    # 较小值（现金那道闸是2026-09-02补的，补的时候漏了同步这段文案）。结果持仓
+    # 快满仓、现金只剩几百港币时，AI看到的还是"还剩三千多额度"，每轮都照着这个
+    # 数开出一笔买入，然后每轮都被现金那道闸拦掉——连续十几轮空转，白烧一次AI
+    # 调用，还在决策记录里刷屏。所以这里必须把现金和"两者取小"的结果一起交代
+    # 清楚，AI看到的额度要跟代码真正执行的口径完全一致。
+    budget_remaining_hkd = _VIRTUAL_BUDGET_HKD - holdings_value_hkd
+    current_cash = tracker.get_sim_virtual_cash(email)
+    if current_cash is None:
+        current_cash = _VIRTUAL_BUDGET_HKD
+    spendable_hkd = min(budget_remaining_hkd, current_cash)
     budget_text = (
         f"虚拟预算总额：HK${_VIRTUAL_BUDGET_HKD:,.0f}\n"
         f"已用于持仓（按当前市值）：HK${holdings_value_hkd:,.0f}\n"
-        f"还剩可用额度：HK${remaining_hkd:,.0f}"
+        f"预算还剩：HK${budget_remaining_hkd:,.0f}\n"
+        f"账上虚拟现金余额：HK${current_cash:,.0f}\n"
+        f"本轮实际可用于买入：HK${spendable_hkd:,.0f}"
+        "（取“预算还剩”和“现金余额”两者的较小值——买入是真的要花现金的，"
+        "现金不够时预算再多也买不进去，超出这个数的买入会被系统直接拦截不执行）"
         + ("（部分持仓汇率暂时获取不到，实际占用可能比这个数字更高，买入要更保守）" if snapshot.get("holdings_value_partial") else "")
     )
 
@@ -736,6 +769,10 @@ def _run_cycle_locked(email: str) -> dict:
     # 跟下面预算拦截同一个道理——不能只信prompt里"只交易港股和美股"这句话，
     # 这里必须拦住"当前不在这一轮open_markets里"的市场，不能只拦A股。
     off_market_signals = [s for s in signals if s.get("market") not in open_markets and s.get("action") in ("买入", "卖出")]
+    for _s in off_market_signals:
+        # 跟预算/集中度拦截一样，把原因标在原始dict上，落库后页面和复盘历史
+        # 才认得出这条根本没执行，见_apply_budget_limit里那段注释。
+        _s["_drop_reason"] = "非开盘市场"
     if off_market_signals:
         _a_text = "、".join(f"{s['name']}（{s['symbol']}·{s.get('market')}）" for s in off_market_signals)
         reasoning_text += f"\n\n（系统提示：以下不属于本轮开盘市场（{', '.join(open_markets)}），已被拦截未执行：{_a_text}）"
@@ -747,10 +784,9 @@ def _run_cycle_locked(email: str) -> dict:
 
     # 硬性预算拦截——不能只信AI自己说的"我会控制在预算内"，必须代码层面
     # 真的核实过再放行，见_apply_budget_limit的docstring（现在同时看真实
-    # 现金余额，不能只看"持仓市值有没有超过100k"）。
-    current_cash = tracker.get_sim_virtual_cash(email)
-    if current_cash is None:
-        current_cash = _VIRTUAL_BUDGET_HKD
+    # 现金余额，不能只看"持仓市值有没有超过预算总额"）。current_cash在上面拼
+    # budget_text时已经取过，这里直接复用同一个值，保证"告诉AI的额度"和
+    # "实际拦截用的额度"是同一份数据，不会中间又变一次。
     kept_signals, dropped_signals = _apply_budget_limit(
         tradeable_signals, candidates, holdings_value_hkd, current_cash, snapshot.get("positions"),
     )
@@ -759,7 +795,14 @@ def _run_cycle_locked(email: str) -> dict:
         _concentration_dropped = [s for s in dropped_signals if s.get("_drop_reason") == "集中度"]
         if _budget_dropped:
             _dropped_text = "、".join(f"{s['name']}（{s['symbol']}）{s['shares']:g}股" for s in _budget_dropped)
-            reasoning_text += f"\n\n（系统提示：以下买入超出十万港币虚拟预算，已被拦截未执行：{_dropped_text}）"
+            # 别再把预算数字写死在文案里——2026-09-02预算已经从十万港币改成
+            # 一万美金(HK$78,000)，这句话却还在说"十万港币"，页面和微信推送里
+            # 一直显示着一个早就不成立的数字。统一读常量，以后再改不会漏。
+            reasoning_text += (
+                f"\n\n（系统提示：以下买入超出虚拟预算/现金可用额度"
+                f"（预算总额HK${_VIRTUAL_BUDGET_HKD:,.0f}，本轮实际可用HK${spendable_hkd:,.0f}），"
+                f"已被拦截未执行：{_dropped_text}）"
+            )
         if _concentration_dropped:
             # 见_apply_budget_limit/_MAX_SINGLE_POSITION_PCT的docstring——这个
             # 提示专门跟预算超支分开说，因为对AI来说这是两类完全不同的教训：
@@ -781,6 +824,15 @@ def _run_cycle_locked(email: str) -> dict:
     # 决策开始前的状态），不用结算后的值，理由见上面net_value_before那段
     # 注释。
     _, total_fee_hkd = _settle_virtual_cash(email, kept_signals, exec_results, candidates)
+
+    # 把"送去下单的这些到底成没成交"也写回signals再落库——被拦的那些上面已经
+    # 标过_drop_reason了，但放行的信号也可能在sim_trader那边失败/跳过(比如
+    # lot_size取整后不足一手)，光看signals_json同样分不出来。有了这两个字段，
+    # 页面的"AI每次决策记录"和喂给下一轮的复盘历史才是如实的。
+    _exec_ok = {r.get("symbol") for r in exec_results if r.get("status") == "成功"}
+    for _s in kept_signals:
+        if _s.get("action") in ("买入", "卖出"):
+            _s["_executed"] = _s.get("symbol") in _exec_ok
 
     tracker.log_sim_agent_run(
         email, open_markets, net_value_before, reasoning_text,

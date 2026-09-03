@@ -2566,7 +2566,7 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
     10秒刷新（_render_position_rows，2026-09-02从3秒调宽到10秒，见那边
     注释）还要更保守一点，因为这里每次刷新要建HK+US两个市场的Futu交易
     连接，比单纯查行情更重。
-    历史决策记录/下单记录/图表不放在这个fragment里——那些只有AI每15分钟
+    历史决策记录/下单记录/图表不放在这个fragment里——那些只有AI每5分钟
     跑一次才会变，没必要跟着这里一起抖。
     """
     with st.spinner("读取模拟盘状态..."):
@@ -2663,7 +2663,7 @@ def _render_ai_sim_dashboard():
     用户是要"完全替换"这个入口，不是要删掉底层历史数据，函数和数据表都
     保留，只是不在这个入口展示）。
 
-    展示的是sim_agent.py那条每15分钟一次的自主决策链路（只交易港股/美股，
+    展示的是sim_agent.py那条每5分钟一次的自主决策链路（只交易港股/美股，
     A股不参与，起始本金1万美金，2026-09-02从十万港币改的——内部记账仍按
     港币结算，页面展示层统一折成美元，见_render_ai_sim_live_snapshot里
     _usd_rate那处说明），不是持仓页那个"跟着每天17:30组合分析走"的模拟盘
@@ -2682,7 +2682,7 @@ def _render_ai_sim_dashboard():
 
     st.caption(
         "这是内置AI（千问）用虚拟资金自主管理的模拟盘——只交易港股/美股（A股不参与），"
-        "起始本金1万美金，在开盘时段每15分钟自主决定要不要买卖，不需要你手动操作。"
+        "起始本金1万美金，在开盘时段每5分钟自主决定要不要买卖，不需要你手动操作。"
         "这里如实展示它的持仓、收益和完整交易记录，仅供观察AI决策能力，不构成投资建议。"
     )
 
@@ -2740,7 +2740,7 @@ def _render_ai_sim_dashboard():
         else:
             st.caption(f"「{view}」这个范围内数据点还不够画线——换个更大的范围看看，或者等AI多跑几轮。")
     else:
-        st.caption("收益曲线数据还在积累——AI每次运行会记一个资产快照点，多跑几次（开盘时段每15分钟一次）后这里会出现走势图。")
+        st.caption("收益曲线数据还在积累——AI每次运行会记一个资产快照点，多跑几次（开盘时段每5分钟一次）后这里会出现走势图。")
 
     # 2026-09-03用户明确要求"折线图下面做两个饼状图，一个港股/美股/剩余资金
     # 各占比例，一个持仓股票比例"——这里单独再查一次实时快照，跟上面
@@ -2807,7 +2807,7 @@ def _render_ai_sim_dashboard():
     st.divider()
     st.markdown("**AI每次决策记录**")
     if not runs:
-        st.caption("还没有运行记录——开盘时段每15分钟会自动跑一次。")
+        st.caption("还没有运行记录——开盘时段每5分钟会自动跑一次。")
     else:
         _runs_key = f"_ai_sim_runs_show_all_{email}"
         show_all_runs = st.session_state.get(_runs_key, False)
@@ -2824,7 +2824,19 @@ def _render_ai_sim_dashboard():
                     sigs = []
                 actionable = [s for s in sigs if s.get("action") in ("买入", "卖出")]
                 for s in actionable:
-                    st.caption(f"{s['action']} {s['name']}（{s['symbol']}·{s['market']}）{s['shares']:g}股")
+                    # 这几行是"AI这一轮想做什么"，不等于"真的做成了什么"——被预算/
+                    # 集中度/非开盘市场拦下来的信号一股都没成交。原来这里无条件按
+                    # "买入 甲骨文 1股"渲染，跟同一个展开框标题里的"执行成功0条、
+                    # 1条超预算被拦截"直接打架，看着像真买了。sim_agent.py现在把
+                    # 归宿写进signals_json了，这里如实标出来。老记录没有这两个
+                    # 字段，保持原样不加后缀。
+                    if s.get("_drop_reason"):
+                        suffix = f" · 已拦截未执行（{_esc(s['_drop_reason'])}）"
+                    elif s.get("_executed") is False:
+                        suffix = " · 未成交"
+                    else:
+                        suffix = ""
+                    st.caption(f"{s['action']} {s['name']}（{s['symbol']}·{s['market']}）{s['shares']:g}股{suffix}")
         if not show_all_runs and len(runs) > 5:
             if st.button(f"更多（最近{len(runs)}条）", key=f"_ai_sim_runs_more_{email}"):
                 st.session_state[_runs_key] = True
@@ -4027,7 +4039,7 @@ else:
                     "点卡片进详情页，点 × 卖出或取消关注。\n\n"
                     "**AI模拟炒股**\n\n"
                     "内置AI（千问）用虚拟资金自主管理一个模拟盘——只交易港股/美股（A股不参与），"
-                    "起始本金1万美金，在开盘时段每15分钟自主决定要不要买卖，不需要手动操作，"
+                    "起始本金1万美金，在开盘时段每5分钟自主决定要不要买卖，不需要手动操作，"
                     "这里能看到它的持仓、收益曲线和完整交易记录，仅供观察AI决策能力，"
                     "不构成投资建议。（2026-09-01之前这个分区叫「历史回看」、展示的是下面这条"
                     "方向一致率统计，改版后挪到了侧边栏摘要，主分区换成了这个。）\n\n"

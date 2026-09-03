@@ -37,7 +37,7 @@ charts.py             # K线/均线/MACD/成交量图表 + 本地统计指标计
 tracker.py            # SQLite：分析记录+方向一致率、持仓(positions表)、搜索历史、推荐股(advice表)
 advisor.py            # 私有脚本：观察池打分+持仓判断+组合分析+全市场量化初筛，OpenClaw cron每工作日跑一次
 sim_trader.py          # AI模拟盘下单/持仓快照层：对接富途SIMULATE账户，港美股实时报价重估市值/浮盈亏
-sim_agent.py           # AI模拟盘自主决策循环：开盘时段每15分钟一次，SOP写在这里，OpenClaw cron调度
+sim_agent.py           # AI模拟盘自主决策循环：开盘时段每5分钟一次，SOP写在这里，OpenClaw cron调度
 sim_snapshot.py        # 独立脚本：每5分钟记一次AI模拟盘资产快照（跟决策频率解耦，走势图用），OpenClaw cron调度
 sim_agent_report.py    # 独立脚本：AI模拟盘日度/详细复盘，纯数据拼接不经过AI，写进sim_agent_lessons长期记忆，OpenClaw cron读取后转发微信
 warm_home_cache.py    # 独立脚本：每分钟预热首页/行情页用的指数快照，系统crontab调度，不走AI代理

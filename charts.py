@@ -498,7 +498,7 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 
 def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, granularity: str = "day") -> go.Figure:
     """AI模拟盘收益曲线——points是[{"run_at": 北京时区datetime, "assets_hkd": 浮点数}]，
-    按sim_agent每次运行(开盘时段每15分钟一次)时的资产快照点连线，不插值编造中间点，
+    按sim_agent每次运行(开盘时段每5分钟一次)时的资产快照点连线，不插值编造中间点，
     数据本身就是按这个节奏产生的，早期稀疏是正常状态。
 
     颜色跟着这个项目"红涨绿跌"的既定约定动态选——不能像K线图那样固定用UP_COLOR

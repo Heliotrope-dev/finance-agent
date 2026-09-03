@@ -63,7 +63,15 @@ def build_daily_report(email: str) -> dict:
             sigs = json.loads(r.get("signals_json") or "[]")
         except Exception:
             sigs = []
-        acted = any(s.get("action") in ("买入", "卖出") for s in sigs)
+        # 只认真正成交的信号。被预算/集中度/非开盘市场拦下来的那些一股都没
+        # 买进去，把它们算成"这一轮有操作"会直接污染下面的胜率——分母里混进
+        # 一堆根本没交易过的轮次，算出来的"胜率"就不是AI选股的胜率了。
+        # 老记录没有_drop_reason/_executed字段，按老口径当已成交处理。
+        acted = any(
+            s.get("action") in ("买入", "卖出")
+            and not s.get("_drop_reason") and s.get("_executed", True)
+            for s in sigs
+        )
         if acted and before and end_net:
             change_pct = (end_net - before) / before * 100
             results.append((r, change_pct))
@@ -165,8 +173,18 @@ def print_detailed_report(email: str):
                 sigs = json.loads(r.get("signals_json") or "[]")
             except Exception:
                 sigs = []
-            acted_sigs = [s for s in sigs if s.get("action") in ("买入", "卖出")]
+            # 这一段的标题是"今天每一次实际操作"，那就只能列真的成交了的——
+            # 被系统拦掉的买入放在这里会让日报（每天推到微信）读起来像是真买了。
+            acted_sigs = [
+                s for s in sigs if s.get("action") in ("买入", "卖出")
+                and not s.get("_drop_reason") and s.get("_executed", True)
+            ]
+            blocked_sigs = [s for s in sigs if s.get("action") in ("买入", "卖出") and s.get("_drop_reason")]
             sig_line = "、".join(f"{s.get('action')}{s.get('name') or s.get('symbol')}{s.get('shares', '')}股" for s in acted_sigs) or "（信号明细缺失）"
+            if blocked_sigs:
+                sig_line += "［被拦截未成交：" + "、".join(
+                    f"{s.get('action')}{s.get('name') or s.get('symbol')}（{s.get('_drop_reason')}）" for s in blocked_sigs
+                ) + "］"
             print(f"[{t.strftime('%H:%M') if t else '--:--'}] {sig_line} —— 事后净值变化{_fmt_pct(c)}")
             reasoning = (r.get("reasoning_text") or "")[:150]
             if reasoning:
