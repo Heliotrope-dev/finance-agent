@@ -103,7 +103,13 @@ def build_daily_report(email: str) -> dict:
 
     return {
         "start_net": start_net, "end_net": end_net,
-        "run_count": len(recent_runs), "acted_count": len(acted_runs),
+        "run_count": len(recent_runs),
+        # acted_count以前直接取len(acted_runs)，但acted_runs是"status==完成"的
+        # 轮次，包含AI看完行情决定"不动"、以及信号全被拦截一笔没成交的轮次——
+        # 报表里却印成"其中有实际操作N次"，名不副实。实测2026-09-04：30轮里
+        # 印的是21次，而真正有成交的只有4次。改成跟下面all_acted/胜率同一个
+        # 口径（真的成交过才算），三个数字互相对得上。
+        "acted_count": len(results),
         "order_count": len(filled_orders),
         "win_rate": win_rate,
         "best": best, "worst": worst,
