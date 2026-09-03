@@ -8,6 +8,21 @@
 
 只在港股/美股开盘时段才记（复用sim_agent._open_markets），非开盘时段
 市场没有新成交、市值不会变，记了也是重复数据，不如不记。
+
+真实故障（2026-09-03用户从走势图截图发现）：某次快照net_value_hkd
+凭空冲到96412（约合$12360），5分钟后又跌回80907——查数据库发现是虚拟
+现金余额（tracker.sim_virtual_cash_hkd）在一次卖出成交后立刻+19530，
+但同一时刻sim_trader.get_agent_snapshot()读到的持仓市值(holdings_value_hkd)
+还没跟着变（Futu模拟账户那边的持仓列表更新有延迟，不是瞬时的），于是
+"卖出到手的现金"和"还没来得及消失的旧持仓市值"被同时算了一遍，净值
+虚高一截；下一次(5分钟后)持仓列表追上了，市值掉下来，净值也跟着"假摔"
+回真实水平。跟sim_agent.py决策循环本身那个"记账时点错位"是同一类问题，
+但这里是这个独立的快照脚本自己的另一份实例——decision cron结算现金的
+那一刻，如果这个快照脚本刚好也在那前后5分钟内跑，就会撞上这个不一致
+窗口。改法：跟决策循环抢同一把sim_agent._LOCK_PATH文件锁（非阻塞），
+抢不到就说明决策循环正在结算中，直接跳过这一轮快照，等下一次5分钟
+再采——反正这个不一致窗口只有几秒到几十秒，跳过一次不会让走势图缺一
+大截。
 """
 import json
 
@@ -21,6 +36,24 @@ def take_snapshot(email: str) -> dict:
     if not open_markets:
         return {"status": "跳过", "note": "当前没有市场开盘"}
 
+    import fcntl
+
+    sim_agent._LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(sim_agent._LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_file.close()
+        return {"status": "跳过", "note": "决策循环正在结算交易，本次快照跳过避免读到中间态"}
+
+    try:
+        return _take_snapshot_locked(email)
+    finally:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
+
+
+def _take_snapshot_locked(email: str) -> dict:
     try:
         snapshot = sim_trader.get_agent_snapshot()
     except Exception as e:
