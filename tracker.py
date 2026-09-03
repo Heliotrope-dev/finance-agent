@@ -1285,6 +1285,47 @@ def get_advice_accuracy(email: str) -> dict:
 _ADVICE_ACTION_PRIORITY = {"买入": 0, "持有": 1, "观望": 2, "卖出": 3}
 
 
+def get_recent_advice_map(within_hours: int = 36) -> dict:
+    """把最近一段时间内 advisor.py 出过结论的标的整理成 {(symbol, market): {...}}。
+
+    2026-09-04新增，用途是把"投研顾问"和"AI模拟盘"这两条一直各跑各的链路接上。
+    在此之前它们是完全不通气的：advisor.py 每天17:30跑一次深度分析，看财务
+    摘要、新闻、研报、52周位置，一次几十个AI调用；sim_agent.py 每5分钟跑一次
+    自主决策，但手里只有"现价/涨跌幅/量比/换手率/PE/PB"这种一眼行情。也就是
+    说系统里已经算出来的那份更贵、更厚的判断，高频决策那条链路一次都没用上。
+
+    这里只取最精简的部分（结论+综合得分），不取 fundamental_verdict 那段长文本
+    ——候选池一次有几十支，把长文本全塞进 prompt 会让本来就要 75~110 秒的那次
+    AI调用更慢（这个超时问题刚在2026-09-04量过），而"顾问怎么看这支"这件事
+    用"买入/持有/观望/卖出 + 分数"表达已经足够，长篇理由对高频动量决策的边际
+    价值很低。
+
+    within_hours 默认36小时：advisor 是工作日每天17:30跑，36小时能覆盖到"昨天
+    收盘后那一批"，周末/节假日不至于因为跨了一天就整个断供；再长就容易把过时
+    的结论当成今天的判断喂进去了。
+    """
+    init_db()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=within_hours)).isoformat()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT symbol, market, action, score, created_at FROM advice "
+            "WHERE created_at >= ? ORDER BY created_at",
+            (cutoff,),
+        ).fetchall()
+    # 按时间正序遍历，同一个标的后面的记录自然覆盖前面的，留下的是最新那条。
+    out: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        sym = (r["symbol"] or "").strip()
+        mkt = (r["market"] or "").strip()
+        if not sym or not mkt:
+            continue
+        out[(sym, mkt)] = {
+            "action": r["action"], "score": r["score"], "created_at": r["created_at"],
+        }
+    return out
+
+
 def get_latest_advice(limit_per_market: int = 3) -> dict:
     """给首页"投研候选"模块用：只读最近一次 advisor.py 跑出来的结果，不现场
     重新跑（那一次要跑几分钟、几十次AI调用，公开首页每次访问都触发一遍
