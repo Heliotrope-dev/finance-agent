@@ -395,7 +395,16 @@ def build_benchmark_comparison(hist: pd.DataFrame, benchmark: pd.DataFrame, benc
 # 后面几个是纯粹的分类色（蓝/橙/紫/青），不代表涨跌方向，只用来区分不同标的。
 # 凑够6个——持仓对比入口（app.py _show_compare_dialog）最多允许勾选6只，
 # 凑够6个颜色能保证6只同时对比时每条线颜色都不重复。
-_MULTI_COLORS = [UP_COLOR, "#3b82f6", DOWN_COLOR, "#f59e0b", "#a855f7", "#0891b2"]
+# 2026-09-03修真实bug：_DONUT_MAX_SLICES是8，但这份调色板原来只有6个颜色，
+# 持仓超过6支时第7支开始颜色按i%len(_MULTI_COLORS)折返，会跟前面某个已经用过
+# 的颜色撞色——用户截图发现AI模拟炒股页7支持仓里"小米"和"国债"两块饼图颜色
+# 完全一样分不清。补到9个颜色，覆盖满_DONUT_MAX_SLICES=8还留一个余量，新增
+# 的三个颜色（黄/粉/靛蓝）特意选在色相环上跟原有6个颜色（红/蓝/绿/橙/紫/青）
+# 拉开距离，不是随手加深浅相近的颜色凑数。
+_MULTI_COLORS = [
+    UP_COLOR, "#3b82f6", DOWN_COLOR, "#f59e0b", "#a855f7", "#0891b2",
+    "#eab308", "#ec4899", "#6366f1",
+]
 
 
 def build_multi_comparison(hist_by_name: dict) -> go.Figure:
@@ -423,7 +432,9 @@ def build_multi_comparison(hist_by_name: dict) -> go.Figure:
 _DONUT_MAX_SLICES = 8
 
 
-def build_position_donut(holdings: list[dict], total_value_cny: float, currency_symbol: str = "¥") -> go.Figure:
+def build_position_donut(
+    holdings: list[dict], total_value_cny: float, currency_symbol: str = "¥", show_legend: bool = False,
+) -> go.Figure:
     """持仓占比环形图。holdings: [{"label": "名称（代码）", "value_cny": 折算后市值}, ...]，
     调用方（app.py）负责按金额降序排好、汇率折算好——这里不做排序也不做汇率转换，
     避免图表模块反过来依赖data_sources。配色直接复用_MULTI_COLORS（用户明确要求
@@ -436,7 +447,13 @@ def build_position_donut(holdings: list[dict], total_value_cny: float, currency_
     2026-09-02已经改成全部按美元展示，复用这个函数画它的两个新饼图时如果还写死¥就会
     显示错误的币种符号。加一个参数控制符号，字段名依然叫value_cny（沿用旧签名，
     不强改调用方already-working的字典结构），调用方传美元数字进来时这个字段名只是
-    历史遗留，不影响实际显示——显示内容完全由currency_symbol决定。"""
+    历史遗留，不影响实际显示——显示内容完全由currency_symbol决定。
+
+    show_legend（2026-09-03新增，默认False不影响持仓页原有效果）：用户反馈"旁边标一下
+    什么颜色对应什么不然看不懂"——环形图上原本只有hover悬浮才看得到名称，AI模拟炒股页
+    新加的两个饼图不是鼠标常驻的场景，需要常驻图例。放在图表下方(orientation="h")而不是
+    右侧，因为这两个饼图2026-09-03是用st.columns并排放的，右侧图例会把本来就不宽的图
+    再挤窄。持仓页那个饼图沿用默认False，不受影响。"""
     if len(holdings) > _DONUT_MAX_SLICES:
         head = holdings[: _DONUT_MAX_SLICES - 1]
         tail_value = sum(h["value_cny"] for h in holdings[_DONUT_MAX_SLICES - 1 :])
@@ -465,9 +482,10 @@ def build_position_donut(holdings: list[dict], total_value_cny: float, currency_
         showarrow=False, font=dict(size=13), align="center",
     )
     fig.update_layout(
-        height=300,
+        height=300 if not show_legend else 360,
         margin=dict(l=10, r=10, t=10, b=10),
-        showlegend=False,
+        showlegend=show_legend,
+        legend=dict(orientation="h", yanchor="top", y=-0.05, xanchor="center", x=0.5, font=dict(size=11)) if show_legend else None,
     )
     return fig
 
@@ -605,11 +623,14 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
             rangebreaks=[dict(bounds=[str(a), str(b)]) for a, b in gap_bounds],
             range=[data_min - x_pad, data_max + x_pad],
             tickformat="%H:%M" if granularity == "day" else "%m-%d",
-            # "天"视图固定1小时一格（用户明确要求）；折线本身还是按快照实际
-            # 节奏(5分钟一个点)连，刻度间隔只影响轴上标签疏密，不影响连线
-            # 精细度。"周"/"月"视图数据跨度更大，1小时会挤爆，继续用nticks
-            # 让Plotly自己按当前range挑合适间隔。
-            **(dict(dtick=60 * 60 * 1000) if granularity == "day" else dict(nticks=8)),
+            # "天"视图固定30分钟一格（2026-09-03从1小时调窄，AI决策频率同一天
+            # 改成5分钟一次之后数据点变密，用户要求刻度密度也跟着细一档）；
+            # 折线本身还是按快照实际节奏(5分钟一个点)连，刻度间隔只影响轴上
+            # 标签疏密，不影响连线精细度——真实数据永远是5分钟粒度，这条
+            # dtick只决定隔多久在轴上画一个刻度文字，不是重新采样。"周"/"月"
+            # 视图数据跨度更大，密刻度会挤爆，继续用nticks让Plotly自己按
+            # 当前range挑合适间隔。
+            **(dict(dtick=30 * 60 * 1000) if granularity == "day" else dict(nticks=8)),
             gridcolor="rgba(0,0,0,0.04)",
         ),
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",

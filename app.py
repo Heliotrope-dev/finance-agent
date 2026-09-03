@@ -2778,7 +2778,7 @@ def _render_ai_sim_dashboard():
             allocation_rows = [r for r in allocation_rows if r["value_cny"] > 0]
             if allocation_rows and _total_usd > 0:
                 st.plotly_chart(
-                    build_position_donut(allocation_rows, _total_usd, currency_symbol="$"),
+                    build_position_donut(allocation_rows, _total_usd, currency_symbol="$", show_legend=True),
                     use_container_width=True, key="_ai_sim_allocation_donut",
                 )
             else:
@@ -2796,7 +2796,7 @@ def _render_ai_sim_dashboard():
             holdings_total_usd = sum(r["value_cny"] for r in position_rows)
             if position_rows:
                 st.plotly_chart(
-                    build_position_donut(position_rows, holdings_total_usd, currency_symbol="$"),
+                    build_position_donut(position_rows, holdings_total_usd, currency_symbol="$", show_legend=True),
                     use_container_width=True, key="_ai_sim_positions_donut",
                 )
             else:
