@@ -1,15 +1,13 @@
 [theme]
 base = "light"
-# 之前这里是Streamlit默认的 #3b82f6（Tailwind蓝），跟App其余部分的品牌色
-# 完全不搭——顶部红色横幅、涨跌红绿配色、加载遮罩的红色spinner都已经是
-# 红色系，只有"登录""注册""添加""确认删除""生成对比图"这几个
-# type="primary"按钮还是孤零零的默认蓝，视觉上像是没换完主题色的残留。
-# 改成跟品牌色一致的红（跟UP_COLOR/顶部横幅同一个#e02020），全站主色调
-# 统一成一套，不再撞色。
-primaryColor = "#e02020"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f1f5f9"
-textColor = "#0f172a"
+# 2026-09-04前端重做：主色从品牌红改成墨色。整个界面现在只有一条配色规矩
+# ——页面上唯一允许出现的饱和色是涨跌红绿，其余一律走中性灰阶。主按钮跟着
+# 用墨色而不是红色，涨跌数字才是页面上最跳的东西，这也是这类金融界面看着
+# 专业的根本原因：品牌色一旦也很红，涨跌红就不再是最醒目的信息了。
+primaryColor = "#17181C"
+backgroundColor = "#FAFAFB"
+secondaryBackgroundColor = "#F3F4F6"
+textColor = "#17181C"
 font = "sans serif"
 
 [server]
