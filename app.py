@@ -173,11 +173,13 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
    时会提前把<p>闭掉，于是留下一个高度1px、内容为空的<a>孤儿节点。给它
    加border-bottom就会在卡片里凭空多出一条横线（实测在推荐股和指数卡片
    上各出现过一次）。按class排除掉，比靠结构选择器去猜稳。 */
-[data-testid="stMarkdownContainer"] p > a:not([class*="card-link"]) {
-    color: var(--fa-text); text-decoration: none; border-bottom: 1px solid var(--fa-border-2);
+/* 链接默认不画下划线，只在悬停时出现。页面上大量的可点内容是新闻标题和
+   卡片，给它们全部常驻下划线会很吵；而且这些标题有的落在<p>里、有的不在，
+   常驻下划线会变成"有的有有的没有"的不一致。默认干净、悬停给反馈更稳。 */
+[data-testid="stMarkdownContainer"] a { text-decoration: none; border-bottom: none; }
+[data-testid="stMarkdownContainer"] p > a:not([class*="card-link"]):hover {
+    border-bottom: 1px solid var(--fa-border-2);
 }
-[data-testid="stMarkdownContainer"] p > a:not([class*="card-link"]):hover { border-bottom-color: var(--fa-ink); }
-[data-testid="stMarkdownContainer"] a[class*="card-link"] { border-bottom: none !important; text-decoration: none; }
 
 [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * {
     color: var(--fa-muted) !important; font-size: 0.79rem !important; line-height: 1.6 !important;
@@ -785,11 +787,19 @@ def _get_hot_stock_names() -> set:
     return names
 
 
-def _news_title_color(title: str, hot_names: set) -> str:
-    """标题里提到了今天有异动的公司名就标红，否则跟随默认文字色。"""
+def _news_title_style(title: str, hot_names: set) -> str:
+    """标题里提到了今天有异动的公司名就加重，否则用次级文字色。
+
+    2026-09-04改：原来这里是"提到异动股就标红"。但红色在这个项目里从头到尾
+    只有一个含义——涨（见theme.py）。一条新闻标题标红并不代表这条消息是利好，
+    只代表它提到了某支今天在动的股票，两件事撞在同一个颜色上，读者第一眼会
+    误读成"这是利涨的消息"。而且满屏红标题会把页面上真正该抢眼的涨跌数字淹掉。
+    改成用字重和文字色深浅做区分：命中的更黑更重，没命中的退到次级灰。层级
+    照样一眼分得出来，红色留给它唯一该有的含义。
+    """
     if any(name and name in title for name in hot_names):
-        return UP_COLOR
-    return "var(--fa-text)"
+        return "color:var(--fa-text);font-weight:600"
+    return "color:var(--fa-text-2)"
 
 
 def _esc(s) -> str:
@@ -1016,10 +1026,10 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
         _hot_names = _get_hot_stock_names()
         for _, r in news.iterrows():
             _title = r["新闻标题"]
-            _title_color = _news_title_color(_title, _hot_names)
+            _title_style = _news_title_style(_title, _hot_names)
             _title_html = (
-                f"<a href='{_safe_href(r.get('url', ''))}' target='_blank' style='color:{_title_color};text-decoration:none'>{_esc(_title)}</a>"
-                if idx_clickable else f"<span style='color:{_title_color}'>{_esc(_title)}</span>"
+                f"<a href='{_safe_href(r.get('url', ''))}' target='_blank' style='{_title_style};text-decoration:none'>{_esc(_title)}</a>"
+                if idx_clickable else f"<span style='{_title_style}'>{_esc(_title)}</span>"
             )
             st.markdown(
                 f"<div style='margin:6px 0;font-size:0.9rem'>"
@@ -1042,10 +1052,10 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
         date = r.get("日期") or ""
         title = r["新闻标题"]
         tag = r.get("分类", "")
-        _title_color = _news_title_color(title, _hot_names)
+        _title_style = _news_title_style(title, _hot_names)
         title_html = (
-            f"<a href='{_safe_href(r.get('url', ''))}' target='_blank' style='color:{_title_color};text-decoration:none'>{_esc(title)}</a>"
-            if clickable else f"<span style='color:{_title_color}'>{_esc(title)}</span>"
+            f"<a href='{_safe_href(r.get('url', ''))}' target='_blank' style='{_title_style};text-decoration:none'>{_esc(title)}</a>"
+            if clickable else f"<span style='{_title_style}'>{_esc(title)}</span>"
         )
         st.markdown(
             f"<div style='margin:6px 0;font-size:0.9rem'>"
@@ -2323,10 +2333,10 @@ def _render_home_page():
     show_n = 30 if st.session_state.get("_home_news_expand") else 10
     _hot_names = _get_hot_stock_names()
     for _, row in news.head(show_n).iterrows():
-        _title_color = _news_title_color(row["summary"], _hot_names)
+        _title_style = _news_title_style(row["summary"], _hot_names)
         with st.container(border=True):
             st.markdown(
-                f"<a href='{_safe_href(row['url'])}' target='_blank' style='color:{_title_color};text-decoration:none;font-weight:600'>{_esc(row['summary'])}</a>"
+                f"<a href='{_safe_href(row['url'])}' target='_blank' style='{_title_style};text-decoration:none'>{_esc(row['summary'])}</a>"
                 f"<div style='font-size:0.75rem;color:var(--fa-muted);margin-top:2px'>{_esc(row.get('tag',''))} · {_esc(row.get('日期') or '-')}</div>",
                 unsafe_allow_html=True,
             )

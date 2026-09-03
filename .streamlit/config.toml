@@ -28,3 +28,10 @@ gatherUsageStats = false
 # 端口，跟浏览器Origin对上，握手就不会被拒。
 serverAddress = "invest.heliotrope.online"
 serverPort = 2053
+
+[client]
+# 不给访问者看Streamlit自带的开发者工具条。默认的 "auto" 会在部署刚更新完
+# 之后弹出 "File change. Rerun / Always rerun" 这种提示——那是给开发者看的，
+# 出现在一个对外的页面上只会让人困惑。"viewer" 保留正常的应用菜单，去掉
+# 开发者项和这个改文件提示。
+toolbarMode = "viewer"
