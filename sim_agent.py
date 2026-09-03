@@ -672,7 +672,7 @@ def _run_cycle_locked(email: str) -> dict:
     )
 
     try:
-        # max_retries=0+timeout=60：2026-09-02排查advisor.py那边"千问对
+        # max_retries=0+timeout：2026-09-02排查advisor.py那边"千问对
         # 特定内容会挂住不返回"的真实故障时顺带查到：这里的调用之前也没设
         # 超时，只靠openai SDK的默认超时(600秒)兜底——这个agent是每15分钟
         # 触发一次的决策循环，一次AI调用扛到10分钟才失败，会让接下来至少
@@ -683,7 +683,14 @@ def _run_cycle_locked(email: str) -> dict:
         # 这里用.with_options(max_retries=0)一并关掉——失败了就走下面except
         # 分支老实记一条"AI调用失败"，等下一次cron自然触发，好过占着锁
         # 等参数×3倍的时间。
-        resp = advisor._client().with_options(max_retries=0, timeout=60).chat.completions.create(
+        #
+        # 60→100秒(2026-09-03)：用户反馈"港股开盘后连续几次决策都显示AI
+        # 调用失败"，手动复现确认——不是接口整体挂了(单独发一条极简消息
+        # 1.67秒就回)，是这里这个更重的调用(完整SOP系统提示词+候选股数据+
+        # 历史复盘，比advisor.py那边单支个股判断的prompt大得多)在真实
+        # 交易时段、大家都在用的时候会经常卡在60秒这条线上超时。100秒
+        # 相对15分钟(900秒)的节奏依然留了充足余量，不会拖累下一轮触发。
+        resp = advisor._client().with_options(max_retries=0, timeout=100).chat.completions.create(
             model=advisor._MODEL,
             messages=[
                 {"role": "system", "content": _AGENT_SYSTEM},
