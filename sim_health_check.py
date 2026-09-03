@@ -168,11 +168,27 @@ def check(db_path: Path = _DB) -> list[str]:
         if cash_row and snap_row:
             ledger = cash_row[0]["sim_virtual_cash_hkd"]
             snapped = snap_row[0]["virtual_cash_hkd"]
-            if ledger is not None and snapped is not None and abs(ledger - snapped) > _CASH_DRIFT_HKD:
+            snap_at = snap_row[0]["snapshot_at"]
+            # 快照(sim_snapshot.py)和结算(sim_agent.py)是两条独立的5分钟cron，
+            # 快照之后又成交了一笔的话，台账本来就该领先快照——这不是异常。
+            # 第一版没考虑这点，实测直接误报了一次（17:00快照2355，17:04成交
+            # 一笔1425的买入，台账变923，被当成"差了1432"报出来）。会对正常
+            # 运行报警的监控比没有监控更糟，所以这里先确认"最近一次快照之后
+            # 没有发生过成交"，只在两边本该相等的时候才比。
+            traded_after = _rows(
+                conn,
+                "SELECT 1 FROM sim_agent_runs WHERE run_at > ? AND note LIKE '%手续费共HK$%' LIMIT 1",
+                (snap_at,),
+            )
+            if (
+                not traded_after
+                and ledger is not None and snapped is not None
+                and abs(ledger - snapped) > _CASH_DRIFT_HKD
+            ):
                 problems.append(
-                    f"[台账对不上] user_settings记的虚拟现金 HK${ledger:,.2f}，"
-                    f"最新快照({_fmt(snap_row[0]['snapshot_at'])})记的是 HK${snapped:,.2f}，"
-                    f"差 HK${abs(ledger - snapped):,.2f}"
+                    f"[台账对不上] 最近一次快照({_fmt(snap_at)})之后没有任何成交，"
+                    f"但user_settings记的虚拟现金 HK${ledger:,.2f} 跟快照记的 HK${snapped:,.2f} "
+                    f"差了 HK${abs(ledger - snapped):,.2f}"
                 )
     finally:
         conn.close()
