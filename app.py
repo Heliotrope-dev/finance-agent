@@ -1648,6 +1648,7 @@ def _render_home_map():
             )
 
     markers_js = []
+    marker_coords = []
     for name, mkt, lat, lon in _HOME_MAP_MARKERS:
         if mkt == "GLOBAL":
             idx = global_idx.get(name)
@@ -1676,6 +1677,7 @@ def _render_home_map():
             label = f"<a href='{href}' target='_top' style='cursor:pointer;text-decoration:none'>{inner}</a>"
         else:
             label = inner
+        marker_coords.append([lat, lon])
         if name in _HOME_MAP_TENCENT_CODE:
             # 存进tcMarkers，供后面的JS轮询按名字找到这个marker原地更新图标。
             markers_js.append(
@@ -1713,6 +1715,18 @@ def _render_home_map():
     }}).addTo(map);
     var tcMarkers = {{}};
     {' '.join(markers_js)}
+    // 视野改成按"实际画出来的这些图标"自适应，不再写死setView([12,25],2)。
+    // 写死的问题：标记最西是纽约(-74)、最东是悉尼(151)，跨度225度，而
+    // zoom=2下能显示的经度跨度取决于容器有多宽——窗口一窄，两端的标签就
+    // 被容器的overflow:hidden裁掉半截，实际看到的是"谱500"和右边缘只剩
+    // 半个的"澳大利亚A"。fitBounds带padding能保证不管窗口多宽，所有图标
+    // 连同它们68px宽的标签都完整落在可视范围内。maxZoom限制在2，避免图标
+    // 少的时候(某个数据源挂了)反而放大到街道级别。
+    var _bounds = L.latLngBounds({json.dumps(marker_coords)});
+    function fitAll() {{ map.fitBounds(_bounds, {{padding: [40, 44], maxZoom: 2, animate: false}}); }}
+    fitAll();
+    // 窗口尺寸变化时重新适配——容器宽度变了，能容纳的经度跨度也变了。
+    window.addEventListener('resize', function() {{ map.invalidateSize(); fitAll(); }});
 
     var codeToName = {json.dumps(code_to_name)};
     var hrefByName = {json.dumps(href_by_name)};
