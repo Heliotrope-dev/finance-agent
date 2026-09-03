@@ -2866,7 +2866,11 @@ def _render_ai_sim_dashboard():
                     # 1条超预算被拦截"直接打架，看着像真买了。sim_agent.py现在把
                     # 归宿写进signals_json了，这里如实标出来。老记录没有这两个
                     # 字段，保持原样不加后缀。
-                    if s.get("_drop_reason"):
+                    if "执行成功0条" in (r.get("note") or "") and not s.get("_drop_reason"):
+                        # 老记录没有_drop_reason/_executed，但note里的"执行成功0条"
+                        # 同样能说明这一轮一笔都没成交，拿它兜底让历史记录也如实。
+                        suffix = " · 未成交"
+                    elif s.get("_drop_reason"):
                         suffix = f" · 已拦截未执行（{_esc(s['_drop_reason'])}）"
                     elif s.get("_executed") is False:
                         suffix = " · 未成交"

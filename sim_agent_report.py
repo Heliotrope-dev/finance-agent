@@ -35,6 +35,18 @@ def _to_cn(iso_str: str) -> datetime | None:
     return dt.astimezone(_CN_TZ)
 
 
+def _round_executed_nothing(note: str) -> bool:
+    """这一轮有没有可能任何一笔都没成交——只看note，不依赖signals里的新字段。
+
+    _drop_reason/_executed是2026-09-04才加的，之前落库的记录没有这两个字段，
+    只按它们判断的话，历史上那些"AI开了买入、被预算拦掉、一股没成交"的轮次
+    仍然会被当成真操作。但这些老记录的note里其实留了一个可靠线索：note是
+    按len(exec_results)和成功条数拼的，"执行成功0条"意味着这一轮确实一笔都
+    没成交。拿它兜底，修复就能对历史记录一起生效，不用等30条的窗口滚完。
+    """
+    return "执行成功0条" in (note or "")
+
+
 def build_daily_report(email: str) -> dict:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 
@@ -67,7 +79,7 @@ def build_daily_report(email: str) -> dict:
         # 买进去，把它们算成"这一轮有操作"会直接污染下面的胜率——分母里混进
         # 一堆根本没交易过的轮次，算出来的"胜率"就不是AI选股的胜率了。
         # 老记录没有_drop_reason/_executed字段，按老口径当已成交处理。
-        acted = any(
+        acted = not _round_executed_nothing(r.get("note")) and any(
             s.get("action") in ("买入", "卖出")
             and not s.get("_drop_reason") and s.get("_executed", True)
             for s in sigs
@@ -175,7 +187,7 @@ def print_detailed_report(email: str):
                 sigs = []
             # 这一段的标题是"今天每一次实际操作"，那就只能列真的成交了的——
             # 被系统拦掉的买入放在这里会让日报（每天推到微信）读起来像是真买了。
-            acted_sigs = [
+            acted_sigs = [] if _round_executed_nothing(r.get("note")) else [
                 s for s in sigs if s.get("action") in ("买入", "卖出")
                 and not s.get("_drop_reason") and s.get("_executed", True)
             ]

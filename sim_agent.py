@@ -408,12 +408,16 @@ def _history_context_lines(email: str, holdings_value_hkd: float) -> list[str]:
         # "学习试错"的循环学的全是空对空。被拦截的另外单独交代，那是另一类
         # 教训（钱不够/超集中度），对AI同样有用，但不能混进"我操作了什么"里。
         # 老记录没有_drop_reason/_executed这两个字段，按老口径当已成交处理。
-        done = [s for s in acted if not s.get("_drop_reason") and s.get("_executed", True)]
-        blocked = [s for s in acted if s.get("_drop_reason")]
+        # 老记录没有新字段，用note里的"执行成功0条"兜底，见_round_executed_nothing。
+        _nothing = "执行成功0条" in (r.get("note") or "")
+        done = [] if _nothing else [s for s in acted if not s.get("_drop_reason") and s.get("_executed", True)]
+        blocked = [s for s in acted if s.get("_drop_reason")] if not _nothing else list(acted)
         picks_text = "、".join(f"{s['action']}{s.get('name', s.get('symbol', ''))}" for s in done) or "未操作"
         if blocked:
-            picks_text += "；被系统拦截未成交：" + "、".join(
-                f"{s['action']}{s.get('name', s.get('symbol', ''))}（{s['_drop_reason']}）" for s in blocked
+            picks_text += "；未成交：" + "、".join(
+                f"{s['action']}{s.get('name', s.get('symbol', ''))}"
+                + (f"（{s['_drop_reason']}）" if s.get("_drop_reason") else "")
+                for s in blocked
             )
         if before and current_assets:
             change_pct = (current_assets - before) / before * 100
