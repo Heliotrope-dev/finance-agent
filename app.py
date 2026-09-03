@@ -2742,6 +2742,68 @@ def _render_ai_sim_dashboard():
     else:
         st.caption("收益曲线数据还在积累——AI每次运行会记一个资产快照点，多跑几次（开盘时段每15分钟一次）后这里会出现走势图。")
 
+    # 2026-09-03用户明确要求"折线图下面做两个饼状图，一个港股/美股/剩余资金
+    # 各占比例，一个持仓股票比例"——这里单独再查一次实时快照，跟上面
+    # _render_ai_sim_live_snapshot那个fragment各自独立（那个fragment
+    # 15秒自动刷新，这两个饼图跟着整页正常重跑就够，不需要同样高频，
+    # 复用同一份数据反而要把这两个饼图也塞进那个fragment，职责会混在一起）。
+    # 复用持仓页现成的build_position_donut，只是新增的currency_symbol参数
+    # 传"$"——这个页面2026-09-02已经全部改成美元展示，不能沿用那边默认的¥。
+    try:
+        _donut_snapshot = sim_trader.get_agent_snapshot()
+        _donut_cash = get_sim_virtual_cash(email)
+        if _donut_cash is None:
+            _donut_cash = sim_agent._VIRTUAL_BUDGET_HKD
+        _usd_rate = sim_trader.USD_HKD_RATE
+        _hk_value = sum(
+            p["market_val_hkd"] for p in _donut_snapshot["positions"]
+            if p["market"] == "HK" and p.get("market_val_hkd") is not None
+        )
+        _us_value = sum(
+            p["market_val_hkd"] for p in _donut_snapshot["positions"]
+            if p["market"] == "US" and p.get("market_val_hkd") is not None
+        )
+        _total_usd = (_hk_value + _us_value + _donut_cash) / _usd_rate
+
+        st.divider()
+        st.markdown("**资产分布**")
+        donut_col1, donut_col2 = st.columns(2)
+        with donut_col1:
+            st.caption("港股 / 美股 / 剩余现金")
+            allocation_rows = [
+                {"label": "港股持仓", "value_cny": _hk_value / _usd_rate},
+                {"label": "美股持仓", "value_cny": _us_value / _usd_rate},
+                {"label": "剩余现金", "value_cny": _donut_cash / _usd_rate},
+            ]
+            allocation_rows = [r for r in allocation_rows if r["value_cny"] > 0]
+            if allocation_rows and _total_usd > 0:
+                st.plotly_chart(
+                    build_position_donut(allocation_rows, _total_usd, currency_symbol="$"),
+                    use_container_width=True, key="_ai_sim_allocation_donut",
+                )
+            else:
+                st.caption("暂无数据。")
+        with donut_col2:
+            st.caption("持仓个股占比")
+            position_rows = sorted(
+                (
+                    {"label": f"{p['name']}（{p['code']}）", "value_cny": p["market_val_hkd"] / _usd_rate}
+                    for p in _donut_snapshot["positions"]
+                    if p.get("market_val_hkd")
+                ),
+                key=lambda r: r["value_cny"], reverse=True,
+            )
+            holdings_total_usd = sum(r["value_cny"] for r in position_rows)
+            if position_rows:
+                st.plotly_chart(
+                    build_position_donut(position_rows, holdings_total_usd, currency_symbol="$"),
+                    use_container_width=True, key="_ai_sim_positions_donut",
+                )
+            else:
+                st.caption("当前空仓。")
+    except Exception as e:
+        st.caption(f"资产分布图暂时加载失败：{e}")
+
     st.divider()
     st.markdown("**AI每次决策记录**")
     if not runs:

@@ -423,14 +423,20 @@ def build_multi_comparison(hist_by_name: dict) -> go.Figure:
 _DONUT_MAX_SLICES = 8
 
 
-def build_position_donut(holdings: list[dict], total_value_cny: float) -> go.Figure:
-    """持仓占比环形图。holdings: [{"label": "名称（代码）", "value_cny": 折人民币市值}, ...]，
+def build_position_donut(holdings: list[dict], total_value_cny: float, currency_symbol: str = "¥") -> go.Figure:
+    """持仓占比环形图。holdings: [{"label": "名称（代码）", "value_cny": 折算后市值}, ...]，
     调用方（app.py）负责按金额降序排好、汇率折算好——这里不做排序也不做汇率转换，
     避免图表模块反过来依赖data_sources。配色直接复用_MULTI_COLORS（用户明确要求
     按手绘草图原样用红绿等颜色，不用另外发明"避开红绿"的调色板，即使跟涨跌红绿
     语义有重叠也接受）。超过_DONUT_MAX_SLICES个持仓，尾部合并成"其他"用中性灰，
     避免小额持仓挤占过多颜色/图例空间。总资产放hole中间的annotation里，
-    会跟着图一起响应式缩放，不写在图外的HTML里。"""
+    会跟着图一起响应式缩放，不写在图外的HTML里。
+
+    currency_symbol（2026-09-03新增）：原本这个函数只服务持仓页(人民币¥)，AI模拟炒股页
+    2026-09-02已经改成全部按美元展示，复用这个函数画它的两个新饼图时如果还写死¥就会
+    显示错误的币种符号。加一个参数控制符号，字段名依然叫value_cny（沿用旧签名，
+    不强改调用方already-working的字典结构），调用方传美元数字进来时这个字段名只是
+    历史遗留，不影响实际显示——显示内容完全由currency_symbol决定。"""
     if len(holdings) > _DONUT_MAX_SLICES:
         head = holdings[: _DONUT_MAX_SLICES - 1]
         tail_value = sum(h["value_cny"] for h in holdings[_DONUT_MAX_SLICES - 1 :])
@@ -450,12 +456,12 @@ def build_position_donut(holdings: list[dict], total_value_cny: float) -> go.Fig
             labels=labels, values=values, hole=0.62,
             marker=dict(colors=colors, line=dict(color="#fff", width=2)),
             textinfo="percent", textposition="inside",
-            hovertemplate="%{label}<br>¥%{value:,.0f}（%{percent}）<extra></extra>",
+            hovertemplate=f"%{{label}}<br>{currency_symbol}%{{value:,.0f}}（%{{percent}}）<extra></extra>",
             sort=False,
         )
     )
     fig.add_annotation(
-        text=f"总资产<br><b style='font-size:1.3em'>¥{total_value_cny:,.0f}</b>",
+        text=f"总资产<br><b style='font-size:1.3em'>{currency_symbol}{total_value_cny:,.0f}</b>",
         showarrow=False, font=dict(size=13), align="center",
     )
     fig.update_layout(
