@@ -288,19 +288,63 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 [data-testid="stMetricDelta"] svg { width: 14px !important; height: 14px !important; }
 
 /* ── 按钮 ─────────────────────────────────────────────────────────────── */
+/* 按钮系统。全站只有三种按钮，各自职责清楚，不再每个页面自己写一套：
+   次要（默认）= 白底发丝边框；主要 = 墨色实底；安静（tertiary）= 无边框弱化，
+   用在图标按钮和返回这类不该抢戏的位置。 */
 .stButton button {
     background: var(--fa-surface) !important; border: 1px solid var(--fa-border-2) !important;
     color: var(--fa-text) !important; border-radius: var(--fa-radius-sm) !important;
     font-size: 0.855rem !important; font-weight: 500 !important; padding: 7px 15px !important;
-    box-shadow: none !important; transition: background .15s ease, border-color .15s ease;
+    box-shadow: none !important;
+    transition: background .15s ease, border-color .15s ease, color .15s ease;
 }
 .stButton button:hover { background: var(--fa-fill) !important; border-color: var(--fa-border-2) !important; color: var(--fa-text) !important; }
+.stButton button:active { background: #ECEDF0 !important; }
+.stButton button:focus, .stButton button:focus-visible { box-shadow: none !important; outline: none !important; }
+
 .stButton button[kind="primary"], .stButton button[data-testid="stBaseButton-primary"] {
     background: var(--fa-ink) !important; border-color: var(--fa-ink) !important; color: #fff !important;
 }
 .stButton button[kind="primary"]:hover, .stButton button[data-testid="stBaseButton-primary"]:hover {
     background: #000 !important; border-color: #000 !important; color: #fff !important;
 }
+/* 安静按钮：默认几乎看不见，悬停才浮出一块底。项目里的图标按钮（搜索/添加/
+   对比/删除/返回）全部用它，不该在页面上摆一圈边框抢注意力。 */
+.stButton button[kind="tertiary"], .stButton button[data-testid="stBaseButton-tertiary"] {
+    background: transparent !important; border: 1px solid transparent !important;
+    color: var(--fa-muted) !important;
+}
+.stButton button[kind="tertiary"]:hover, .stButton button[data-testid="stBaseButton-tertiary"]:hover {
+    background: var(--fa-fill) !important; border-color: transparent !important; color: var(--fa-text) !important;
+}
+
+/* 图标按钮统一规格：36px 正圆、图标 1.12rem。原来各处自己写死 44px + 1.6rem，
+   在这套克制的版式里显得又大又重，而且持仓页 44px、删除键 36px，同一个页面
+   两种尺寸。这里收口成一份，各处不再重复定义。 */
+[class*="st-key-pos_search_icon"] button, [class*="st-key-pos_compare_icon"] button,
+[class*="st-key-pos_add_icon"] button, [class*="st-key-watch_search_icon"] button,
+[class*="st-key-watch_add_icon"] button, [class*="st-key-pos_del_"] button,
+[class*="st-key-detail_back_"] button, [class*="st-key-idx_back_"] button,
+[class*="st-key-sector_back_"] button {
+    height: 36px !important; min-height: 36px !important;
+    width: 36px !important; min-width: 36px !important;
+    padding: 0 !important; border-radius: 50% !important;
+    display: flex !important; align-items: center !important; justify-content: center !important;
+}
+[class*="st-key-pos_search_icon"] span[data-testid="stIconMaterial"],
+[class*="st-key-pos_compare_icon"] span[data-testid="stIconMaterial"],
+[class*="st-key-pos_add_icon"] span[data-testid="stIconMaterial"],
+[class*="st-key-watch_search_icon"] span[data-testid="stIconMaterial"],
+[class*="st-key-watch_add_icon"] span[data-testid="stIconMaterial"],
+[class*="st-key-pos_del_"] span[data-testid="stIconMaterial"],
+[class*="st-key-detail_back_"] span[data-testid="stIconMaterial"],
+[class*="st-key-idx_back_"] span[data-testid="stIconMaterial"],
+[class*="st-key-sector_back_"] span[data-testid="stIconMaterial"] {
+    font-size: 1.12rem !important;
+}
+/* 删除/取消关注是破坏性操作，平时保持中性，悬停才透出跌色作为警示——
+   一上来就画成红色会让整个列表看着像满屏警告。 */
+[class*="st-key-pos_del_"] button:hover span[data-testid="stIconMaterial"] { color: #D0342C !important; }
 
 /* ── 输入 ─────────────────────────────────────────────────────────────── */
 [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input, [data-testid="stTextArea"] textarea {
@@ -577,11 +621,18 @@ if st.query_params.get("open_symbol"):
     st.session_state["_detail_symbol"] = st.query_params["open_symbol"]
     st.session_state["_detail_market"] = st.query_params.get("open_market", "A")
     st.session_state["_detail_name"] = st.query_params.get("open_name", st.query_params["open_symbol"])
-    # 从持仓卡片点进来的，"返回"要能回到持仓分区，不是每次都弹回默认的
-    # "行情"分区——整页导航会把session_state清空，"_active_section"记不住
-    # 是从哪个分区点进来的，得靠这个参数显式带过来。
-    if st.query_params.get("open_from") == "pos":
+    # 从卡片点进来的，"返回"要能回到原来那个分区，不是每次都弹回默认的
+    # "行情"——整页导航会把session_state清空，"_active_section"记不住是从哪个
+    # 分区点进来的，得靠这个参数显式带过来。历史上这里只认"pos"一个值、固定
+    # 回"持仓"，自选拆成独立分区后就不够用了，改成直接带分区名。
+    _from = st.query_params.get("open_from")
+    _VALID_SECTIONS = ("首页", "行情", "持仓", "自选", "AI模拟炒股")
+    if _from == "pos":          # 兼容还没刷新的旧页面里残留的老链接
         st.session_state["_active_section"] = "持仓"
+    elif _from in _VALID_SECTIONS:
+        st.session_state["_active_section"] = _from
+    if _from:
+        st.session_state["_detail_return_section"] = st.session_state.get("_active_section", "持仓")
     st.query_params.clear()
     st.rerun()
 if st.query_params.get("open_index_code"):
@@ -1248,14 +1299,44 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
             st.markdown(st.session_state[mod_key]["ai_text"])
 
 
-_PRICE_FLASH_CSS = (
-    "<style>"
-    "@keyframes priceFlashUp { 0% { background: rgba(224,32,32,0.28); } 100% { background: transparent; } }"
-    "@keyframes priceFlashDown { 0% { background: rgba(34,160,107,0.28); } 100% { background: transparent; } }"
-    ".price-flash-up { animation: priceFlashUp 1.4s ease-out; }"
-    ".price-flash-down { animation: priceFlashDown 1.4s ease-out; }"
-    "</style>"
-)
+# 价格跳动时的一闪。三处改动：
+# 1. 颜色原来硬编码成 rgba(224,32,32) / rgba(34,160,107)，是2026-09-04换色板
+#    之前的旧红旧绿，跟现在页面上其它地方的涨跌色已经不是同一个色号了。改成
+#    从 theme.py 的 UP_COLOR/DOWN_COLOR 换算，以后改色板这里自动跟着走。
+# 2. 透明度 0.28 -> 0.13。0.28 在这套近乎无色的界面里是一整块明显的色斑，
+#    "有变化"这个信息不需要这么大的动静；淡一半仍然一眼看得到，但不再是
+#    页面上最抢眼的东西。
+# 3. 从纯背景色改成从左往右的渐隐，并加上圆角——整块方形色块亮起来很生硬，
+#    带一点方向感的渐隐更像"数字刚跳过一下"而不是"这一格被选中了"。
+def _flash_css() -> str:
+    up = _hex_to_rgba_css(UP_COLOR, 0.13)
+    down = _hex_to_rgba_css(DOWN_COLOR, 0.13)
+    return (
+        "<style>"
+        f"@keyframes priceFlashUp {{ 0% {{ background: linear-gradient(90deg, {up}, transparent); }}"
+        " 100% { background: transparent; } }"
+        f"@keyframes priceFlashDown {{ 0% {{ background: linear-gradient(90deg, {down}, transparent); }}"
+        " 100% { background: transparent; } }"
+        ".price-flash-up { animation: priceFlashUp 1.1s ease-out; border-radius: 6px; }"
+        ".price-flash-down { animation: priceFlashDown 1.1s ease-out; border-radius: 6px; }"
+        "</style>"
+    )
+
+
+def _hex_to_rgba_css(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+_PRICE_FLASH_CSS = None  # 延迟到第一次用的时候再生成，见下面的 _price_flash_css()
+
+
+def _price_flash_css() -> str:
+    global _PRICE_FLASH_CSS
+    if _PRICE_FLASH_CSS is None:
+        _PRICE_FLASH_CSS = _flash_css()
+    return _PRICE_FLASH_CSS
 
 
 @st.fragment(run_every=3)
@@ -1285,7 +1366,7 @@ def _render_price_header(symbol: str, market: str):
         flash_class = "price-flash-up" if spot["最新价"] > prev else "price-flash-down"
 
     st.markdown(
-        _PRICE_FLASH_CSS
+        _price_flash_css()
         + f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:6px'>"
         + f"<span style='font-size:2rem;font-weight:700;color:{color}'>{spot['最新价']:.2f}</span>&nbsp;&nbsp;"
         + f"<span style='font-size:1.1rem;color:{color}'>{change:+.2f} ({change_pct:+.2f}%)</span>"
@@ -1333,7 +1414,7 @@ def _render_index_price_header(name: str, market: str):
         flash_class = "price-flash-up" if idx_snap["最新"] > prev else "price-flash-down"
 
     st.markdown(
-        _PRICE_FLASH_CSS
+        _price_flash_css()
         + f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:6px'>"
         + f"<span style='font-size:2rem;font-weight:700;color:{color}'>{idx_snap['最新']:,.2f}</span>&nbsp;&nbsp;"
         + f"<span style='font-size:1.1rem;color:{color}'>{idx_snap['涨跌']:+.2f} ({idx_snap['涨跌幅']:+.2f}%)</span>"
@@ -1372,7 +1453,7 @@ def _render_stock_movers_cards(df, market: str):
     fragment）都已经是run_every=3自动刷新，数据变了这里自然就能跟着闪。
     """
     _inject_pos_card_css()
-    st.markdown(_PRICE_FLASH_CSS, unsafe_allow_html=True)
+    st.markdown(_price_flash_css(), unsafe_allow_html=True)
     for _, row in df.iterrows():
         mv_symbol = str(row["代码"])
         mv_color = UP_COLOR if row["涨跌幅"] >= 0 else DOWN_COLOR
@@ -1513,7 +1594,7 @@ def _render_index_snapshot(mkt_code: str):
         return
 
     st.markdown(
-        _PRICE_FLASH_CSS
+        _price_flash_css()
         + "<style>"
         "a.idx-card-link, a.idx-card-link:link, a.idx-card-link:visited {"
         "  text-decoration: none !important; color: inherit !important;"
@@ -1729,11 +1810,10 @@ def _render_sector_detail(name: str, market: str):
     成分股点进去就是已有的个股详情页（走势+AI分析）。板块本身不需要单独的
     K线/AI分析，这里不重新造轮子。
     """
-    st.markdown(
-        "<style>[class*='st-key-sector_back_'] button p { font-size: 1.5rem !important; font-weight: 700; }</style>",
-        unsafe_allow_html=True,
-    )
-    if st.button("←", key=f"sector_back_{name}_{market}", type="tertiary", help="返回行情"):
+    # 返回键用真正的图标，不用"←"这个文字字形。文字箭头要靠加大字号加粗才看得清，
+    # 放大后字形本身的粗细、基线、居中都跟旁边的图标按钮对不齐，是很容易露怯的
+    # 一处；换成 material 图标，尺寸和对齐交给统一的图标按钮规格处理。
+    if st.button("", icon=":material/arrow_back:", key=f"sector_back_{name}_{market}", type="tertiary", help="返回行情"):
         for k in ("_sector_detail_name", "_sector_detail_market"):
             st.session_state.pop(k, None)
         st.session_state["_active_section"] = "行情"
@@ -2402,16 +2482,12 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     # 图表/AI文字这些开销大的部分每30秒重新渲染一次——这正是"网页卡卡的"的
     # 真实来源。价格的"活着的感觉"已经由下面的fragment用更轻量的方式做到了，
     # 删掉这个多余的整页定时rerun。
-    st.markdown(
-        "<style>"
-        "[class*='st-key-detail_back_'] button p { font-size: 1.5rem !important; font-weight: 700; }"
-        "</style>",
-        unsafe_allow_html=True,
-    )
-    if st.button("←", key=f"detail_back_{symbol}_{market}", type="tertiary", help="返回持仓"):
+    if st.button("", icon=":material/arrow_back:", key=f"detail_back_{symbol}_{market}", type="tertiary", help="返回"):
         for k in ("_detail_symbol", "_detail_market", "_detail_name", "_detail_module"):
             st.session_state.pop(k, None)
-        st.session_state["_active_section"] = "持仓"
+        # 回到进来时那个分区。以前这里写死"持仓"，从自选点进来的用户按返回会
+        # 落在一个自己没在看的分区上。
+        st.session_state["_active_section"] = st.session_state.get("_detail_return_section", "持仓")
         st.rerun()
 
     # 详情页页眉。跟首页一样去掉了通栏红底——标题本身用字号和字重就能站住，
@@ -2560,13 +2636,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
 
 def _render_index_detail(name: str, code: str, market: str):
     # 同样的原因删掉了_inject_auto_refresh，见_render_stock_detail开头的注释。
-    st.markdown(
-        "<style>"
-        "[class*='st-key-idx_back_'] button p { font-size: 1.5rem !important; font-weight: 700; }"
-        "</style>",
-        unsafe_allow_html=True,
-    )
-    if st.button("←", key=f"idx_back_{code}_{market}", type="tertiary", help="返回行情"):
+    if st.button("", icon=":material/arrow_back:", key=f"idx_back_{code}_{market}", type="tertiary", help="返回行情"):
         for k in ("_index_detail_code", "_index_detail_market", "_index_detail_name"):
             st.session_state.pop(k, None)
         st.session_state["_active_section"] = "行情"
@@ -3342,7 +3412,7 @@ def _render_position_rows(position_items: list, _email: str):
 
 
     st.markdown(
-        _PRICE_FLASH_CSS
+        _price_flash_css()
         + "<style>"
         # 浏览器默认的 a:link/a:visited 样式（蓝色+下划线）选择器带伪类，
         # 优先级比单纯的class选择器高，必须用!important才能真正覆盖掉。
@@ -3355,12 +3425,6 @@ def _render_position_rows(position_items: list, _email: str):
         # 跟卡片内容对齐。垂直对齐交给st.columns自己的vertical_alignment="center"
         # 处理（原生机制，比猜CSS高度靠谱）。默认按钮是圆角矩形/胶囊形，用户
         # 反馈这个和"对比/搜索"图标按钮一样改成正圆——固定等宽高+50%圆角。
-        + "[class*='st-key-pos_del_'] button p { font-size: 1.5rem !important; font-weight: 700; margin: 0; }"
-        + "[class*='st-key-pos_del_'] button {"
-        + "  height: 36px; min-height: 36px; width: 36px; min-width: 36px;"
-        + "  padding: 0; border-radius: 50% !important;"
-        + "  display: flex; align-items: center; justify-content: center;"
-        + "}"
         + "</style>",
         unsafe_allow_html=True,
     )
@@ -3552,7 +3616,12 @@ def _render_position_rows(position_items: list, _email: str):
                 f"?open_symbol={urllib.parse.quote(symbol)}"
                 f"&open_market={urllib.parse.quote(item_market)}"
                 f"&open_name={urllib.parse.quote(item['name'])}"
-                f"&open_from=pos"
+                # 带上真正的来源分区，不再写死"pos"。2026-09-01把"自选"从持仓里
+                # 拆成独立分区之后，这两个分区共用同一个 _render_position_rows，
+                # 于是从自选点进详情、再点返回，会被送回"持仓"——去了一个自己
+                # 根本没在看的分区。整页导航会重建 session，记不住来路，只能靠
+                # URL 显式带过去。
+                f"&open_from={urllib.parse.quote(st.session_state.get('_active_section', '持仓'))}"
                 f"{_auth_qs()}"
             )
             # 名称+走势图（静态部分）和价格+涨跌幅（动态部分）拆成两个独立的
@@ -3579,7 +3648,7 @@ def _render_position_rows(position_items: list, _email: str):
                 f"</div>{pnl_html}</a>",
                 unsafe_allow_html=True,
             )
-            if del_col.button("×", key=f"pos_del_{symbol}", help="卖出/取消关注", type="tertiary"):
+            if del_col.button("", icon=":material/close:", key=f"pos_del_{symbol}", help="卖出/取消关注", type="tertiary"):
                 # 不能在这里直接调_confirm_sell_dialog——这个函数(_render_position_rows)
                 # 是@st.fragment(run_every=3)，弹窗打开后绑定的是当下这个fragment实例，
                 # 但每3秒的自动刷新会让fragment在后台重新生成一份，弹窗还留在界面上、
@@ -4457,22 +4526,6 @@ else:
                 # 股票"怎么跑到持仓里去了"，跟真金白银的仓位堆在一起分不清。
                 holding_items = [p for p in positions if (p.get("shares") or 0) > 0]
 
-                st.markdown(
-                    "<style>"
-                    "[class*='st-key-pos_search_icon'] button, [class*='st-key-pos_compare_icon'] button,"
-                    "[class*='st-key-pos_add_icon'] button {"
-                    "  display: flex; align-items: center; justify-content: center;"
-                    "  height: 44px; min-height: 44px; width: 44px; min-width: 44px;"
-                    "  padding: 0; border-radius: 50% !important;"
-                    "}"
-                    "[class*='st-key-pos_search_icon'] span[data-testid='stIconMaterial'],"
-                    "[class*='st-key-pos_compare_icon'] span[data-testid='stIconMaterial'],"
-                    "[class*='st-key-pos_add_icon'] span[data-testid='stIconMaterial'] {"
-                    "  font-size: 1.6rem !important;"
-                    "}"
-                    "</style>",
-                    unsafe_allow_html=True,
-                )
                 # 搜索（纯查行情，跳详情页）和添加持仓（真正记一笔仓位）是两个
                 # 独立入口，不要合并——之前合并成一个放大镜图标时，点开就是"添加
                 # 持仓"弹窗，没有单纯查一下行情的入口。build_multi_comparison
@@ -4555,20 +4608,6 @@ else:
 
                 # 复用持仓分区那套圆形图标按钮样式（见上面"持仓"分支同款CSS的
                 # 注释）——两个分区各自独立渲染，键名前缀不同，样式要各放一份。
-                st.markdown(
-                    "<style>"
-                    "[class*='st-key-watch_search_icon'] button, [class*='st-key-watch_add_icon'] button {"
-                    "  display: flex; align-items: center; justify-content: center;"
-                    "  height: 44px; min-height: 44px; width: 44px; min-width: 44px;"
-                    "  padding: 0; border-radius: 50% !important;"
-                    "}"
-                    "[class*='st-key-watch_search_icon'] span[data-testid='stIconMaterial'],"
-                    "[class*='st-key-watch_add_icon'] span[data-testid='stIconMaterial'] {"
-                    "  font-size: 1.6rem !important;"
-                    "}"
-                    "</style>",
-                    unsafe_allow_html=True,
-                )
                 _, search_col, add_col = st.columns([10, 1, 1], vertical_alignment="center")
                 if search_col.button("", icon=":material/search:", key="watch_search_icon", type="tertiary", help="搜索"):
                     _show_stock_search_dialog(_email)
