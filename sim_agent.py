@@ -993,7 +993,15 @@ def _run_cycle_locked(email: str) -> dict:
                 {"role": "system", "content": _AGENT_SYSTEM},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=2000, temperature=0.4, timeout=200, tag="sim_agent",
+            # 2000->8000（2026-09-04）：切到智谱glm-4.5-air之后连续多轮
+            # "AI返回空内容（finish_reason=length）"，决策链路整个停摆。
+            # air是推理模型，隐藏的reasoning_content跟正文共用同一个
+            # max_tokens预算，而这一轮的prompt是全项目最重的一个——完整SOP
+            # 加持仓明细加几十支候选行情加宏观简报加历史战绩，思考链相应也最长，
+            # 原来的2000（转移到智谱后按倍数放宽也才4000）在思考阶段就烧穿了，
+            # 正文一个字都没轮到。judge那边8000（智谱16000）是跑得通的，
+            # 这里对齐同一个量级。
+            max_tokens=8000, temperature=0.4, timeout=200, tag="sim_agent",
         )
     except Exception as e:
         tracker.log_sim_agent_run(email, open_markets, net_value_before, "", "[]", "失败", f"AI调用失败：{e}")

@@ -389,11 +389,27 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
         if client is None:
             continue
         try:
+            budget = int(max_tokens * budget_mult)
             resp = client.with_options(max_retries=0, timeout=timeout).chat.completions.create(
                 model=model, messages=messages,
-                max_tokens=int(max_tokens * budget_mult), temperature=temperature, stream=False,
+                max_tokens=budget, temperature=temperature, stream=False,
             )
             text = (resp.choices[0].message.content or "").strip()
+            # 预算烧穿就原地加倍重试一次。推理模型把隐藏思考链和正文算在同一个
+            # max_tokens里，思考长一点就会出现"finish_reason=length且正文为空"
+            # ——这不是这家供应商不可用，换一家也是同样的坑，唯一的解法就是给
+            # 更多预算。2026-09-04模拟盘决策就是这么连续停摆的，光靠调大调用点
+            # 的常量不够稳（prompt长度会随持仓和候选数量浮动），所以在这里兜一层。
+            # 只重试一次：还不够说明预算设定本身有问题，该去改调用点，无限翻倍
+            # 只会把一次失败变成一次昂贵的失败。
+            if not text and resp.choices[0].finish_reason == "length":
+                print(f"[failover{('/' + tag) if tag else ''}] {who}预算{budget}被思考链烧穿，"
+                      f"加倍到{budget * 2}重试一次")
+                resp = client.with_options(max_retries=0, timeout=timeout).chat.completions.create(
+                    model=model, messages=messages,
+                    max_tokens=budget * 2, temperature=temperature, stream=False,
+                )
+                text = (resp.choices[0].message.content or "").strip()
             if not text:
                 raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
             if who != "千问":
