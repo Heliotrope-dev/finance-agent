@@ -387,6 +387,24 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
     background: var(--fa-fill) !important; border-color: transparent !important; color: var(--fa-text) !important;
 }
 
+/* "我的"页底部"关于"里的两个折叠面板。默认是白底圆角带框的盒子，跟同一页
+   上面那些发丝线分隔的行（最近搜索、偏好）完全不是一套，在页尾突兀地冒出
+   两个白盒子。这里把它们压成跟上面一模一样的行：无边框无底色、下面一条
+   发丝线、标签字号字色跟"偏好"那几行对齐，点开才展开正文。 */
+[class*="st-key-my_about_"] [data-testid="stExpander"] details {
+    border: none !important; background: transparent !important; border-radius: 0 !important;
+    border-bottom: 1px solid var(--fa-border) !important;
+}
+[class*="st-key-my_about_"] [data-testid="stExpander"] summary {
+    padding: 9px 0 !important; background: transparent !important; border-radius: 0 !important;
+}
+[class*="st-key-my_about_"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
+[class*="st-key-my_about_"] [data-testid="stExpander"] summary p {
+    font-size: 0.88rem !important; color: var(--fa-text-2) !important; font-weight: 400 !important;
+}
+[class*="st-key-my_about_"] [data-testid="stExpander"] summary:hover p { color: var(--fa-text) !important; }
+[class*="st-key-my_about_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
+
 /* 首页推荐股排行榜的条目。跟持仓/自选列表同一套：去掉卡片边框、发丝线分隔，
    行内那个"基本面/技术面/价格位置"折叠框也去掉边框和底色。 */
 [class*="st-key-lb_row_"] {
@@ -2384,8 +2402,14 @@ def _render_advice_section():
 
 
 def _render_app_guide():
-    """应用指南。2026-09-04侧边栏整个撤掉，这块挪到"我的"分区，正文原样保留。"""
-    with st.expander("应用指南"):
+    """应用指南。2026-09-04侧边栏整个撤掉，这块挪到"我的"分区，正文原样保留。
+
+    外面包一层带key的容器：这两个折叠面板原来还是Streamlit默认的白底圆角带框
+    样式，跟同一页上面那些发丝线分隔的行（最近搜索、偏好）不是一套东西，
+    在"我的"这一页底部突兀地冒出两个白盒子。靠这个key在CSS里把它们压成
+    跟上面完全一致的行。
+    """
+    with st.container(key="my_about_guide"), st.expander("应用指南"):
         st.markdown(
             "**定位**\n\n"
             "Invest Agent 是一个多市场（A股/港股/美股）行情查询和数据交叉验证工具，"
@@ -2428,7 +2452,7 @@ def _render_app_guide():
 
 def _render_data_source_health():
     """数据源连接与熔断状态。同样是2026-09-04从侧边栏挪过来的，正文未改。"""
-    with st.expander("数据源状态"):
+    with st.container(key="my_about_health"), st.expander("数据源状态"):
         _health = get_data_source_health()
         _futu = _health["futu"]
         if not _futu["已安装SDK"]:
