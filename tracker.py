@@ -1522,6 +1522,63 @@ def get_position_advice(email: str) -> dict:
         return {r["symbol"]: dict(r) for r in rows}
 
 
+def get_user_overview(email: str) -> dict:
+    """"我的"页要的那一份个人概览，一次连接里全取完。
+
+    2026-09-04新增。原来这些数字散落在各处（自选/持仓数在页面里现算、分析
+    次数没人统计过、搜索历史只在搜索框里用），"我的"这个分区要把它们放到一起，
+    与其在 app.py 里连着开五六次连接、写五六段 SQL，不如在这里一次取完——
+    这类概览查询本来就该是一次往返，页面那边只管画。
+
+    返回的都是原始计数和分组，不做任何百分比/文案，展示逻辑留给前端。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        one = lambda sql, *a: c.execute(sql, a).fetchone()[0]
+
+        watch_count = one(
+            "SELECT count(*) FROM positions WHERE email = ? AND (shares IS NULL OR shares <= 0)", email)
+        hold_count = one("SELECT count(*) FROM positions WHERE email = ? AND shares > 0", email)
+        analysis_count = one("SELECT count(*) FROM analyses WHERE email = ?", email)
+        search_count = one("SELECT count(*) FROM search_history WHERE email = ?", email)
+
+        # 自选/持仓按市场分布——比一个总数更能说明"这个人在看哪个市场"
+        by_market = {
+            r["market"] or "A": r["n"]
+            for r in c.execute(
+                "SELECT market, count(*) AS n FROM positions WHERE email = ? GROUP BY market", (email,))
+        }
+
+        # "从什么时候开始用的"——取各张表里最早的一条时间，谁早算谁。用户表本身
+        # 没存注册时间（auth那边只存了凭证），只能从活动记录反推，够用了。
+        firsts = []
+        for sql in (
+            "SELECT min(added_at) FROM positions WHERE email = ?",
+            "SELECT min(searched_at) FROM search_history WHERE email = ?",
+            "SELECT min(created_at) FROM analyses WHERE email = ?",
+        ):
+            v = c.execute(sql, (email,)).fetchone()[0]
+            if v:
+                firsts.append(v)
+        first_seen = min(firsts) if firsts else None
+
+        row = c.execute(
+            "SELECT max_capital_cny, ai_sim_trading, sim_agent_enabled FROM user_settings WHERE email = ?",
+            (email,),
+        ).fetchone()
+        settings = dict(row) if row else {}
+
+    return {
+        "watch_count": watch_count, "hold_count": hold_count,
+        "analysis_count": analysis_count, "search_count": search_count,
+        "by_market": by_market, "first_seen": first_seen,
+        "max_capital_cny": settings.get("max_capital_cny"),
+        "ai_sim_trading": bool(settings.get("ai_sim_trading")),
+        "sim_agent_enabled": bool(settings.get("sim_agent_enabled")),
+    }
+
+
 def get_search_history(email: str, limit: int = 10) -> list[dict]:
     init_db()
     with closing(_conn()) as c:

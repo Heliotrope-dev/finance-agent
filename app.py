@@ -62,7 +62,7 @@ from assistant import build_context as build_assistant_context, stream_reply as 
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
     get_accuracy_trend, get_daily_accuracy, add_watch_only, is_position_tracked,
-    add_search_history, get_search_history, get_latest_leaderboard,
+    add_search_history, get_search_history, get_latest_leaderboard, get_user_overview,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
     get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
@@ -88,7 +88,11 @@ for _k in ("SUPABASE_URL", "SUPABASE_KEY", "ADVISOR_EMAIL"):
         except Exception:
             pass
 
-st.set_page_config(page_title="Invest Agent", layout="wide")
+# initial_sidebar_state="collapsed"：2026-09-04把侧边栏整个撤掉了（内容挪进
+# "我的"分区）。不往 st.sidebar 里写东西之后，Streamlit 依然会在左上角留一个
+# 展开箭头，点开是一条空白栏——一个什么都没有的死入口，比留着更让人困惑。
+# 这里连同下面 CSS 里的 stSidebar/stSidebarCollapsedControl 一起彻底隐掉。
+st.set_page_config(page_title="Invest Agent", layout="wide", initial_sidebar_state="collapsed")
 
 # ── 主题（移动端适配 + 涨跌红绿色统一）────────────────────────────────────────
 # 这里原来还有一版深色模式，用户实测反馈"按了跟没按一样，很烦"——撤掉了，
@@ -383,6 +387,25 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
     background: var(--fa-fill) !important; border-color: transparent !important; color: var(--fa-text) !important;
 }
 
+/* 首页推荐股排行榜的条目。跟持仓/自选列表同一套：去掉卡片边框、发丝线分隔，
+   行内那个"基本面/技术面/价格位置"折叠框也去掉边框和底色。 */
+[class*="st-key-lb_row_"] {
+    border: none !important; background: transparent !important;
+    border-bottom: 1px solid var(--fa-border) !important;
+    border-radius: 0 !important; padding: 16px 2px 10px !important;
+}
+[class*="st-key-lb_row_"] [data-testid="stExpander"] details {
+    border: none !important; background: transparent !important; border-radius: 0 !important;
+}
+[class*="st-key-lb_row_"] [data-testid="stExpander"] summary {
+    padding: 4px 0 0 !important; background: transparent !important;
+}
+[class*="st-key-lb_row_"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
+[class*="st-key-lb_row_"] [data-testid="stExpander"] summary p {
+    font-size: 0.78rem !important; color: var(--fa-faint) !important; font-weight: 400 !important;
+}
+[class*="st-key-lb_row_"] [data-testid="stExpander"] summary:hover p { color: var(--fa-muted) !important; }
+
 /* 持仓/自选列表的行。去掉卡片边框、改成发丝分隔的平铺行；行内那个
    "AI持仓判断"折叠框也一并去掉边框和底色，变成一行安静的可展开文字。
    目标是把"卡片里套卡片"压成一张干净的行情列表。 */
@@ -452,7 +475,13 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 }
 [data-baseweb="input"], [data-baseweb="base-input"] { background: var(--fa-surface) !important; border-radius: var(--fa-radius-sm) !important; }
 
-/* ── 侧栏 ─────────────────────────────────────────────────────────────── */
+/* ── 侧栏：已废弃，彻底隐藏 ───────────────────────────────────────────
+   2026-09-04把侧边栏撤掉，内容全部挪进"我的"分区。这里连侧栏本体和它那个
+   展开箭头一起隐掉——留一个点开是空白的箭头，比没有更糟。 */
+[data-testid="stSidebar"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] { display: none !important; }
+
 [data-testid="stSidebar"] { background: var(--fa-surface) !important; border-right: 1px solid var(--fa-border) !important; }
 [data-testid="stSidebarContent"] { padding-top: 22px !important; }
 /* 侧栏里三个折叠面板原来是三个带边框的圆角大盒子，竖着堆起来很笨重。
@@ -722,7 +751,7 @@ if st.query_params.get("open_symbol"):
     # 分区点进来的，得靠这个参数显式带过来。历史上这里只认"pos"一个值、固定
     # 回"持仓"，自选拆成独立分区后就不够用了，改成直接带分区名。
     _from = st.query_params.get("open_from")
-    _VALID_SECTIONS = ("首页", "行情", "持仓", "自选", "AI模拟炒股")
+    _VALID_SECTIONS = ("首页", "行情", "持仓", "自选", "AI模拟炒股", "我的")
     if _from == "pos":          # 兼容还没刷新的旧页面里残留的老链接
         st.session_state["_active_section"] = "持仓"
     elif _from in _VALID_SECTIONS:
@@ -2315,7 +2344,10 @@ def _render_advice_section():
             f"&open_name={urllib.parse.quote(row.get('name',''))}"
             f"{_auth_qs()}"
         )
-        with st.container(border=True):
+        # 跟持仓/自选列表同一个处理：不再用 border=True 的卡片。原来每一条是
+        # 一张带边框的卡片，卡片里又套一个带边框的"基本面/技术面/价格位置"
+        # 折叠框，五条就是五组方框套方框。改成发丝线分隔的平铺条目。
+        with st.container(key=f"lb_row_{market_key}_{row.get('symbol','')}"):
             st.markdown(
                 f"<a class='pos-card-link' href='{href}' target='_self'>"
                 f"<div style='display:flex;justify-content:space-between;align-items:center'>"
@@ -2324,8 +2356,10 @@ def _render_advice_section():
                 f"<span style='font-weight:400;color:var(--fa-faint);font-size:0.78rem'> · {_market_label.get(market_key, market_key)}</span></span>"
                 f"<span style='display:flex;align-items:center;gap:9px'>"
                 + (f"<span style='font-size:0.8rem;color:var(--fa-muted)'>{score}</span>" if score is not None else "")
-                + f"<span style='background:{color};color:#fff;border-radius:5px;padding:2px 9px;"
-                f"font-size:0.74rem;font-weight:550;letter-spacing:.02em'>{_esc(action)}</span></span></div>"
+                # 结论徽标从实色块改成同色系淡底彩字，跟涨跌幅那边同一套处理。
+                + f"<span style='background:color-mix(in srgb, {color} 12%, transparent);"
+                f"color:{color};border-radius:5px;padding:2px 9px;"
+                f"font-size:0.74rem;font-weight:600;letter-spacing:.02em'>{_esc(action)}</span></span></div>"
                 f"<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:3px'>{_esc(row.get('symbol',''))} · 现价{price_text}"
                 f" · 置信度{_esc(parts.get('置信度','—'))}</div>"
                 # 每张卡末尾那句"仅供参考，不构成投资建议"是advisor的prompt里
@@ -2347,6 +2381,281 @@ def _render_advice_section():
         f"{_DISCLAIMER_SENTENCE}</div>",
         unsafe_allow_html=True,
     )
+
+
+def _render_app_guide():
+    """应用指南。2026-09-04侧边栏整个撤掉，这块挪到"我的"分区，正文原样保留。"""
+    with st.expander("应用指南"):
+        st.markdown(
+            "**定位**\n\n"
+            "Invest Agent 是一个多市场（A股/港股/美股）行情查询和数据交叉验证工具，"
+            "把行情、财务、新闻这几类原始数据放在一起给你看。个股/指数详情页的 AI 分析"
+            "只做交叉核对和综合评分，不做黑箱荐股、不直接给买卖判断；"
+            "「持仓」页的组合分析是例外——它只针对你自己填的真实持仓和设定的资金上限，"
+            "按集中度、资金余量给出继续持有/加仓/减仓/定投/止盈/割肉这类具体操作建议"
+            "（附股数和金额），这是基于你自己数据算出来的仓位管理建议，不是选股推荐，"
+            "同样不构成投资建议，请自行判断风险。\n\n"
+            "**行情**\n\n"
+            "首页按市场切换查看核心指数（A股按涨跌幅列示，港股按东财人气榜排热度，"
+            "美股展示固定核心股名单），A股另有涨停/跌停池和南向资金；"
+            "价格每 3 秒自动刷新一次。\n\n"
+            "**个股/指数详情页**\n\n"
+            "点开任意标的先看K线或分时图，再看一手资讯（A股优先展示官方公告，"
+            "港股/美股优先富途资讯，都查不到才退回财新摘要），最后是 AI 深度分析——"
+            "包含资讯解读、财务摘要、对比大盘、技术面与消息面交叉验证，"
+            "以及一段综合评分（0-100，越高越偏多头证据、越低越偏空头证据，"
+            "评分依据是各条独立证据链是否互相印证，不是 AI 自己主观看好程度）。\n\n"
+            "**持仓**\n\n"
+            "右上角放大镜可以按代码或名称搜索添加，填股数/金额记为真实持仓"
+            "（不填只是关注），卡片显示迷你走势图、实时涨跌和持仓浮盈，"
+            "点卡片进详情页，点 × 卖出或取消关注。\n\n"
+            "**AI模拟炒股**\n\n"
+            "内置AI（千问）用虚拟资金自主管理一个模拟盘——只交易港股/美股（A股不参与），"
+            "起始本金1万美金，在开盘时段每5分钟自主决定要不要买卖，不需要手动操作，"
+            "这里能看到它的持仓、收益曲线和完整交易记录，仅供观察AI决策能力，"
+            "不构成投资建议。\n\n"
+            "**我的**\n\n"
+            "账户信息、自选与持仓的数量和市场分布、累计做过多少次AI分析、最近搜索、"
+            "以及几个开关的当前状态都在这里。其中「AI 判断准确率」是这样来的：每次"
+            "生成「综合数据分析」时会记录当时价格和 AI 判断的方向倾向，满 7 天后"
+            "自动补录当时的价格做对照，统计一个方向一致率——这是历史记录的客观统计，"
+            "不代表未来表现，不是胜率承诺。\n\n"
+            "**重要说明**\n\n"
+            "本应用所有分析、评分、资讯摘要仅基于公开数据的整理和交叉核对，"
+            "不构成任何投资建议，不保证数据的完整性和及时性，据此操作的风险自负。"
+        )
+
+
+def _render_data_source_health():
+    """数据源连接与熔断状态。同样是2026-09-04从侧边栏挪过来的，正文未改。"""
+    with st.expander("数据源状态"):
+        _health = get_data_source_health()
+        _futu = _health["futu"]
+        if not _futu["已安装SDK"]:
+            st.markdown("**Futu OpenD**：未安装 SDK，港股/美股实时数据全部走兜底源（腾讯行情）。")
+        elif _futu["已连接"]:
+            st.markdown(f"**Futu OpenD**：<span style='color:{UP_COLOR}'>已连接</span>", unsafe_allow_html=True)
+        else:
+            _last_try = _futu["上次尝试连接"]
+            _last_try_txt = (
+                datetime.fromtimestamp(_last_try).strftime("%H:%M:%S") if _last_try else "尚未尝试"
+            )
+            _next_interval = _futu["下次重连间隔秒"]
+            _next_interval_txt = f"，下次重连间隔约{_next_interval:.0f}秒（连续失败会指数退避，最长5分钟）" if _next_interval else ""
+            st.markdown(
+                f"**Futu OpenD**：<span style='color:{DOWN_COLOR}'>未连接</span>"
+                f"（上次尝试 {_last_try_txt}{_next_interval_txt}；"
+                "港股/美股行情会自动退回腾讯行情兜底，不影响使用）",
+                unsafe_allow_html=True,
+            )
+
+        _breakers = _health["熔断记录"]
+        if _breakers:
+            st.caption("兜底数据源熔断记录（只记录触发过失败的，没列出不代表已验证成功，只是还没失败过）")
+            for _b in _breakers:
+                _ts = datetime.fromtimestamp(_b["最近一次失败"]).strftime("%m-%d %H:%M:%S")
+                _state, _color = ("冷却中", DOWN_COLOR) if _b["冷却中"] else ("已恢复", NEUTRAL_COLOR)
+                st.markdown(
+                    f"<span style='font-size:0.8rem'>{_b['名称']}："
+                    f"<span style='color:{_color}'>{_state}</span>（最近一次失败 {_ts}）</span>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("暂无兜底数据源失败记录。")
+
+
+def _render_my_page():
+    """"我的"——账户、个人记录、偏好、指南、数据源状态。
+
+    2026-09-04新增，同时把左侧边栏整个撤掉。原来侧边栏里只有三个折叠面板加一个
+    退出按钮，却在每一屏都占掉两百多像素的宽度；而它装的东西（账户、历史回看
+    摘要、应用指南、数据源状态）本来就都是"偶尔看一眼"的内容，没有一样需要
+    常驻。改成主导航里的一个正式分区，宽度还给内容，信息也能铺开讲。
+
+    这一页刻意不只是把侧边栏那三块搬过来——既然是"我的"，就把散在各处、
+    但确实属于这个用户自己的记录集中到一处：自选/持仓的数量和市场分布、
+    累计做过多少次AI分析、搜过什么、AI判断的历史准确率、以及几个开关的当前
+    状态。这些数字原来要么没人统计过，要么埋在别的页面里。
+    """
+    logged_in = bool(st.session_state.get("logged_in"))
+    email = st.session_state.get("user_email", "") if logged_in else ""
+
+    # ── 账户 ────────────────────────────────────────────────────────────
+    st.markdown("**账户**")
+    if logged_in:
+        ov = {}
+        try:
+            ov = get_user_overview(email)
+        except Exception:
+            ov = {}
+        first_seen = ov.get("first_seen")
+        since_txt = ""
+        if first_seen:
+            _t = _to_cn_dt(first_seen)
+            if _t:
+                since_txt = f"自 {_t.strftime('%Y-%m-%d')} 起使用"
+        acc_col, btn_col = st.columns([6, 1], vertical_alignment="center")
+        acc_col.markdown(
+            f"<div style='font-size:0.98rem;font-weight:600;color:var(--fa-text);letter-spacing:-.01em'>"
+            f"{_esc(email)}</div>"
+            + (f"<div style='font-size:0.76rem;color:var(--fa-faint);margin-top:3px'>{since_txt}</div>"
+               if since_txt else ""),
+            unsafe_allow_html=True,
+        )
+        with btn_col:
+            if st.button("退出登录", key="_my_logout"):
+                _tok = st.session_state.pop("_token", None)
+                if _tok:
+                    _invalidate_token(_tok)
+                try:
+                    del st.query_params["_auth"]
+                except Exception:
+                    pass
+                _cv1.html(
+                    '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");'
+                    'window.parent.document.cookie="fa_auth_tok=; max-age=0; path=/";}catch(e){}</script>',
+                    height=1,
+                )
+                st.session_state["logged_in"] = False
+                st.session_state.pop("user_email", None)
+                st.rerun()
+    else:
+        ov = {}
+        acc_col, btn_col = st.columns([6, 1], vertical_alignment="center")
+        acc_col.markdown(
+            "<div style='font-size:0.98rem;font-weight:600;color:var(--fa-text)'>游客模式</div>"
+            "<div style='font-size:0.76rem;color:var(--fa-faint);margin-top:3px'>"
+            "行情、详情页、AI分析都能看；自选、持仓和判断记录需要登录</div>",
+            unsafe_allow_html=True,
+        )
+        with btn_col:
+            if st.button("登录 / 注册", key="_my_login", type="primary"):
+                st.session_state["guest_mode"] = False
+                st.rerun()
+
+    if logged_in:
+        # ── 我的记录 ────────────────────────────────────────────────────
+        st.markdown("**我的记录**")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("自选", f"{ov.get('watch_count', 0)}")
+        m2.metric("持仓", f"{ov.get('hold_count', 0)}")
+        m3.metric("AI 分析", f"{ov.get('analysis_count', 0)}")
+        m4.metric("搜索", f"{ov.get('search_count', 0)}")
+
+        # ── 关注的市场 ──────────────────────────────────────────────────
+        by_market = ov.get("by_market") or {}
+        total_mkt = sum(by_market.values())
+        if total_mkt:
+            st.markdown("**关注的市场**")
+            _label = {"A": "A股", "HK": "港股", "US": "美股"}
+            # 一根横向占比条 + 一行图例。比三个数字更直观地回答"我主要在看哪个
+            # 市场"，配色走图表那套去饱和色板，不引入新颜色。
+            _seg_colors = ["#2F3A45", "#7C8B9A", "#B9A17B"]
+            segs, legend = [], []
+            for i, (mkt, n) in enumerate(sorted(by_market.items(), key=lambda kv: -kv[1])):
+                pct = n / total_mkt * 100
+                c = _seg_colors[i % len(_seg_colors)]
+                segs.append(f"<div style='width:{pct:.2f}%;background:{c}'></div>")
+                legend.append(
+                    f"<span style='display:inline-flex;align-items:center;gap:6px;margin-right:20px'>"
+                    f"<span style='width:8px;height:8px;border-radius:2px;background:{c};display:inline-block'></span>"
+                    f"<span style='color:var(--fa-text-2);font-size:0.82rem'>{_label.get(mkt, mkt)}</span>"
+                    f"<span style='color:var(--fa-faint);font-size:0.82rem'>{n} · {pct:.0f}%</span></span>"
+                )
+            st.markdown(
+                "<div style='display:flex;height:8px;border-radius:4px;overflow:hidden;gap:2px'>"
+                + "".join(segs) + "</div>"
+                + "<div style='margin-top:10px'>" + "".join(legend) + "</div>",
+                unsafe_allow_html=True,
+            )
+
+        # ── AI 判断准确率 ───────────────────────────────────────────────
+        st.markdown("**AI 判断准确率**")
+        _backfill_due_reviews(email)
+        try:
+            stats = get_accuracy_stats(email)
+        except Exception:
+            stats = {"总数": 0}
+        if stats.get("总数"):
+            a1, a2, a3 = st.columns(3)
+            a1.metric("方向一致率", f"{stats['一致率']:.0f}%")
+            a2.metric("已回看", f"{stats['总数']}")
+            a3.metric("说对", f"{stats['一致数']}")
+            # 按市场/按方向拆开——笼统一个数看不出"在哪个市场准""偏多还是偏空准"。
+            _rows = []
+            for group_name, group in (("按市场", stats.get("按市场") or {}), ("按方向", stats.get("按方向") or {})):
+                for k, v in group.items():
+                    if not v.get("总数"):
+                        continue
+                    _label_map = {"A": "A股", "HK": "港股", "US": "美股"}
+                    _rows.append((group_name, _label_map.get(k, k), v["一致率"], v["总数"]))
+            if _rows:
+                with st.expander("按市场 / 按方向拆开看"):
+                    for g, k, rate, n in _rows:
+                        st.markdown(
+                            f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
+                            f"border-bottom:1px solid var(--fa-border)'>"
+                            f"<span style='color:var(--fa-text-2);font-size:0.86rem'>{g} · {k}</span>"
+                            f"<span style='font-size:0.86rem'><span style='font-weight:600'>{rate:.0f}%</span>"
+                            f"<span style='color:var(--fa-faint)'> · {n}次</span></span></div>",
+                            unsafe_allow_html=True,
+                        )
+            st.markdown(
+                "<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:10px'>"
+                "每次生成综合数据分析时记录当时价格和判断方向，满7天后自动补录实际价格做对照。"
+                "这是历史记录的客观统计，不代表未来表现。</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='color:var(--fa-muted);font-size:0.88rem;padding:2px 0'>"
+                "还没有满7天可回看的记录</div>"
+                "<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:4px'>"
+                "在个股详情页生成过综合数据分析之后，判断会被记下来，满7天自动补录当时的实际价格算方向是否一致。</div>",
+                unsafe_allow_html=True,
+            )
+
+        # ── 最近搜索 ────────────────────────────────────────────────────
+        try:
+            _searches = get_search_history(email, limit=8)
+        except Exception:
+            _searches = []
+        if _searches:
+            st.markdown("**最近搜索**")
+            _mk = {"A": "A股", "HK": "港股", "US": "美股"}
+            for h in _searches:
+                _t = _to_cn_dt(h.get("searched_at", ""))
+                _when = _t.strftime("%m-%d") if _t else ""
+                st.markdown(
+                    f"<div style='display:flex;justify-content:space-between;align-items:baseline;"
+                    f"padding:9px 0;border-bottom:1px solid var(--fa-border)'>"
+                    f"<span style='color:var(--fa-text);font-size:0.9rem'>{_esc(h.get('query',''))}</span>"
+                    f"<span style='color:var(--fa-faint);font-size:0.78rem'>"
+                    f"{_mk.get(h.get('market'), h.get('market') or '')} · {_when}</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+        # ── 偏好 ────────────────────────────────────────────────────────
+        st.markdown("**偏好**")
+        _cap = ov.get("max_capital_cny")
+        _prefs = [
+            ("AI 模拟交易", "已开启" if ov.get("ai_sim_trading") else "已关闭"),
+            ("AI 自主决策循环", "已开启" if ov.get("sim_agent_enabled") else "已关闭"),
+            ("组合分析资金上限", f"¥{_cap:,.0f}" if _cap else "未设置"),
+        ]
+        for k, v in _prefs:
+            st.markdown(
+                f"<div style='display:flex;justify-content:space-between;align-items:baseline;"
+                f"padding:9px 0;border-bottom:1px solid var(--fa-border)'>"
+                f"<span style='color:var(--fa-text-2);font-size:0.88rem'>{k}</span>"
+                f"<span style='color:var(--fa-text);font-size:0.88rem'>{v}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── 指南与数据源（登录与否都能看）─────────────────────────────────
+    st.markdown("**关于**")
+    _render_app_guide()
+    _render_data_source_health()
 
 
 @st.fragment
@@ -4384,131 +4693,6 @@ elif st.session_state.get("_sector_detail_name"):
         )
 else:
     with _page_slot.container():
-        with st.sidebar:
-            if st.session_state.get("logged_in"):
-                _uemail = st.session_state.get("user_email", "")
-                _uemail_safe = _uemail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                st.markdown(f"<p style='font-size:0.8rem;color:var(--fa-muted)'>{_uemail_safe}</p>", unsafe_allow_html=True)
-                if st.button("退出登录", use_container_width=True):
-                    _tok = st.session_state.pop("_token", None)
-                    if _tok:
-                        _invalidate_token(_tok)
-                    try:
-                        del st.query_params["_auth"]
-                    except Exception:
-                        pass
-                    _cv1.html(
-                        '<script>try{window.parent.localStorage.removeItem("fa_auth_tok");window.parent.document.cookie="fa_auth_tok=; max-age=0; path=/";}catch(e){}</script>',
-                        height=1,
-                    )
-                    st.session_state["logged_in"] = False
-                    st.session_state.pop("user_email", None)
-                    st.rerun()
-            else:
-                st.markdown("<p style='font-size:0.8rem;color:var(--fa-muted)'>游客模式浏览中</p>", unsafe_allow_html=True)
-                if st.button("登录 / 注册", use_container_width=True):
-                    st.session_state["guest_mode"] = False
-                    st.rerun()
-            _uemail = st.session_state.get("user_email", "")
-
-            st.divider()
-            with st.expander("历史回看"):
-                # 完整的统计/趋势/日历热力图原来在主内容区独立的"回看"分区
-                # （_render_accuracy_dashboard），2026-09-01那个分区改名
-                # "AI模拟炒股"、内容也换成了AI自主模拟盘展示，不再是准确率
-                # 完整版——"查看完整回看→"这个跳转按钮去掉了，点过去会是
-                # 完全不相关的内容，不能留着一个指向错地方的链接。
-                # _render_accuracy_dashboard函数和它的数据都还在，只是现在
-                # 没有入口能跳到它的完整版，只留这里的摘要数字。补录逻辑
-                # 抽成了_backfill_due_reviews。
-                if not st.session_state.get("logged_in"):
-                    st.caption("登录后可以看AI过去说得准不准。")
-                else:
-                    _backfill_due_reviews(_uemail)
-                    stats = get_accuracy_stats(_uemail)
-                    if stats["总数"] > 0:
-                        st.metric(
-                            "AI说对的比例", f"{stats['一致率']:.0f}%",
-                            help=f"过去 {stats['总数']} 次「涨/跌」判断里，对了 {stats['一致数']} 次",
-                        )
-                    else:
-                        st.caption("还没有满7天可回看的记录。")
-
-            with st.expander("应用指南"):
-                st.markdown(
-                    "**定位**\n\n"
-                    "Invest Agent 是一个多市场（A股/港股/美股）行情查询和数据交叉验证工具，"
-                    "把行情、财务、新闻这几类原始数据放在一起给你看。个股/指数详情页的 AI 分析"
-                    "只做交叉核对和综合评分，不做黑箱荐股、不直接给买卖判断；"
-                    "「持仓」页的组合分析是例外——它只针对你自己填的真实持仓和设定的资金上限，"
-                    "按集中度、资金余量给出继续持有/加仓/减仓/定投/止盈/割肉这类具体操作建议"
-                    "（附股数和金额），这是基于你自己数据算出来的仓位管理建议，不是选股推荐，"
-                    "同样不构成投资建议，请自行判断风险。\n\n"
-                    "**行情**\n\n"
-                    "首页按市场切换查看核心指数（A股按涨跌幅列示，港股按东财人气榜排热度，"
-                    "美股展示固定核心股名单），A股另有涨停/跌停池和南向资金；"
-                    "价格每 3 秒自动刷新一次。\n\n"
-                    "**个股/指数详情页**\n\n"
-                    "点开任意标的先看K线或分时图，再看一手资讯（A股优先展示官方公告，"
-                    "港股/美股优先富途资讯，都查不到才退回财新摘要），最后是 AI 深度分析——"
-                    "包含资讯解读、财务摘要、对比大盘、技术面与消息面交叉验证，"
-                    "以及一段综合评分（0-100，越高越偏多头证据、越低越偏空头证据，"
-                    "评分依据是各条独立证据链是否互相印证，不是 AI 自己主观看好程度）。\n\n"
-                    "**持仓**\n\n"
-                    "右上角放大镜可以按代码或名称搜索添加，填股数/金额记为真实持仓"
-                    "（不填只是关注），卡片显示迷你走势图、实时涨跌和持仓浮盈，"
-                    "点卡片进详情页，点 × 卖出或取消关注。\n\n"
-                    "**AI模拟炒股**\n\n"
-                    "内置AI（千问）用虚拟资金自主管理一个模拟盘——只交易港股/美股（A股不参与），"
-                    "起始本金1万美金，在开盘时段每5分钟自主决定要不要买卖，不需要手动操作，"
-                    "这里能看到它的持仓、收益曲线和完整交易记录，仅供观察AI决策能力，"
-                    "不构成投资建议。（2026-09-01之前这个分区叫「历史回看」、展示的是下面这条"
-                    "方向一致率统计，改版后挪到了侧边栏摘要，主分区换成了这个。）\n\n"
-                    "**历史回看（侧边栏摘要）**\n\n"
-                    "每次生成「综合数据分析」时会记录当时价格和 AI 判断的方向倾向，"
-                    "满 7 天后自动补录当时的价格做对照，统计一个方向一致率——"
-                    "这是历史记录的客观统计，不代表未来表现，不是胜率承诺。完整版目前只在"
-                    "侧边栏「历史回看」折叠面板里看摘要数字，没有单独的主分区入口。\n\n"
-                    "**重要说明**\n\n"
-                    "本应用所有分析、评分、资讯摘要仅基于公开数据的整理和交叉核对，"
-                    "不构成任何投资建议，不保证数据的完整性和及时性，据此操作的风险自负。"
-                )
-
-            with st.expander("数据源状态"):
-                _health = get_data_source_health()
-                _futu = _health["futu"]
-                if not _futu["已安装SDK"]:
-                    st.markdown("**Futu OpenD**：未安装 SDK，港股/美股实时数据全部走兜底源（腾讯行情）。")
-                elif _futu["已连接"]:
-                    st.markdown(f"**Futu OpenD**：<span style='color:{UP_COLOR}'>已连接</span>", unsafe_allow_html=True)
-                else:
-                    _last_try = _futu["上次尝试连接"]
-                    _last_try_txt = (
-                        datetime.fromtimestamp(_last_try).strftime("%H:%M:%S") if _last_try else "尚未尝试"
-                    )
-                    _next_interval = _futu["下次重连间隔秒"]
-                    _next_interval_txt = f"，下次重连间隔约{_next_interval:.0f}秒（连续失败会指数退避，最长5分钟）" if _next_interval else ""
-                    st.markdown(
-                        f"**Futu OpenD**：<span style='color:{DOWN_COLOR}'>未连接</span>"
-                        f"（上次尝试 {_last_try_txt}{_next_interval_txt}；"
-                        "港股/美股行情会自动退回腾讯行情兜底，不影响使用）",
-                        unsafe_allow_html=True,
-                    )
-
-                _breakers = _health["熔断记录"]
-                if _breakers:
-                    st.caption("兜底数据源熔断记录（只记录触发过失败的，没列出不代表已验证成功，只是还没失败过）")
-                    for _b in _breakers:
-                        _ts = datetime.fromtimestamp(_b["最近一次失败"]).strftime("%m-%d %H:%M:%S")
-                        _state, _color = ("冷却中", DOWN_COLOR) if _b["冷却中"] else ("已恢复", NEUTRAL_COLOR)
-                        st.markdown(
-                            f"<span style='font-size:0.8rem'>{_b['名称']}："
-                            f"<span style='color:{_color}'>{_state}</span>（最近一次失败 {_ts}）</span>",
-                            unsafe_allow_html=True,
-                        )
-                else:
-                    st.caption("暂无兜底数据源失败记录。")
-
         # 页眉。原来是一条通栏的品牌红横幅+白色粗体字，那是整个页面上最抢眼
         # 的元素，但它承载的信息只有一个产品名——最重的视觉权重给了最不重要
         # 的信息。而且页面上真正需要被一眼看到的是涨跌色，横幅一红，涨跌红就
@@ -4542,7 +4726,7 @@ else:
         # 横向radio（市场切换、K线周期那些仍然是分段控件的样子）。
         with st.container(key="fa_nav"):
             active_section = st.radio(
-                "分区", ["首页", "行情", "持仓", "自选", "AI模拟炒股"],
+                "分区", ["首页", "行情", "持仓", "自选", "AI模拟炒股", "我的"],
                 key="_active_section", horizontal=True, label_visibility="collapsed",
             )
 
@@ -4709,6 +4893,9 @@ else:
             # 准确率追踪入口，_render_accuracy_dashboard函数本身和它依赖
             # 的历史数据都还在，只是不再从这个入口调用。
             _render_ai_sim_dashboard()
+
+        elif active_section == "我的":
+            _render_my_page()
 
         _render_ai_assistant()
 

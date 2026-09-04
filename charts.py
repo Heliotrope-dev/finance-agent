@@ -228,13 +228,21 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
     df["MA20"] = df["收盘"].rolling(20).mean()
     macd = _compute_macd(df["收盘"].astype(float))
 
+    # 主图占比从0.5提到0.58，MACD从0.3压到0.26——三块面板原来接近等分，
+    # 价格才是主角，成交量和MACD是辅证，不该跟主图抢高度。子图间距也收窄，
+    # 三块之间原来空出很大一片，整张图显得散。
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True,
-        row_heights=[0.5, 0.2, 0.3], vertical_spacing=0.09,
+        row_heights=[0.58, 0.16, 0.26], vertical_spacing=0.055,
         subplot_titles=("", "成交量", "MACD"),
     )
     _style_subplot_titles(fig)
 
+    # 阳线空心、阴线实心——这是专业行情软件的通行画法，不是随手选的样式。
+    # 原来阴阳线都填实底，一屏九十根全是实心色块，整张图闷得看不出结构；
+    # 阳线改成只描边不填色之后，视觉重量立刻降下来，而且"这一段是涨是跌"
+    # 靠实心/空心的疏密就能一眼扫出来，不用逐根去分辨红绿。
+    # 描边统一 1px：默认 2px 在日线密集的时候会把相邻两根糊在一起。
     fig.add_trace(
         go.Candlestick(
             x=df["日期"],
@@ -242,8 +250,9 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
             high=df["最高"],
             low=df["最低"],
             close=df["收盘"],
-            increasing_line_color=UP_COLOR,
-            decreasing_line_color=DOWN_COLOR,
+            increasing=dict(line=dict(color=UP_COLOR, width=1), fillcolor="rgba(0,0,0,0)"),
+            decreasing=dict(line=dict(color=DOWN_COLOR, width=1), fillcolor=DOWN_COLOR),
+            whiskerwidth=0,
             name="K线",
         ),
         row=1,
@@ -263,15 +272,22 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
     vol_colors = [
         UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(df["开盘"], df["收盘"])
     ]
+    # 成交量柱去掉描边并压低不透明度：它是辅证，不该跟上面的K线一样浓。
     fig.add_trace(
-        go.Bar(x=df["日期"], y=df["成交量"], marker_color=vol_colors, name="成交量"),
+        go.Bar(
+            x=df["日期"], y=df["成交量"], marker_color=vol_colors, name="成交量",
+            marker_line_width=0, opacity=0.5,
+        ),
         row=2,
         col=1,
     )
 
     macd_colors = [UP_COLOR if v >= 0 else DOWN_COLOR for v in macd["MACD"]]
     fig.add_trace(
-        go.Bar(x=df["日期"], y=macd["MACD"], marker_color=macd_colors, name="MACD柱"),
+        go.Bar(
+            x=df["日期"], y=macd["MACD"], marker_color=macd_colors, name="MACD柱",
+            marker_line_width=0, opacity=0.55,
+        ),
         row=3,
         col=1,
     )
@@ -286,8 +302,10 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
         col=1,
     )
 
-    fig.update_layout(xaxis_rangeslider_visible=False)
-    _apply_chart_theme(fig, height=820, legend=True, margin=dict(l=6, r=16, t=26, b=6))
+    # bargap 从默认的0.2放大到0.45——柱子变细，柱与柱之间留出空隙。原来的柱子
+    # 又宽又挤，成交量那一栏看着像一堵墙而不是一组数据。
+    fig.update_layout(xaxis_rangeslider_visible=False, bargap=0.45)
+    _apply_chart_theme(fig, height=700, legend=True, margin=dict(l=6, r=16, t=26, b=6))
     fig.update_yaxes(title_standoff=8)
     return fig
 
