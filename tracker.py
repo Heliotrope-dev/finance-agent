@@ -390,6 +390,14 @@ def init_db():
             """
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_macro_topic ON macro_briefs (topic, created_at DESC)")
+        # chart_json：这条议题配套的结构化数据，页面拿它画图（比如美联储那条
+        # 存的是CME FedWatch的利率概率表）。存下来而不是渲染时现查，是因为
+        # 首页每个访客都要画一次，现查等于每次打开都打一次Futu接口。
+        # 老库升级：这一列是建表之后才加的，用同样的"查一下有没有再ALTER"
+        # 的写法，跟这个文件里其它几处老库升级保持一致。
+        mb_cols = {r[1] for r in c.execute("PRAGMA table_info(macro_briefs)")}
+        if "chart_json" not in mb_cols:
+            c.execute("ALTER TABLE macro_briefs ADD COLUMN chart_json TEXT NOT NULL DEFAULT ''")
 
         # 从watchlist表一次性迁移进positions，shares/cost_total都是0(纯关注)。
         # UNIQUE(email,symbol)保证INSERT OR IGNORE天然幂等，每次启动跑一遍
@@ -1654,7 +1662,8 @@ def get_score_evidence_text(source: str = "watchlist") -> str:
     )
 
 
-def log_macro_brief(topic: str, title: str, brief_text: str, sources_json: str = "") -> int:
+def log_macro_brief(topic: str, title: str, brief_text: str, sources_json: str = "",
+                    chart_json: str = "") -> int:
     """写一条宏观议题解读，并只保留这个议题最近5条。
 
     保留几条而不是只留一条：偶尔会想对照"上次美联储会议后是怎么说的、这次
@@ -1665,9 +1674,9 @@ def log_macro_brief(topic: str, title: str, brief_text: str, sources_json: str =
     now = datetime.now(timezone.utc).isoformat()
     with closing(_conn()) as c:
         cur = c.execute(
-            "INSERT INTO macro_briefs (topic, title, brief_text, sources_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (topic, title, brief_text, sources_json, now),
+            "INSERT INTO macro_briefs (topic, title, brief_text, sources_json, chart_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (topic, title, brief_text, sources_json, chart_json, now),
         )
         c.execute(
             "DELETE FROM macro_briefs WHERE topic = ? AND id NOT IN "

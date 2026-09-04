@@ -63,6 +63,7 @@ from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
     get_accuracy_trend, get_daily_accuracy, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_leaderboard, get_user_overview,
+    get_latest_macro_briefs,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
     get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
@@ -73,6 +74,7 @@ import sim_agent
 from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
     build_benchmark_comparison, build_return_histogram, build_multi_comparison, build_position_donut,
+    build_fed_watch_chart, build_macro_series_chart,
     build_sim_equity_curve,
 )
 from auth import (
@@ -391,6 +393,25 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 .stButton button[kind="tertiary"]:hover, .stButton button[data-testid="stBaseButton-tertiary"]:hover {
     background: var(--fa-fill) !important; border-color: transparent !important; color: var(--fa-text) !important;
 }
+
+/* 宏观议题条目。跟站内其它列表同一套：发丝线分隔、折叠框无边框。 */
+[class*="st-key-macro_"] {
+    border: none !important; background: transparent !important;
+    border-bottom: 1px solid var(--fa-border) !important;
+    border-radius: 0 !important; padding: 10px 2px 4px !important;
+}
+[class*="st-key-macro_"] [data-testid="stExpander"] details {
+    border: none !important; background: transparent !important; border-radius: 0 !important;
+}
+[class*="st-key-macro_"] [data-testid="stExpander"] summary {
+    padding: 2px 0 !important; background: transparent !important;
+}
+[class*="st-key-macro_"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
+[class*="st-key-macro_"] [data-testid="stExpander"] summary p {
+    font-size: 0.76rem !important; color: var(--fa-faint) !important; font-weight: 400 !important;
+}
+[class*="st-key-macro_"] [data-testid="stExpander"] summary:hover p { color: var(--fa-muted) !important; }
+[class*="st-key-macro_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
 
 /* AI每次决策记录。一屏五到三十条，每条都是一个带边框的白盒子时，方框本身
    就成了这一段最主要的视觉噪声。压成跟全站其它列表一样的发丝线分隔行。 */
@@ -2128,6 +2149,7 @@ def _render_home_map():
             )
 
     markers_js = []
+    marker_coords = []
     for name, mkt, lat, lon in _HOME_MAP_MARKERS:
         if mkt == "GLOBAL":
             idx = global_idx.get(name)
@@ -2153,6 +2175,7 @@ def _render_home_map():
             f"<div style='color:{color};font-size:0.58rem'>{idx['涨跌幅']:+.2f}%</div>"
             f"</div>"
         )
+        marker_coords.append([lat, lon])
         href = href_by_name.get(name)
         if href:
             # target='_top'：这个地图本身渲染在st.components.v1.html的iframe里，
@@ -2191,6 +2214,16 @@ def _render_home_map():
           filter: saturate(0) brightness(1.14) contrast(.86);
           opacity: .82;
       }}
+      /* 窄屏把标签再调小一档。手机上即使视野已经按 fitBounds 收进来了，
+         十二个标签挤在三百多像素宽的图上仍然偏密，字号降下来能明显缓解，
+         同时行高压紧、去掉描边的模糊半径以免小字发虚。 */
+      @media (max-width: 640px) {{
+          #home-map .leaflet-marker-icon > div {{
+              font-size: .52rem !important; line-height: 1.2 !important;
+              text-shadow: 0 1px 1px rgba(255,255,255,.95) !important;
+          }}
+          #home-map .leaflet-marker-icon > div > div:last-child {{ font-size: .48rem !important; }}
+      }}
       /* 署名条也压淡，它是合规必需但不该有存在感。 */
       #home-map .leaflet-control-attribution {{
           background: rgba(255,255,255,.6) !important; font-size: 9px !important;
@@ -2207,6 +2240,9 @@ def _render_home_map():
     var map = L.map('home-map', {{
         scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false,
         boxZoom: false, keyboard: false, zoomControl: false, dragging: true,
+        // zoomSnap:0 允许小数级缩放。默认Leaflet只按整数档缩放，而手机上
+        // "整数档2太大、整数档1又太小"，中间没有可选值，只能二选一将就。
+        zoomSnap: 0, zoomDelta: 0.25,
     }}).setView([12, 25], 2);
     // 底图仍然用免费的 OpenStreetMap 瓦片，但在前端把它整体转成灰阶。
     //
@@ -2244,8 +2280,34 @@ def _render_home_map():
         }});
     }}
     clampLabels();
-    // 容器尺寸变化时让Leaflet重新测量（否则瓦片留白），并重新收边。
-    window.addEventListener('resize', function() {{ map.invalidateSize(); clampLabels(); }});
+    // 视野按容器宽度自适应。
+    //
+    // 手机上真实故障（2026-09-04用户截图）：地图固定 setView([12,25], 2)，
+    // zoom=2 的世界宽度是1024px，而手机容器只有约350px——也就是说一屏只看得到
+    // 约123度经度，可标记本身跨了251度（道琼斯-100到悉尼151）。绝大多数标记
+    // 落在可视范围外，再被下面的 clampLabels 一路往里推，最后全堆在一起：
+    // 纳斯达克/道琼斯/标普三个叠成一团，日经和上证、恒生和印度也各自重叠。
+    //
+    // 改成 fitBounds：让Leaflet按容器实际宽度算出"刚好装下所有标记"的缩放。
+    // maxZoom:2 保证桌面上不会比原来更放大（桌面宽度本来就装得下，算出来
+    // 就是2，视觉跟之前一致）；窄屏则自动缩到1点几，把整个世界收进来。
+    // 这跟早些时候试过又撤掉的那版 fitBounds 不是一回事——那次撤是因为当时
+    // 标签还是带边框的大白卡、需要的间距大，fitBounds 会一路缩到 zoom1 让
+    // 亚洲那簇糊成一团；现在标签是小号透明文字，占地小得多，加上下面窄屏
+    // 还会再调小字号，缩放降一点不会糊。
+    var _bounds = L.latLngBounds({json.dumps(marker_coords)});
+    function fitAll() {{
+        var narrow = document.getElementById('home-map').clientWidth < 640;
+        map.fitBounds(_bounds, {{
+            padding: narrow ? [10, 14] : [30, 24],
+            maxZoom: 2, animate: false,
+        }});
+    }}
+    fitAll();
+    // 容器尺寸变化时让Leaflet重新测量（否则瓦片留白），重新适配视野并收边。
+    window.addEventListener('resize', function() {{
+        map.invalidateSize(); fitAll(); clampLabels();
+    }});
     // 拖动地图会把原本在中间的标记带到边界上，同样要重新收边。
     map.on('moveend', clampLabels);
 
@@ -2326,6 +2388,25 @@ def _strip_disclaimer(text: str) -> str:
     一次只显示一条的地方不动，保持原样。
     """
     return (text or "").replace(_DISCLAIMER_SENTENCE, "").strip()
+
+
+def _labeled_line(label: str, value: str) -> str:
+    """"标签：内容"这种一行式的小标题，用HTML显式画，不要写成 markdown 的
+    `**标签**：内容`。
+
+    2026-09-04踩的坑：全局CSS里把"只含一个<strong>的段落"渲染成了小节眉标
+    （display:block、大写字距、灰色），用来统一处理项目里大量的
+    st.markdown("**小节标题**")。但CSS的 :only-child 只看元素子节点、不看
+    文本节点——`**标签**：内容` 生成的 <p><strong>标签</strong>：内容</p> 里，
+    <strong> 依然是唯一的元素子节点，于是被误判成小节标题：标签被顶成独立
+    一行，后面那个冒号还孤零零掉到下一行开头。CSS 层面没法区分这两种情况
+    （没有"存在文本兄弟节点"这个选择器），所以改在调用侧规避。
+    """
+    return (
+        f"<div style='padding:3px 0;line-height:1.75'>"
+        f"<span style='font-weight:600;color:var(--fa-text)'>{_esc(label)}</span>"
+        f"<span style='color:var(--fa-text-2)'>：{_esc(value)}</span></div>"
+    )
 
 
 def _parse_advice_text(text: str) -> dict:
@@ -2470,7 +2551,7 @@ def _render_advice_section():
                 with st.expander("多空逻辑 / 基本面 / 催化剂与证伪"):
                     for sec in _detail_secs:
                         if parts.get(sec):
-                            st.markdown(f"**{sec}**：{_esc(parts[sec])}")
+                            st.markdown(_labeled_line(sec, parts[sec]), unsafe_allow_html=True)
 
     # 免责声明统一放在榜单末尾说一次——上面每张卡里的那句已经剥掉了。
     st.markdown(
@@ -2905,6 +2986,131 @@ def _render_ai_assistant():
             st.session_state["_assistant_messages"].append({"role": "assistant", "content": reply})
 
 
+_MACRO_SECTIONS = ("一句话结论", "现状", "影响", "盯什么")
+
+
+def _render_macro_briefs():
+    """首页宏观议题专区——美联储/通胀/就业/中国政策。
+
+    只读 macro_briefs 表里每个议题最新的一条，不做任何AI调用。内容是
+    macro_brief.py 由cron离线生成的（见那个文件开头的说明：这类分析一次要
+    把十几条资讯汇总起来让AI通读，几十秒一次，而一天之内对所有访客是同一份，
+    放在页面现算等于每个人每次打开首页都重跑一遍）。
+
+    版式跟站内其它列表统一：一行一个议题，标题旁边直接把"一句话结论"摆出来
+    （这是整段解读里信息密度最高的一句，不点开也该看得到），点开才是现状/
+    影响/盯什么三段和配图。美联储那条额外画一张CME FedWatch的利率概率图——
+    图文结合在这个议题上是真的有用：几次会议、几个利率区间、各自多大概率，
+    用文字讲一遍很啰嗦，一张横向条形图一眼就看完。
+    """
+    try:
+        briefs = get_latest_macro_briefs()
+    except Exception:
+        briefs = []
+    if not briefs:
+        return
+
+    st.markdown("**宏观议题**")
+    _newest = max((b.get("created_at") or "") for b in briefs)
+    _t = _to_cn_dt(_newest)
+    if _t:
+        st.markdown(
+            f"<div style='font-size:0.74rem;color:var(--fa-faint);margin:-4px 0 12px'>"
+            f"更新于 {_t.strftime('%m-%d %H:%M')}</div>",
+            unsafe_allow_html=True,
+        )
+
+    for b in briefs:
+        parts: dict[str, str] = {}
+        text = b.get("brief_text") or ""
+        positions = []
+        for nm in _MACRO_SECTIONS:
+            idx = text.find(f"{nm}：")
+            if idx == -1:
+                idx = text.find(f"{nm}:")
+            if idx != -1:
+                positions.append((idx, nm))
+        positions.sort()
+        for i, (idx, nm) in enumerate(positions):
+            start = idx + len(nm) + 1
+            end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+            parts[nm] = text[start:end].strip()
+
+        headline = parts.get("一句话结论") or text[:40]
+        with st.container(key=f"macro_{b.get('topic','')}"):
+            st.markdown(
+                f"<div style='padding:2px 0 6px'>"
+                f"<span style='font-weight:600;color:var(--fa-text);font-size:0.95rem'>{_esc(b.get('title',''))}</span>"
+                f"<span style='color:var(--fa-text-2);font-size:0.88rem'>　{_esc(headline)}</span></div>",
+                unsafe_allow_html=True,
+            )
+            with st.expander("展开解读"):
+                # 图在前、文字在后：这几个议题的解读本来就是围着数据写的，
+                # 先看图再读结论，比反过来自然。chart_json 兼容两种结构——
+                # 2026-09-04最早那版只存了FedWatch的list，后来改成
+                # {"fed_watch":[...], "series":[...]} 的dict，老记录不重跑，
+                # 所以两种都要认。
+                try:
+                    _cj = json.loads(b.get("chart_json") or "null")
+                except Exception:
+                    _cj = None
+                _fed_rows, _series = [], []
+                if isinstance(_cj, list):
+                    _fed_rows = _cj
+                elif isinstance(_cj, dict):
+                    _fed_rows = _cj.get("fed_watch") or []
+                    _series = _cj.get("series") or []
+
+                if _fed_rows:
+                    st.markdown(
+                        "<div style='font-size:0.76rem;color:var(--fa-faint);margin-bottom:4px'>"
+                        "市场隐含的联邦基金目标利率概率（CME FedWatch）</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.plotly_chart(
+                        build_fed_watch_chart(_fed_rows),
+                        use_container_width=True, config=_PLOTLY_CONFIG,
+                        key=f"_fed_watch_{b.get('id')}",
+                    )
+                for _i, _sr in enumerate(_series):
+                    if not _sr.get("points"):
+                        continue
+                    st.markdown(
+                        f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:10px 0 2px'>"
+                        f"{_esc(_sr.get('name',''))}　"
+                        f"<span style='color:var(--fa-faint)'>柱=实际值，横线=当时的市场预期；"
+                        f"柱子颜色表示相对预期是超还是不及，跟行情涨跌无关</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.plotly_chart(
+                        build_macro_series_chart(_sr),
+                        use_container_width=True, config=_PLOTLY_CONFIG,
+                        key=f"_macro_series_{b.get('id')}_{_i}",
+                    )
+                for nm in ("现状", "影响", "盯什么"):
+                    if parts.get(nm):
+                        st.markdown(_labeled_line(nm, parts[nm]), unsafe_allow_html=True)
+                try:
+                    srcs = json.loads(b.get("sources_json") or "[]")
+                except Exception:
+                    srcs = []
+                if srcs:
+                    # 把AI当时读的原始材料一并列出来。不留原材料的分析没法复核，
+                    # 用户也无从判断这段解读是基于什么写的。
+                    st.markdown(
+                        "<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:12px'>"
+                        f"解读依据的 {len(srcs)} 条资讯</div>", unsafe_allow_html=True,
+                    )
+                    for it in srcs[:10]:
+                        st.markdown(
+                            f"<div style='font-size:0.76rem;padding:4px 0;border-bottom:1px solid var(--fa-border)'>"
+                            f"<a href='{_safe_href(it.get('url',''))}' target='_blank' "
+                            f"style='color:var(--fa-text-2);text-decoration:none'>{_esc(it.get('title',''))}</a>"
+                            f"<span style='color:var(--fa-faint)'>　{_esc(it.get('date',''))}</span></div>",
+                            unsafe_allow_html=True,
+                        )
+
+
 def _render_home_page():
     """首页——世界地图（几个常见指数的实时点位）+ 今日重磅资讯。
 
@@ -2917,6 +3123,9 @@ def _render_home_page():
     """
     st.markdown("**全球指数一览**")
     _render_home_map()
+
+    st.divider()
+    _render_macro_briefs()
 
     st.divider()
     _render_advice_section()
@@ -4192,7 +4401,7 @@ def _render_position_rows(position_items: list, _email: str):
                     st.markdown(_esc(adv_parts.get("理由", "")))
                     for sec in ("基本面", "技术面", "价格位置"):
                         if adv_parts.get(sec):
-                            st.markdown(f"**{sec}**：{_esc(adv_parts[sec])}")
+                            st.markdown(_labeled_line(sec, adv_parts[sec]), unsafe_allow_html=True)
 
 
 def _backfill_due_reviews(email: str):

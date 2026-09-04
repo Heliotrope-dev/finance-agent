@@ -1730,6 +1730,61 @@ def get_stock_realtime_futu_batch(items: list[tuple[str, str]]) -> dict[tuple[st
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_macro_series(region: str, name_keyword: str, max_count: int = 14) -> dict:
+    """宏观指标的历史序列，含市场预期值。
+
+    2026-09-04新增，给首页宏观议题专区用。走富途 get_macro_indicator_list +
+    get_macro_indicator_history。返回的每期不只有实际值(value)，还有当时的
+    市场预期(predict_value)和上期值(previous_value)——"实际 vs 预期"才是宏观
+    数据真正被交易的那个维度，只看绝对值看不出市场是被超预期还是不及预期打了
+    一巴掌。有这份数据之后，这个专区就不再是"把新闻标题喂给AI让它复述"，
+    而是有真实时间序列可以引用和画图。
+
+    region 传 "US"/"CN"/"HK" 等（对应 ft.MacroRegion）。name_keyword 是指标
+    中文名的子串（比如"CPI同比"、"非农"、"失业率"），因为 indicator_id 是
+    富途内部编号、写死在代码里既不可读、以后变了也不好查，用名字匹配更稳。
+
+    缓存6小时：宏观数据是月频/周频，一天查两次绰绰有余。
+    """
+    reg = getattr(ft.MacroRegion, region, None) if _FUTU_SDK_AVAILABLE else None
+    if reg is None:
+        return {}
+    ret, lst = _futu_call(lambda ctx: ctx.get_macro_indicator_list(reg), timeout=15, default=(None, None))
+    if ret != ft.RET_OK or lst is None or lst.empty:
+        return {}
+    hit = lst[lst["name"].astype(str).str.contains(name_keyword, na=False)]
+    if hit.empty:
+        return {}
+    row = hit.iloc[0]
+    iid, iname = int(row["indicator_id"]), str(row["name"])
+    ret2, hist = _futu_call(
+        lambda ctx: ctx.get_macro_indicator_history(iid, max_count=max_count), timeout=15, default=(None, None)
+    )
+    if ret2 != ft.RET_OK or hist is None or hist.empty:
+        return {}
+
+    def _num(v):
+        try:
+            f = float(v)
+            return f
+        except Exception:
+            return None
+
+    unit = str(hist.iloc[0].get("unit_type") or "")
+    points = []
+    for _, r in hist.iterrows():
+        points.append({
+            "date": str(r.get("data_time") or "")[:10],
+            "value": _num(r.get("value")),
+            "predict": _num(r.get("predict_value")),
+            "previous": _num(r.get("previous_value")),
+        })
+    # 富途返回的是最新在前，画图和阅读都习惯时间从左到右，这里翻正
+    points.reverse()
+    return {"name": iname, "unit": unit, "points": points}
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_analyst_consensus(symbol: str, market: str) -> dict:
     """分析师一致预期：目标价（最高/均值/最低）+ 评级分布 + 覆盖机构家数。
 

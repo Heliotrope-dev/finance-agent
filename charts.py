@@ -525,6 +525,95 @@ def build_multi_comparison(hist_by_name: dict) -> go.Figure:
 _DONUT_MAX_SLICES = 8
 
 
+def build_macro_series_chart(series: dict) -> go.Figure:
+    """宏观指标的"实际 vs 市场预期"图。series 是 data_sources.get_macro_series
+    的返回：{"name","unit","points":[{date,value,predict,previous}]}。
+
+    2026-09-04为首页宏观议题专区新增。画法上做了两个刻意的选择：
+    - 实际值用柱、市场预期用点。宏观数据的看点是"这一期实际有没有打到预期"，
+      柱和点叠在同一个位置，高于点还是低于点一眼就看出来了；如果两条都画线，
+      读者要在两条线之间来回找差值，反而更费劲。
+    - 柱子按"是否超预期"上色：超预期用涨色、不及预期用跌色、没有预期数据的
+      用中性灰。这样即使不看具体数字，整排柱子的红绿分布就已经讲完了"最近
+      几期数据是持续超预期还是持续走弱"这件事。注意这里的红绿含义是"相对
+      预期"，不是涨跌，所以图上会标出来，避免跟行情的红绿混淆。
+    """
+    pts = (series or {}).get("points") or []
+    if not pts:
+        return go.Figure()
+    is_pct = series.get("unit") == "PERCENT"
+    mul = 100 if is_pct else 1
+    x = [p["date"] for p in pts]
+    actual = [None if p["value"] is None else p["value"] * mul for p in pts]
+    predict = [None if p["predict"] is None else p["predict"] * mul for p in pts]
+
+    colors = []
+    for p in pts:
+        if p["value"] is None or p["predict"] is None:
+            colors.append(_AUX_SOFT)
+        else:
+            colors.append(UP_COLOR if p["value"] >= p["predict"] else DOWN_COLOR)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=x, y=actual, name="实际值", marker_color=colors,
+            marker_line_width=0, opacity=0.75,
+            hovertemplate="%{x}　实际 %{y:,.2f}<extra></extra>",
+        )
+    )
+    if any(v is not None for v in predict):
+        fig.add_trace(
+            go.Scatter(
+                x=x, y=predict, name="市场预期", mode="markers",
+                marker=dict(size=8, color="#17181C", symbol="line-ew",
+                            line=dict(color="#17181C", width=2)),
+                hovertemplate="%{x}　预期 %{y:,.2f}<extra></extra>",
+            )
+        )
+    fig.update_layout(bargap=0.45)
+    if is_pct:
+        fig.update_yaxes(ticksuffix="%")
+    _apply_chart_theme(fig, height=240, legend=True, margin=dict(l=6, r=16, t=26, b=6))
+    return fig
+
+
+def build_fed_watch_chart(rows: list[dict]) -> go.Figure:
+    """CME FedWatch 利率概率图。rows: [{"meeting","range","prob"}]。
+
+    2026-09-04为首页宏观议题专区新增。选横向分组条形而不是折线或饼图：
+    这份数据的问题是"某次会议，市场认为利率落在哪个区间"，本质是几个离散
+    区间的概率分布，条形长度最直观；横向摆是因为区间标签是"3.50-3.75%"
+    这种长字符串，竖着放会挤成一团。
+
+    同一次会议的多个区间用同一个颜色（按会议分组着色），沿用图表那套去饱和
+    色板——概率高低靠长度表达，不需要再用颜色区分一次，颜色只用来区分会议。
+    """
+    if not rows:
+        return go.Figure()
+    meetings = list(dict.fromkeys(r["meeting"] for r in rows))
+    fig = go.Figure()
+    for i, mt in enumerate(meetings):
+        sub = [r for r in rows if r["meeting"] == mt]
+        # 区间从低到高排，图上从下往上就是利率由低到高，符合直觉
+        sub.sort(key=lambda r: r["range"])
+        fig.add_trace(
+            go.Bar(
+                y=[r["range"] for r in sub],
+                x=[r["prob"] for r in sub],
+                name=mt, orientation="h",
+                marker_color=_MULTI_COLORS[i % len(_MULTI_COLORS)],
+                marker_line_width=0,
+                hovertemplate="%{y}　%{x:.1f}%<extra>" + mt + "</extra>",
+            )
+        )
+    fig.update_layout(barmode="group", bargap=0.35, bargroupgap=0.06)
+    fig.update_xaxes(ticksuffix="%", range=[0, 100])
+    _apply_chart_theme(fig, height=max(200, 46 * max(len(set(r["range"] for r in rows)), 3)),
+                       legend=True, grid="xy", margin=dict(l=6, r=16, t=26, b=6))
+    return fig
+
+
 def build_position_donut(
     holdings: list[dict], total_value_cny: float, currency_symbol: str = "¥", show_legend: bool = False,
 ) -> go.Figure:
