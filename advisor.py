@@ -81,7 +81,11 @@ _QWEN_BASE = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 # 智谱数学题会被截断算不完，但那是"独立完整解题"场景对严谨性要求高；
 # 这里只是写一段有立场的论证（不是最终判断，最终裁决还是回落到_client()/
 # _MODEL这条主线），达不到那个门槛的要求，用在这里没问题。
-_ZHIPU_MODEL = "glm-4-plus"
+# 2026-09-04从glm-4-plus换成glm-4.5-air：账号里的额度是按模型绑定的，
+# glm-4.5-air那一包有1199万tokens，而"适用于所有按tokens计费"的通用池
+# 只有17.4万——judge一次就要几千token，挂在通用池上几十次就烧穿了，
+# 那样兜底等于没兜。air是这个账号唯一有量的文本模型。
+_ZHIPU_MODEL = "glm-4.5-air"
 _ZHIPU_BASE = "https://open.bigmodel.cn/api/paas/v4"
 
 # 2026-08-26：曾经短暂试过把辩论裁判换成DeepSeek第三方（裁判跟多头选手
@@ -281,6 +285,81 @@ def _zhipu_client() -> OpenAI | None:
         return OpenAI(api_key=key, base_url=_ZHIPU_BASE, max_retries=1, timeout=60)
     except Exception:
         return None
+
+
+def _is_failover_worthy(err: Exception) -> bool:
+    """这个错误换一家供应商还有没有希望？
+
+    只对"供应商侧扛不住了"这类错误做转移：配额耗尽(429 insufficient_quota)、
+    限流、5xx、超时、连不上。请求本身有问题（400参数错、401key错）换谁都一样，
+    转过去只是白白再烧一次，还会掩盖真正的配置问题。
+    """
+    txt = f"{type(err).__name__} {err}".lower()
+    if any(k in txt for k in ("insufficient_quota", "quota", "rate limit", "ratelimit",
+                              "too many requests", "429")):
+        return True
+    if any(k in txt for k in ("timeout", "timed out", "connection", "apiconnection",
+                              "internalserver", "500", "502", "503", "504",
+                              "service unavailable", "overloaded")):
+        return True
+    return False
+
+
+def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: float = 0.3,
+                       timeout: float = 120, tag: str = "") -> str:
+    """所有非流式AI调用的统一入口：千问顶不住就自动换智谱。
+
+    2026-09-04真实故障催生的：千问的周额度在当天下午耗尽
+    （"Your token-plan 1-week quota has been exhausted，reset at 09-08"），
+    模拟盘的自主决策连续25轮全部失败、OpenClaw那几个agent类定时任务也跟着报
+    FailoverError，整条AI链路直接停摆四天。而项目里其实一直配着智谱
+    (glm-4-plus)的key，只在多空辩论那一处用过——单点依赖一家供应商，
+    额度一断就全线趴窝，这是架构问题不是运气问题。
+
+    转移策略刻意保守：只有 _is_failover_worthy 认定的"供应商侧问题"才换家，
+    参数错/鉴权错不换（换了也一样错，还会掩盖真正的配置问题）。两家都失败时
+    抛出第一家的异常——那通常才是根因，第二家的报错往往只是跟着一起挂。
+
+    返回纯文本。流式场景不走这里（见 assistant.py 自己的处理）。
+    """
+    primary_err = None
+    # 第四个字段是max_tokens倍数。glm-4.5-air是推理模型，隐藏的
+    # reasoning_content跟正文共用同一个max_tokens预算（实测一句话的问题
+    # 正文60字、思考448字，completion_tokens=300全算在一起），这跟千问那边
+    # 踩过的坑是同一个。按调用点原样的预算转过去，思考链很容易把额度吃光、
+    # 正文返回空——那就等于兜底了个寂寞。给智谱放宽到2倍，账号里air那包有
+    # 1199万tokens，放宽这点量完全够烧。
+    for client_fn, model, who, budget_mult in (
+        (_client, _MODEL, "千问", 1.0),
+        (_zhipu_client, _ZHIPU_MODEL, "智谱", 2.0),
+    ):
+        try:
+            client = client_fn()
+        except Exception as e:
+            if primary_err is None:
+                primary_err = e
+            continue
+        if client is None:
+            continue
+        try:
+            resp = client.with_options(max_retries=0, timeout=timeout).chat.completions.create(
+                model=model, messages=messages,
+                max_tokens=int(max_tokens * budget_mult), temperature=temperature, stream=False,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            if not text:
+                raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
+            if who != "千问":
+                print(f"[failover{('/' + tag) if tag else ''}] 千问不可用，已改用{who}")
+            return text
+        except Exception as e:
+            if primary_err is None:
+                primary_err = e
+            if not _is_failover_worthy(e):
+                raise
+            print(f"[failover{('/' + tag) if tag else ''}] {who}失败({type(e).__name__})，尝试下一家")
+            continue
+    raise primary_err if primary_err else RuntimeError("没有任何可用的AI供应商")
 
 
 def _run_concurrent_with_deadline(
@@ -1084,9 +1163,16 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
     # 千问端点在重prompt下的真实延迟是75~110秒，90秒本来就切在分布中间。
     # 上限仍然远小于批次整体deadline（watchlist 900秒 / screen 400秒），
     # 单支卡住不会拖垮整批。
-    resp = _client().with_options(max_retries=0, timeout=150).chat.completions.create(
-        model=_MODEL,
-        messages=[
+    # 150->210秒（2026-09-04）：走故障转移到智谱glm-4.5-air之后，实测同一支
+    # 腾讯控股整条真实数据路径耗时146.2秒，离150秒只剩4秒——air是推理模型，
+    # 隐藏思考链本来就比千问慢，再撞上批量并发只会更慢，那点余量等于没有。
+    # 210秒是对146秒留约四成余量。单支超时上限放宽不会拖垮整批：外层
+    # watchlist(900秒)/screen(400秒)的统一deadline仍然是真正的兜底闸门。
+    # 走统一的故障转移入口：千问顶不住（配额耗尽/限流/超时）就自动换智谱。
+    # 2026-09-04千问周额度耗尽导致整条AI链路停摆四天，那次之后加的，
+    # 见 chat_with_failover 的说明。超时/上限参数跟原来一致。
+    text = chat_with_failover(
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
@@ -1094,16 +1180,8 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
         # 这个项目反复踩过的老坑（README"AI分析概率性返回空内容"）。这个判断
         # 要求综合基本面+成长性+负债+估值+技术面五项给结论，思考链容易变长，
         # 实测4000时仍有41%概率返回空内容，调到8000。
-        max_tokens=8000,
-        temperature=0.3,
-        stream=False,
+        max_tokens=8000, temperature=0.3, timeout=210, tag="judge",
     )
-    text = resp.choices[0].message.content or ""
-    if not text.strip():
-        # 空内容不当成"观望"记下去——那是"没判断出来"，跟AI主动判断"没有把握
-        # 所以观望"是两回事，前者写进advice表会污染统计还会让人误以为是真判断。
-        # 交给调用方(_judge_one)的except分支处理为失败，跳过这条不记录。
-        raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
     action = _extract_action(text)
     return {"action": action, "score": _extract_score(text), "fundamental_verdict": text}
 

@@ -917,17 +917,17 @@ def _run_cycle_locked(email: str) -> dict:
         # 900秒周期里留100秒确实算保守；现在节奏已经是5分钟(300秒)，200秒
         # 依然在周期以内，而且真跑超时了也有_LOCK_PATH文件锁兜底——下一次
         # cron抢不到锁会老实跳过，不会两个进程同时下单。
-        resp = advisor._client().with_options(max_retries=0, timeout=200).chat.completions.create(
-            model=advisor._MODEL,
-            messages=[
+        # 统一走 advisor.chat_with_failover：千问顶不住就自动换智谱。
+        # 2026-09-04千问周额度耗尽，这个循环连续25轮全部失败、每5分钟白烧一次
+        # 调用，而项目里一直配着智谱的key却只在多空辩论那一处用过——单点依赖
+        # 一家供应商，额度一断整条链路就停摆。超时/上限跟原来保持一致。
+        text = advisor.chat_with_failover(
+            [
                 {"role": "system", "content": _AGENT_SYSTEM},
                 {"role": "user", "content": user_content},
             ],
-            max_tokens=2000,
-            temperature=0.4,
-            stream=False,
+            max_tokens=2000, temperature=0.4, timeout=200, tag="sim_agent",
         )
-        text = resp.choices[0].message.content or ""
     except Exception as e:
         tracker.log_sim_agent_run(email, open_markets, net_value_before, "", "[]", "失败", f"AI调用失败：{e}")
         return {"status": "失败", "note": str(e)}

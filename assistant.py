@@ -539,6 +539,48 @@ _TOOLS = [
 ]
 
 
+
+def _create_stream_with_failover(**kwargs):
+    """建流时的供应商故障转移：千问顶不住就改用智谱。
+
+    2026-09-04千问周额度耗尽，整条AI链路停摆——内置AI这个页面尤其致命，
+    它不是后台定时任务，是用户点开就要立刻有反应的地方，挂了就是白屏。
+
+    只在"建流那一刻"转移：create()本身要等服务端接受请求才返回，配额耗尽
+    /限流/鉴权这类问题都在这一步就暴露，失败得快也切得干净。已经开始吐字
+    之后再中断不在这里处理——那时前端已经显示了半截回答，静默换一家重说
+    一遍反而更怪，交给上层的异常提示。
+
+    转移条件复用advisor._is_failover_worthy，跟其余调用点保持同一套判断。
+    """
+    import advisor
+
+    primary_err = None
+    for client_fn, model, who in (
+        (_client, _MODEL, "千问"),
+        (advisor._zhipu_client, advisor._ZHIPU_MODEL, "智谱"),
+    ):
+        try:
+            client = client_fn()
+        except Exception as e:
+            primary_err = primary_err or e
+            continue
+        if client is None:
+            continue
+        try:
+            stream = client.chat.completions.create(model=model, **kwargs)
+            if who != "千问":
+                print(f"[failover/assistant] 千问不可用，已改用{who}")
+            return stream
+        except Exception as e:
+            primary_err = primary_err or e
+            if not advisor._is_failover_worthy(e):
+                raise
+            print(f"[failover/assistant] {who}失败({type(e).__name__})，尝试下一家")
+            continue
+    raise primary_err if primary_err else RuntimeError("没有任何可用的AI供应商")
+
+
 def _execute_tool(name: str, args: dict) -> str:
     """实际执行工具调用，统一吞异常返回文字说明（不让单个工具失败打断整轮
     对话）——跟这个项目一贯的"取不到就如实说取不到，不硬凑"原则一致。
@@ -597,8 +639,8 @@ def _stream_and_collect(messages: list[dict], max_tokens: int):
     结果"，多个用户会话并发调用这同一个模块级函数时会互相踩到对方的
     结果，那是真的会出错的写法，这里特意避开。
     """
-    stream = _client().chat.completions.create(
-        model=_MODEL, messages=messages, temperature=0.4, tools=_TOOLS, stream=True, max_tokens=max_tokens,
+    stream = _create_stream_with_failover(
+        messages=messages, temperature=0.4, tools=_TOOLS, stream=True, max_tokens=max_tokens,
     )
     tool_calls_acc: dict[int, dict] = {}
     content_acc = ""
@@ -661,8 +703,7 @@ def stream_reply(messages: list[dict], context: str, max_tokens: int = 1200):
         result = _execute_tool(call["function"]["name"], args)
         tool_msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result})
 
-    stream = _client().chat.completions.create(
-        model=_MODEL,
+    stream = _create_stream_with_failover(
         messages=base_messages + tool_msgs,
         temperature=0.4,
         stream=True,
