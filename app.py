@@ -509,14 +509,15 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 [class*="st-key-mv_row_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
 [class*="st-key-mv_row_"]:hover { background: rgba(23,24,28,0.015) !important; }
 
-/* 热门板块卡片：保留边框（网格需要它划分组），只把白底换成透明。 */
-[class*="st-key-sector_card_"] {
-    background: transparent !important;
-    border: 1px solid var(--fa-border) !important;
-    border-radius: var(--fa-radius-sm) !important;
-    padding: 12px 14px !important;
+/* 热门板块行，跟本页其余列表同一套扁平样式。 */
+[class*="st-key-sector_row_"] {
+    border: none !important; background: transparent !important;
+    border-bottom: 1px solid var(--fa-border) !important;
+    border-radius: 0 !important; padding: 10px 2px !important;
+    gap: 0 !important;
 }
-[class*="st-key-sector_card_"]:hover { background: rgba(23,24,28,0.015) !important; }
+[class*="st-key-sector_row_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
+[class*="st-key-sector_row_"]:hover { background: rgba(23,24,28,0.015) !important; }
 
 [class*="st-key-idx_row_"] {
     border: none !important; background: transparent !important;
@@ -2011,45 +2012,42 @@ def _render_hot_sectors(market: str):
     show_n = 30 if st.session_state.get(expand_key) else 9
     shown = sectors.head(show_n).reset_index(drop=True)
 
-    for row_start in range(0, len(shown), 3):
-        cols = st.columns(3)
-        for i, col in enumerate(cols):
-            idx = row_start + i
-            if idx >= len(shown):
-                continue
-            row = shown.iloc[idx]
-            s_color = UP_COLOR if row["涨跌幅"] >= 0 else DOWN_COLOR
-            inner = (
-                f"<div style='font-weight:600;color:var(--fa-text)'>{_esc(str(row['板块']))}</div>"
-                f"<div style='color:{s_color};font-weight:700;font-size:1.1rem'>{row['涨跌幅']:+.2f}%</div>"
-                f"<div style='color:var(--fa-muted);font-size:0.78rem'>热度第{idx + 1}名</div>"
-            )
-            with col:
-                # 板块是网格布局，不能像列表行那样只留一条底部发丝线（网格里
-                # 一条下划线会变成断断续续的横杠）。这里保留边框做分隔，只把
-                # 白色底填掉换成透明——页面底色是 #FAFAFB，白卡片比底色更亮，
-                # 九个白块排成三行在这套灰白基调里就是九个亮斑。透明之后卡片
-                # 只剩一圈发丝边界，分组关系还在，但不再抢注意力。
-                with st.container(key=f"sector_card_{market}_{idx}"):
-                    if market == "A":
-                        # A股板块成分股走东财接口，实测连接经常失败（东财板块类
-                        # 接口的老问题），点进去大概率只看到"获取不到"，体验比
-                        # 不能点还差——干脆A股这边先不做成可点击，跟原来一样纯展示。
-                        # 港股/美股走Futu，可靠，保留可点击。
-                        st.markdown(inner, unsafe_allow_html=True)
-                    else:
-                        href = (
-                            f"?open_sector={urllib.parse.quote(str(row['板块']))}"
-                            f"&open_sector_market={urllib.parse.quote(market)}"
-                            f"{_auth_qs()}"
-                        )
-                        st.markdown(
-                            "<style>a.sector-card-link, a.sector-card-link:link, a.sector-card-link:visited {"
-                            "text-decoration:none !important; color:inherit !important; display:block; cursor:pointer;"
-                            "}</style>"
-                            f"<a class='sector-card-link' href='{href}' target='_self'>{inner}</a>",
-                            unsafe_allow_html=True,
-                        )
+    # 2026-09-04用户反馈"热门板块的布局也跟前面的内容保持一致，感觉这样的
+    # 框框很突兀"。原来是3×3宫格的卡片，即使把白底改成透明，九个带边框的方块
+    # 摞在一起跟这一页其余部分（指数、涨跌停池、核心股全是一行一条发丝线的
+    # 扁平列表）还是两套语言。改成同一套扁平行：板块名在左，涨跌幅和热度排名
+    # 靠右，行与行之间一条发丝线。
+    #
+    # 顺带解决了宫格本身的一个毛病：三列等宽，但板块名长短差很多（"元件"两个
+    # 字和"数码解决方案服务"七个字挤在同宽的格子里），列表布局天然没这个问题。
+    for idx, row in shown.iterrows():
+        s_color = UP_COLOR if row["涨跌幅"] >= 0 else DOWN_COLOR
+        inner = (
+            f"<div style='display:flex;align-items:center'>"
+            f"<div style='flex:3;font-weight:600;color:var(--fa-text)'>{_esc(str(row['板块']))}</div>"
+            f"<div style='flex:1;text-align:right;color:{s_color};font-weight:600'>{row['涨跌幅']:+.2f}%</div>"
+            f"<div style='flex:1;text-align:right;color:var(--fa-faint);font-size:0.78rem'>热度第{idx + 1}名</div>"
+            f"</div>"
+        )
+        with st.container(key=f"sector_row_{market}_{idx}"):
+            if market == "A":
+                # A股板块成分股走东财接口，实测连接经常失败（东财板块类接口的
+                # 老问题），点进去大概率只看到"获取不到"，体验比不能点还差——
+                # A股这边先不做成可点击。港股/美股走Futu，可靠，保留可点击。
+                st.markdown(inner, unsafe_allow_html=True)
+            else:
+                href = (
+                    f"?open_sector={urllib.parse.quote(str(row['板块']))}"
+                    f"&open_sector_market={urllib.parse.quote(market)}"
+                    f"{_auth_qs()}"
+                )
+                st.markdown(
+                    "<style>a.sector-card-link, a.sector-card-link:link, a.sector-card-link:visited {"
+                    "text-decoration:none !important; color:inherit !important; display:block; cursor:pointer;"
+                    "}</style>"
+                    f"<a class='sector-card-link' href='{href}' target='_self'>{inner}</a>",
+                    unsafe_allow_html=True,
+                )
 
     if len(sectors) > 9:
         if not st.session_state.get(expand_key):
