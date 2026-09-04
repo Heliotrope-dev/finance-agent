@@ -383,6 +383,37 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
     background: var(--fa-fill) !important; border-color: transparent !important; color: var(--fa-text) !important;
 }
 
+/* 持仓/自选列表的行。去掉卡片边框、改成发丝分隔的平铺行；行内那个
+   "AI持仓判断"折叠框也一并去掉边框和底色，变成一行安静的可展开文字。
+   目标是把"卡片里套卡片"压成一张干净的行情列表。 */
+[class*="st-key-pos_row_"] {
+    border: none !important; background: transparent !important;
+    border-bottom: 1px solid var(--fa-border) !important;
+    border-radius: 0 !important; padding: 4px 2px 2px !important;
+    gap: 0 !important;
+}
+/* 行内那条"观望 · 09-03"紧贴主行，不要另起一大段。Streamlit 默认给每个
+   元素容器留了不小的竖向间距，一行里有两个块就会撑出很高的行高，二十来行
+   叠起来整页就散了。 */
+[class*="st-key-pos_row_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
+[class*="st-key-pos_row_"] [data-testid="stExpander"] { margin-top: -6px !important; }
+[class*="st-key-pos_row_"]:hover { background: rgba(23,24,28,0.015) !important; }
+[class*="st-key-pos_row_"] [data-testid="stExpander"] details {
+    border: none !important; background: transparent !important; border-radius: 0 !important;
+}
+[class*="st-key-pos_row_"] [data-testid="stExpander"] summary {
+    padding: 2px 0 0 !important; background: transparent !important;
+}
+[class*="st-key-pos_row_"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
+[class*="st-key-pos_row_"] [data-testid="stExpander"] summary p {
+    font-size: 0.76rem !important; color: var(--fa-faint) !important; font-weight: 400 !important;
+}
+[class*="st-key-pos_row_"] [data-testid="stExpander"] summary:hover p { color: var(--fa-muted) !important; }
+/* 删除键平时隐去，指到这一行才浮出来——它是破坏性操作，不需要二十个红叉
+   常驻在列表右侧。 */
+[class*="st-key-pos_row_"] [class*="st-key-pos_del_"] button { opacity: 0; transition: opacity .15s ease; }
+[class*="st-key-pos_row_"]:hover [class*="st-key-pos_del_"] button { opacity: 1; }
+
 /* 图标按钮统一规格：36px 正圆、图标 1.12rem。原来各处自己写死 44px + 1.6rem，
    在这套克制的版式里显得又大又重，而且持仓页 44px、删除键 36px，同一个页面
    两种尺寸。这里收口成一份，各处不再重复定义。 */
@@ -3606,10 +3637,16 @@ def _render_position_rows(position_items: list, _email: str):
                 f"<div style='font-size:0.72rem;color:var(--fa-muted)'>{_fmt_turnover(wspot.get('成交额'))}</div>"
                 f"</div>"
             )
+            # 涨跌幅原来是"实色块+白字"。一屏二十来行，就是二十来个饱和色块
+            # 竖着排下来，页面上最抢眼的变成了这一列色块本身，而不是数字。
+            # 改成同色系的淡底+彩字：颜色照样一眼分得出涨跌，但重量轻得多，
+            # 视线回到数字上。用 color-mix 把同一个色号兑淡，不另外挑一个浅色，
+            # 保证以后改 theme.py 时深浅两档自动同步。
             badge_html = (
                 f"<div style='text-align:right'>"
-                f"<span style='background:{color};color:#fff;font-size:0.78rem;font-weight:600;"
-                f"padding:3px 7px;border-radius:5px;display:inline-block;min-width:58px;text-align:center'>"
+                f"<span style='background:color-mix(in srgb, {color} 11%, transparent);"
+                f"color:{color};font-size:0.78rem;font-weight:600;letter-spacing:.01em;"
+                f"padding:3px 8px;border-radius:5px;display:inline-block;min-width:60px;text-align:center'>"
                 f"{wchange_pct:+.2f}%</span></div>"
             )
 
@@ -3629,7 +3666,12 @@ def _render_position_rows(position_items: list, _email: str):
             price_html = "<div style='text-align:right;color:var(--fa-muted)'>—</div>"
             badge_html = ""
 
-        with st.container(border=True):
+        # 行容器不再用 border=True。原来每一行是一张带边框的卡片，卡片里又套
+        # 一个带边框的"AI持仓判断"折叠框——二十来行就是二十来个"方框套方框"，
+        # 用户反馈的"看上去很冗杂"就是这么来的。改成没有边框的平铺行，行与行
+        # 之间只用一条发丝线分隔（CSS 里的 .st-key-pos_row_*），信息密度更高，
+        # 视觉噪声大幅下降，也更像一张真正的行情列表而不是一堆卡片。
+        with st.container(key=f"pos_row_{item_market}_{symbol}"):
             # 比例是把原来单列里 名称2.1:走势1.1:价格1.3:涨跌幅1 这四段按
             # "静态(名称+走势)/动态(价格+涨跌幅)"拆成两组，再按原比例
             # 换算回外层st.columns([9,1])的尺度（9*3.2/5.5≈5.24，9*2.3/5.5≈3.76），
@@ -3694,7 +3736,11 @@ def _render_position_rows(position_items: list, _email: str):
                 adv_action = adv.get("action", "观望")
                 adv_color = _ADVICE_ACTION_COLOR.get(adv_action, NEUTRAL_COLOR)
                 adv_parts = _parse_advice_text(adv.get("fundamental_verdict", ""))
-                with st.expander(f"AI持仓判断：{adv_action}（{adv.get('created_at','')[:10]}）"):
+                # 标题从"AI持仓判断：观望（2026-09-03）"缩成"观望 · 09-03"——
+                # 前缀每行都一样，重复二十遍不提供任何信息；日期只留月-日。
+                # 折叠框本身在 CSS 里去掉了边框和底色（见 .st-key-pos_row_ 那段），
+                # 变成一行安静的可展开文字，不再是卡片里的第二个方框。
+                with st.expander(f"{adv_action} · {adv.get('created_at','')[5:10]}"):
                     st.markdown(
                         f"<span style='background:{adv_color};color:#fff;border-radius:4px;padding:1px 8px;"
                         f"font-size:0.8rem;font-weight:700'>{_esc(adv_action)}</span> "
