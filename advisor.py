@@ -359,6 +359,7 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
     """
     primary_err = None
     skipped_cooling = False
+    errors: list[tuple[str, Exception]] = []
     # 第四个字段是max_tokens倍数。glm-4.5-air是推理模型，隐藏的
     # reasoning_content跟正文共用同一个max_tokens预算（实测一句话的问题
     # 正文60字、思考448字，completion_tokens=300全算在一起），这跟千问那边
@@ -418,6 +419,7 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
         except Exception as e:
             if primary_err is None:
                 primary_err = e
+            errors.append((who, e))
             if not _is_failover_worthy(e):
                 raise
             if _is_quota_or_ratelimit_error(e):
@@ -427,8 +429,14 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
             else:
                 print(f"[failover{('/' + tag) if tag else ''}] {who}失败({type(e).__name__})，尝试下一家")
             continue
-    if primary_err:
-        raise primary_err
+    if errors:
+        # 报错要把每一家的原因都带上。原来只抛第一家的异常（"第二家的报错往往
+        # 只是跟着一起挂"），实际用下来是反的：2026-09-04有一轮决策失败，页面
+        # 上显示的是千问的"quota has been exhausted"，看着像账号欠费，可那时候
+        # 千问本来就是已知不可用、早就靠智谱在跑——真正让这一轮挂掉的是智谱那边
+        # 的失败，而那条信息被完全盖住了，排查时反复往错误的方向找。
+        detail = "；".join(f"{who}: {type(e).__name__} {e}" for who, e in errors)
+        raise RuntimeError(f"所有AI供应商都失败了 —— {detail}") from errors[0][1]
     raise RuntimeError(
         "所有AI供应商都在冷却期内，本次调用没有实际尝试任何一家"
         if skipped_cooling else "没有任何可用的AI供应商"
@@ -729,17 +737,18 @@ def _quick_triage(item: dict) -> dict:
         fin = _financial_summary_text(symbol, market)
         if not fin:
             return {**item, "_triage_pass": True}
-        resp = _client().chat.completions.create(
-            model=_MODEL,
-            messages=[
+        # 初筛也走故障转移。这里的预算给得比别处大很多（150 -> 1200）：
+        # 初筛只要一个"放行/筛掉"的短判断，正文150字绰绰有余，但推理模型的
+        # 隐藏思考链跟正文共用预算，150在思考阶段就烧穿了，永远返回空内容。
+        # 这一层失败是"按放行处理"，不会报错，所以坏了也悄无声息——只会表现为
+        # 初筛完全失效、每支股票都被放行去跑完整判断，白白多花几十次重调用。
+        text = chat_with_failover(
+            [
                 {"role": "system", "content": _TRIAGE_SYSTEM},
                 {"role": "user", "content": f"股票：{name}（{symbol}）\n\n财务摘要：\n{fin}"},
             ],
-            max_tokens=150,
-            temperature=0.2,
-            stream=False,
+            max_tokens=1200, temperature=0.2, timeout=60, tag="triage",
         )
-        text = resp.choices[0].message.content or ""
         passed = "值得深入：是" in text or "值得深入:是" in text or ("否" not in text.split("\n", 1)[0])
         return {**item, "_triage_pass": passed}
     except Exception:

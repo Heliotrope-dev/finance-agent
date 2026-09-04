@@ -26,6 +26,42 @@ def _client() -> OpenAI:
     return OpenAI(api_key=key, base_url=_QWEN_BASE, max_retries=2)
 
 
+def _create_stream_with_failover(**kwargs):
+    """建流时的供应商故障转移，跟 assistant.py 里同名函数同一套逻辑。
+
+    两个模块各留一份而不是抽公共函数：它们各自有自己的 _client() 和 _MODEL
+    （assistant 那个客户端是 st.cache_resource 缓存的会话级单例，这个不是），
+    抽出去就要把客户端当参数传进传出，反而绕。转移判据复用
+    advisor._is_failover_worthy，保证全项目一套标准。
+    """
+    import advisor
+
+    primary_err = None
+    for client_fn, model, who in (
+        (_client, _MODEL, "千问"),
+        (advisor._zhipu_client, advisor._ZHIPU_MODEL, "智谱"),
+    ):
+        try:
+            client = client_fn()
+        except Exception as e:
+            primary_err = primary_err or e
+            continue
+        if client is None:
+            continue
+        try:
+            stream = client.chat.completions.create(model=model, **kwargs)
+            if who != "千问":
+                print(f"[failover/analysis] 千问不可用，已改用{who}")
+            return stream
+        except Exception as e:
+            primary_err = primary_err or e
+            if not advisor._is_failover_worthy(e):
+                raise
+            print(f"[failover/analysis] {who}失败({type(e).__name__})，尝试下一家")
+            continue
+    raise primary_err if primary_err else RuntimeError("没有任何可用的AI供应商")
+
+
 def _stream_chat(system_prompt: str, user_content: str, max_tokens: int = 2000):
     """所有AI模块共用的流式调用——之前是等DeepSeek整段返回完了才一次性显示，
     用户反馈"一下子蹦出来"不像在实时生成。改成stream=True，一个字一个字yield出来，
@@ -43,8 +79,12 @@ def _stream_chat(system_prompt: str, user_content: str, max_tokens: int = 2000):
     "length"，页面上就是"AI没有返回任何内容"（不是必现，是概率性失败，取决于
     这次模型想了多久）。改成默认2000，给思考过程留足够空间，不再靠运气。
     """
-    stream = _client().chat.completions.create(
-        model=_MODEL,
+    # 建流走故障转移：千问顶不住就换智谱。2026-09-04千问周额度耗尽时，
+    # 别的调用点都接上了兜底，唯独这里漏了——而这是个股详情页那块"AI分析"，
+    # 用户点开就要出结果的地方，千问一挂它就整个是坏的，比后台定时任务失败
+    # 更直接影响使用。转移只发生在建流那一刻（create要等服务端接受请求才返回，
+    # 配额和限流问题在这一步就暴露），已经开始吐字之后不再中途换家。
+    stream = _create_stream_with_failover(
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},

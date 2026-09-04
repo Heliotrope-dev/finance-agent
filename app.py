@@ -1085,6 +1085,31 @@ def _resolve_add_symbol(q: str, market_code: str) -> str | None:
     return q.zfill(5) if market_code == "HK" else q.upper()
 
 
+# 搜索历史的点击跳转在这里处理，而不是跟其它 open_* 参数一起放在文件开头：
+# 这段要调用下面刚定义的 _resolve_add_symbol（搜索历史存的是用户当时输入的
+# 原始词，"Microsoft"、"苹果"、"nike"，不是股票代码，得现查）。模块级代码
+# 自上而下执行，放在文件开头会 NameError 直接把整页打挂。
+# 搜索历史点进来的链接。这里跟 open_symbol 分开处理，因为搜索历史存的是
+# 用户当时输入的原始词（"Microsoft"、"苹果"、"nike"），不是股票代码——代码
+# 要现查才知道。解析放在跳转这一刻做而不是渲染列表时批量做：列表有八条，
+# 渲染时全解析一遍要发八次行情请求，而用户通常只点其中一条。
+if st.query_params.get("open_search"):
+    _q = st.query_params["open_search"]
+    _m = st.query_params.get("open_search_market", "A")
+    _sym = _resolve_add_symbol(_q, _m)
+    if _sym:
+        st.session_state["_detail_symbol"] = _sym
+        st.session_state["_detail_market"] = _m
+        st.session_state["_detail_name"] = _q
+        st.session_state["_detail_return_section"] = "我的"
+        st.session_state["_active_section"] = "我的"
+    else:
+        # 查不到就别静默吞掉——这条历史可能是当时搜错的词，或者标的已经退市。
+        st.session_state["_search_open_error"] = _q
+    st.query_params.clear()
+    st.rerun()
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _get_hot_stock_names() -> set:
     """"新闻标红"用的交叉比对集合——不是新闻本身的热度分数（免费数据源里
@@ -2914,15 +2939,34 @@ def _render_my_page():
         if _searches:
             st.markdown("**最近搜索**")
             _mk = {"A": "A股", "HK": "港股", "US": "美股"}
+            if st.session_state.pop("_search_open_error", None):
+                st.caption("这条搜索记录查不到对应行情，可能当时就没搜到，或者标的已经退市。")
+            # 整行做成链接（2026-09-04用户要求"最新搜索的股票最好能点进去显示
+            # 详情界面"）。用 <a href="?open_search=..."> 的整页导航而不是
+            # st.button：这一页的行全是HTML div加发丝线，插一个Streamlit按钮
+            # 进去会自带一套完全不同的盒模型和间距，跟上下行对不齐。链接则是
+            # 把现有的div原样包起来，外观一点不变。
+            st.markdown(
+                "<style>a.my-search-link, a.my-search-link:link, a.my-search-link:visited {"
+                "text-decoration:none !important; color:inherit !important; display:block; cursor:pointer;"
+                "} a.my-search-link:hover { background: rgba(23,24,28,0.02); }</style>",
+                unsafe_allow_html=True,
+            )
             for h in _searches:
                 _t = _to_cn_dt(h.get("searched_at", ""))
                 _when = _t.strftime("%m-%d") if _t else ""
+                _href = (
+                    f"?open_search={urllib.parse.quote(str(h.get('query','')))}"
+                    f"&open_search_market={urllib.parse.quote(str(h.get('market') or 'A'))}"
+                    f"{_auth_qs()}"
+                )
                 st.markdown(
+                    f"<a class='my-search-link' href='{_href}' target='_self'>"
                     f"<div style='display:flex;justify-content:space-between;align-items:baseline;"
                     f"padding:9px 0;border-bottom:1px solid var(--fa-border)'>"
                     f"<span style='color:var(--fa-text);font-size:0.9rem'>{_esc(h.get('query',''))}</span>"
                     f"<span style='color:var(--fa-faint);font-size:0.78rem'>"
-                    f"{_mk.get(h.get('market'), h.get('market') or '')} · {_when}</span></div>",
+                    f"{_mk.get(h.get('market'), h.get('market') or '')} · {_when}</span></div></a>",
                     unsafe_allow_html=True,
                 )
 
