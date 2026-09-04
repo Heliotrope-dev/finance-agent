@@ -714,23 +714,37 @@ def get_simulated_orders(email: str, limit: int = 50) -> list[dict]:
 
 
 
-def get_closure_notice_date(email: str) -> str:
-    """休市公告上次弹出的日期（YYYY-MM-DD），没弹过返回空串。"""
+def get_closure_notice_count(email: str, day: str) -> int:
+    """今天已经弹过几次休市公告。
+
+    存的格式是 "YYYY-MM-DD:次数"。用户要求"每天跳三次就行，不需要每次点进去
+    就跳"——所以不是布尔的"弹过没有"，要记次数；日期不匹配（换天了）就归零。
+    塞在同一个字段里而不是再加一列：这是个纯提示性的计数，为它单独加列和迁移
+    不值当。
+    """
     init_db()
     with closing(_conn()) as c:
         row = c.execute(
             "SELECT closure_notice_date FROM user_settings WHERE email = ?", (email,)
         ).fetchone()
-        return (row[0] if row and row[0] else "")
+    raw = (row[0] if row and row[0] else "")
+    if not raw.startswith(day):
+        return 0
+    try:
+        return int(raw.split(":", 1)[1])
+    except Exception:
+        # 兼容旧格式（只存了日期、没有次数）：当成已经弹过一次
+        return 1
 
 
-def set_closure_notice_date(email: str, day: str) -> None:
+def bump_closure_notice_count(email: str, day: str) -> None:
+    n = get_closure_notice_count(email, day) + 1
     init_db()
     with closing(_conn()) as c:
         c.execute(
             "INSERT INTO user_settings (email, closure_notice_date) VALUES (?, ?) "
             "ON CONFLICT(email) DO UPDATE SET closure_notice_date = excluded.closure_notice_date",
-            (email, day),
+            (email, f"{day}:{n}"),
         )
         c.commit()
 

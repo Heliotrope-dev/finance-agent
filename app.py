@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, wait as _futures_wait
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as _cv1
+from contextlib import nullcontext as _nullcontext
 from datetime import datetime, timedelta, timezone
 
 from data_sources import (
@@ -75,7 +76,7 @@ from tracker import (
     add_search_history, get_search_history, get_latest_leaderboard, get_user_overview,
     get_latest_macro_briefs,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
-    get_closure_notice_date, set_closure_notice_date,
+    get_closure_notice_count, bump_closure_notice_count,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
     get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
     get_equity_snapshots, get_period_pnl,
@@ -290,9 +291,23 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 [data-testid="stVerticalBlockBorderWrapper"] {
     background: transparent !important;
     border: none !important;
-    border-bottom: 1px solid var(--fa-border) !important;
     border-radius: 0 !important;
-    padding: 4px 0 10px !important;
+}
+/* 真正画边框的是内层的 stVerticalBlock，不是外面这层 BorderWrapper——
+   第一版只改了 BorderWrapper，页面上白框纹丝不动，扒 DOM 才看到
+   `1px solid rgba(23,24,28,.2)` 挂在内层。
+   用 :not([class*="st-key-"]) 把这条限制在"Streamlit 自己画的框"上：
+   项目里那些扁平行是 st.container(key=...) 建的，带 st-key 类、各自
+   已经定义了想要的底部发丝线，不能被这条一并抹掉。 */
+[data-testid="stVerticalBlock"]:not([class*="st-key-"]) {
+    border: none !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+}
+/* 无边框之后靠一条发丝线分隔相邻区块，层次不靠画框靠留白。 */
+[data-testid="stVerticalBlockBorderWrapper"] > [data-testid="stLayoutWrapper"] > [data-testid="stVerticalBlock"]:not([class*="st-key-"]) {
+    border-bottom: 1px solid var(--fa-border) !important;
+    padding: 2px 0 12px !important;
 }
 /* 边框其实挂在内层的<details>上，不是 stExpander 这一层，套外层是没用的。 */
 [data-testid="stExpander"] details {
@@ -1452,6 +1467,74 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
         )
 
 
+def _financial_key_rows(fin) -> list[dict]:
+    """把东财的财务摘要原始表压成几行关键指标。
+
+    2026-09-05用户要求"就说关键的就行"。原来这里是 st.dataframe(fin) 直接把
+    整张原始表怼在页面上——49列里绝大多数是 SECUCODE / ORG_CODE /
+    SECURITY_INNER_CODE / STD_REPORT_DATE 这类内部字段，还有几十行重复的
+    会计准则和日期。那是数据库的样子，不是给人看的样子。
+
+    列名在美股和港股之间不一致（归母净利润一个叫 HOLDER_PROFIT、一个叫
+    PARENT_HOLDER_NETPROFIT），所以每个指标给一组候选列名依次尝试，取到
+    哪个算哪个，取不到就留空——不同市场披露口径本来就有差异，硬凑一个数字
+    比留空更糟。
+    """
+    if fin is None or getattr(fin, "empty", True):
+        return []
+
+    def pick(row, *names):
+        for n in names:
+            if n in row and row[n] is not None:
+                v = row[n]
+                if str(v).strip() not in ("", "nan", "None", "--"):
+                    return v
+        return None
+
+    def num(v):
+        try:
+            f = float(v)
+            return f if f == f else None
+        except Exception:
+            return None
+
+    def money(v):
+        f = num(v)
+        if f is None:
+            return ""
+        a = abs(f)
+        if a >= 1e8:
+            return f"{f / 1e8:,.1f}亿"
+        if a >= 1e4:
+            return f"{f / 1e4:,.0f}万"
+        return f"{f:,.0f}"
+
+    def pct(v):
+        f = num(v)
+        return "" if f is None else f"{f:+.1f}%"
+
+    def plain(v, digits=2):
+        f = num(v)
+        return "" if f is None else f"{f:,.{digits}f}"
+
+    rows = []
+    for _, r in fin.head(6).iterrows():
+        d = r.to_dict()
+        period = str(pick(d, "REPORT_DATE", "STD_REPORT_DATE") or "")[:10]
+        kind = str(pick(d, "DATE_TYPE") or "")
+        rows.append({
+            "报告期": (period + (f"（{kind}）" if kind else "")),
+            "营业收入": money(pick(d, "OPERATE_INCOME")),
+            "营收同比": pct(pick(d, "OPERATE_INCOME_YOY")),
+            "毛利率": (lambda f: "" if f is None else f"{f:.1f}%")(num(pick(d, "GROSS_PROFIT_RATIO"))),
+            "归母净利": money(pick(d, "HOLDER_PROFIT", "PARENT_HOLDER_NETPROFIT")),
+            "净利同比": pct(pick(d, "HOLDER_PROFIT_YOY", "PARENT_HOLDER_NETPROFIT_YOY")),
+            "每股收益": plain(pick(d, "BASIC_EPS")),
+            "ROE": (lambda f: "" if f is None else f"{f:.1f}%")(num(pick(d, "ROE_AVG", "ROE_YEARLY", "ROE"))),
+        })
+    return rows
+
+
 def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
     """AI 模块按需加载：每个模块独立缓存，点开哪个才跑哪个的 AI 调用，不会一次性全跑。
 
@@ -1484,7 +1567,29 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
     elif module == "financial":
         fin = get_financial_abstract(symbol, market=market)
         if fin is not None and not fin.empty:
-            st.dataframe(fin, use_container_width=True, hide_index=True)
+            _rows = _financial_key_rows(fin)
+            if _rows:
+                _cols = list(_rows[0].keys())
+                _html = ["<div style='overflow-x:auto'><table style='border-collapse:collapse;width:100%;"
+                         "font-size:0.84rem;font-variant-numeric:tabular-nums'>"]
+                _html.append("<tr>" + "".join(
+                    f"<th style='text-align:{'left' if c == '报告期' else 'right'};padding:0 12px 8px 0;"
+                    f"font-weight:500;font-size:0.74rem;color:var(--fa-faint);"
+                    f"border-bottom:1px solid var(--fa-border)'>{_esc(c)}</th>" for c in _cols) + "</tr>")
+                for _r in _rows:
+                    _tds = []
+                    for c in _cols:
+                        v = _r[c]
+                        _col = "var(--fa-text)"
+                        if c.endswith("同比") and v:
+                            _col = UP_COLOR if v.startswith("+") else DOWN_COLOR
+                        _tds.append(
+                            f"<td style='text-align:{'left' if c == '报告期' else 'right'};"
+                            f"padding:9px 12px 9px 0;color:{_col};"
+                            f"border-bottom:1px solid var(--fa-border)'>{_esc(v)}</td>")
+                    _html.append("<tr>" + "".join(_tds) + "</tr>")
+                _html.append("</table></div>")
+                st.markdown("".join(_html), unsafe_allow_html=True)
             if is_fresh:
                 financial_summary = fin.head(10).to_string(index=False)
                 st.caption("AI 解读")
@@ -1631,6 +1736,38 @@ def _price_flash_css() -> str:
     return _PRICE_FLASH_CSS
 
 
+def _fragment_alive(kind: str) -> bool:
+    """自动刷新的 fragment 每次重跑前先问一句：我这块还在当前页面上吗？
+
+    2026-09-05系统性处理"残影"和卡顿。Streamlit 的 @st.fragment(run_every=N)
+    定时器在用户切走页面之后并不会停——它继续按点触发、继续往一个已经不属于
+    当前页面的容器里重绘。两个后果：一是屏幕上留下上一个页面的碎片（本项目
+    注释里反复记过的"切到持仓页面残留"，当时的处理是把几个 fragment 的
+    run_every 撤掉，那是回避不是解决）；二是每次空转都真的去打一次富途批量
+    行情，而富途的限流是"每30秒最多60次"，几个页面的定时器叠在一起空转，
+    很容易把额度吃掉，反过来让还在看的那个页面卡住。
+
+    这里统一加一道守卫：不属于当前上下文就立刻返回，什么都不画。既消掉残影，
+    也把切走之后的无效请求全部省掉。
+    """
+    on_detail = bool(st.session_state.get("_detail_symbol"))
+    on_index = bool(st.session_state.get("_index_detail_code"))
+    on_sector = bool(st.session_state.get("_sector_detail_name"))
+    sec = st.session_state.get("_active_section")
+    if kind == "detail":
+        return on_detail
+    if kind == "index":
+        return on_index
+    # 分区级的块：任何详情页打开时都不该再刷新
+    if on_detail or on_index or on_sector:
+        return False
+    if kind == "positions":
+        return sec in ("持仓", "自选")
+    if kind == "sim":
+        return sec == "AI模拟炒股"
+    return True
+
+
 @st.fragment(run_every=3)
 def _render_price_header(symbol: str, market: str):
     """价格区块单独做成 fragment，每3秒自己刷新，不带动AI模块、新闻这些重的部分
@@ -1638,6 +1775,9 @@ def _render_price_header(symbol: str, market: str):
     同花顺那种数字持续跳动的实时感完全不一样。数字真变了就闪一下背景色，
     让"活着"这件事肉眼可见，不是纯靠脑补更新时间戳。
     """
+    if not _fragment_alive("detail"):
+        return
+
     try:
         spot = get_stock_realtime(symbol, market=market)
     except Exception:
@@ -1689,6 +1829,9 @@ def _render_price_header(symbol: str, market: str):
 @st.fragment(run_every=3)
 def _render_index_price_header(name: str, market: str):
     """指数版的实时价格区块，逻辑跟_render_price_header一样，独立的 fragment。"""
+    if not _fragment_alive("index"):
+        return
+
     try:
         idx_snap = next((i for i in get_multi_index_snapshot(market) if i["名称"] == name), None)
     except Exception:
@@ -2948,41 +3091,42 @@ def _show_closure_notice(items: list[dict]):
 
 
 def _maybe_show_closure_notice():
-    """判断要不要弹休市公告。每个会话每天最多弹一次。
+    """判断要不要弹休市公告。每天最多三次。
 
-    刻意用 session_state 而不是落库：这是个提示性弹窗，弹多一次的代价只是
-    多点一下，为它建表、写读、清理反而是过度设计。同一天内刷新页面不会重复
-    打扰，换一天或换个会话再提醒一次，正好合适。
+    用户要求"每天跳三次就行，不需要每次点进去就跳"。三次的取舍：一次容易在
+    随手关掉之后就再也想不起来，每次都弹则是骚扰——三次能覆盖"早中晚各开一次
+    网站"这个真实节奏，又不会烦人。
+
+    详情页一律不弹，而且要在计数之前判断：卡片跳转全是整页导航，如果把详情页
+    也算进次数，点三只股票配额就用光了，真正打开首页时反而不提醒了。
     """
     import datetime as _dt
 
-    # 详情页不弹。项目里的卡片跳转全是 <a href="?open_symbol=..."> 的整页导航，
-    # 用户点一只股票就是一次整页刷新——如果照弹，点几只股票就要关几次弹窗，
-    # 比不提醒还烦。
-    #
-    # 判据用 session_state 里有没有详情页标记，不用 query_params：那几个
-    # open_* 参数在上游的处理块里已经被 st.query_params.clear() 清掉并
-    # rerun 过了，等执行到这里参数早就没了。第一版就是照着参数判的，结果
-    # 一点用没有，弹窗照旧每次都出来。
+    _MAX_PER_DAY = 3
+
+    # 详情页不弹。判据用 session_state 里有没有详情页标记，不用 query_params
+    # ——那几个 open_* 参数在上游处理块里已经被 clear() 掉并 rerun 过了，
+    # 执行到这里参数早就没了。
     if (st.session_state.get("_detail_symbol")
             or st.session_state.get("_index_detail_code")
             or st.session_state.get("_sector_detail_name")):
         return
 
     today = str(_dt.date.today())
-    if st.session_state.get("_closure_notice_shown") == today:
-        return
-
-    # 已登录用户把"今天弹过了"落库，这样整页刷新之后也不会重弹；游客没有
-    # email 可挂，退回只用 session_state（游客本来也不会长时间反复刷）。
     _email = st.session_state.get("user_email")
+
+    # 已登录用户的次数落库，整页刷新之后仍然有效（项目里的跳转全是整页导航，
+    # 只放 session_state 的话每跳一次就重新计数，等于没限制）；游客没有
+    # email 可挂，退回只用 session_state。
     if _email:
         try:
-            if get_closure_notice_date(_email) == today:
-                st.session_state["_closure_notice_shown"] = today
-                return
+            shown = get_closure_notice_count(_email, today)
         except Exception:
-            pass
+            shown = int(st.session_state.get(f"_closure_n_{today}", 0))
+    else:
+        shown = int(st.session_state.get(f"_closure_n_{today}", 0))
+    if shown >= _MAX_PER_DAY:
+        return
 
     try:
         items = [
@@ -2991,14 +3135,17 @@ def _maybe_show_closure_notice():
         ]
     except Exception:
         items = []
-    st.session_state["_closure_notice_shown"] = today
+    if not items:
+        return
+
+    # 只有真的要弹才计数——没有休市安排时不该消耗配额。
+    st.session_state[f"_closure_n_{today}"] = shown + 1
     if _email:
         try:
-            set_closure_notice_date(_email, today)
+            bump_closure_notice_count(_email, today)
         except Exception:
             pass
-    if items:
-        _show_closure_notice(items)
+    _show_closure_notice(items)
 
 
 def _render_my_page():
@@ -4218,6 +4365,9 @@ def _render_positions_today_pnl(positions: list):
     源头之一。这里也改成同一套批量查询，两个fragment都不再依赖"运气好
     刚好命中另一个fragment填的缓存"这种脆弱的隐性耦合。
     """
+    if not _fragment_alive("positions"):
+        return
+
     holding_items = [w for w in positions if (w.get("shares") or 0) > 0]
     if not holding_items:
         st.caption("今日收益：暂无真实持仓。")
@@ -4317,6 +4467,9 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
     历史决策记录/下单记录/图表不放在这个fragment里——那些只有AI每5分钟
     跑一次才会变，没必要跟着这里一起抖。
     """
+    if not _fragment_alive("sim"):
+        return
+
     with st.spinner("读取模拟盘状态..."):
         try:
             snapshot = sim_trader.get_agent_snapshot()
@@ -4817,6 +4970,9 @@ def _render_position_rows(position_items: list, _email: str):
     的 st.query_params 检查）。删除键单独放在旁边一个真正的 st.button，
     跟这个<a>标签是两个独立的DOM元素，互不干扰。
     """
+    if not _fragment_alive("positions"):
+        return
+
     if not position_items:
         st.caption("这个分类下暂时没有持仓。")
         return
@@ -5774,11 +5930,14 @@ _page_slot = st.empty()
 
 if st.session_state.get("_detail_symbol"):
     with _page_slot.container():
-        _render_stock_detail(
-            st.session_state["_detail_symbol"],
-            st.session_state.get("_detail_market", "A"),
-            st.session_state.get("_detail_name", st.session_state["_detail_symbol"]),
-        )
+        # 详情页要拉实时行情+K线历史，是全站最慢的一跳，给个加载提示，
+        # 避免点完卡片之后好几秒白屏、让人以为没点上。
+        with st.spinner("加载行情…"):
+            _render_stock_detail(
+                st.session_state["_detail_symbol"],
+                st.session_state.get("_detail_market", "A"),
+                st.session_state.get("_detail_name", st.session_state["_detail_symbol"]),
+            )
 elif st.session_state.get("_index_detail_code"):
     with _page_slot.container():
         _render_index_detail(
@@ -5831,8 +5990,19 @@ else:
                 key="_active_section", horizontal=True, label_visibility="collapsed",
             )
 
+        # 切分区时给一个加载提示（2026-09-05用户要求"一个界面到另一个界面
+        # 实在反应不过来可以用加载中的界面辅助一下"）。只在分区真的变了那一次
+        # 显示：同一个分区里的交互重跑（点按钮、切市场）本来就很快，每次都
+        # 转圈反而更吵。判据是拿上一次渲染的分区名比对，存在一个非widget的
+        # key 里，不会被 Streamlit 的 widget 状态清理掉。
+        _prev_sec = st.session_state.get("_last_rendered_section")
+        _switching = _prev_sec is not None and _prev_sec != active_section
+        st.session_state["_last_rendered_section"] = active_section
+        _sec_spinner = st.spinner("加载中…") if _switching else _nullcontext()
+
         if active_section == "首页":
-            _render_home_page()
+            with _sec_spinner:
+                _render_home_page()
 
         elif active_section == "行情":
             # 指数快照/大盘统计+涨停跌停池/南向资金+核心股/热门板块，这几块
