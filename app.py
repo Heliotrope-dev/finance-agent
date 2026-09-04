@@ -14,6 +14,13 @@ from datetime import datetime, timedelta, timezone
 
 from data_sources import (
     get_market_closures,
+    get_capital_distribution,
+    get_short_interest,
+    get_institutional_holding,
+    get_insider_trades,
+    get_market_rank,
+    get_ipo_calendar,
+    get_earnings_dates,
     get_economic_events,
     get_rating_changes,
     cn_now,
@@ -2015,6 +2022,123 @@ def _render_us_overview():
 
 
 @st.fragment
+def _render_market_extras(market: str):
+    """行情页的补充板块：异动榜、热度榜、新股。
+
+    2026-09-05新增。行情页原本有指数、涨跌停池（A股）、核心股（港美股）、
+    热门板块，覆盖的是"整体怎么样"和"板块怎么样"，缺的是"今天哪几支特别不
+    一样"。异动榜和热度榜正好补这个：一个按涨跌幅、一个按关注度，两个口径
+    挑出来的往往不是同一批——涨得多不一定有人看，热度高不一定在涨，两个都
+    列出来，差异本身就是信息。
+
+    美股开盘前额外显示盘前榜：盘前异动是当天开盘方向最早的线索，而这个时段
+    正常行情接口是没有数据的。
+    """
+    import datetime as _dt
+
+    _blocks = []
+    try:
+        movers = get_market_rank("top_movers", market, count=8)
+    except Exception:
+        movers = []
+    try:
+        hot = get_market_rank("hot", market, count=8)
+    except Exception:
+        hot = []
+    # 美东 04:00-09:30 是盘前时段，换算成北京时间大致是 16:00-21:30（夏令时）。
+    # 用宽一点的窗口，早出现半小时比漏掉强。
+    premarket = []
+    if market == "US":
+        _h = _dt.datetime.now(_CN_TZ_APP).hour
+        if 15 <= _h <= 22:
+            try:
+                premarket = get_market_rank("us_premarket", count=8)
+            except Exception:
+                premarket = []
+
+    if not (movers or hot or premarket):
+        return
+
+    def _rows(title, items, sub=""):
+        st.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 6px'>"
+            f"{title}{('　' + sub) if sub else ''}</div>",
+            unsafe_allow_html=True,
+        )
+        for it in items:
+            _cp = it.get("change_pct")
+            _c = UP_COLOR if (_cp or 0) > 0 else (DOWN_COLOR if (_cp or 0) < 0 else "var(--fa-muted)")
+            _price = f"{it['price']:,.2f}" if it.get("price") is not None else ""
+            _chg = f"{_cp:+.2f}%" if _cp is not None else ""
+            _href = (
+                f"?open_symbol={urllib.parse.quote(it['symbol'])}"
+                f"&open_market={urllib.parse.quote(it.get('market') or market)}"
+                f"&open_name={urllib.parse.quote(it.get('name') or it['symbol'])}"
+                f"&open_from={urllib.parse.quote('行情')}{_auth_qs()}"
+            )
+            st.markdown(
+                f"<a class='pos-card-link' href='{_href}' target='_self'>"
+                f"<span style='display:flex;align-items:baseline;padding:8px 2px;"
+                f"border-bottom:1px solid var(--fa-border)'>"
+                f"<span style='flex:2.4;color:var(--fa-text);font-size:0.86rem'>"
+                f"{_esc(it.get('name') or it['symbol'])}"
+                f"<span style='color:var(--fa-faint);font-size:0.76rem'> {_esc(it['symbol'])}</span></span>"
+                f"<span style='flex:1;text-align:right;color:var(--fa-text);font-size:0.84rem'>{_price}</span>"
+                f"<span style='flex:1;text-align:right;color:{_c};font-size:0.84rem'>{_chg}</span>"
+                f"</span></a>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
+    st.markdown("**今日异动**")
+    _cols = st.columns(2 if (movers and hot) else 1)
+    _i = 0
+    if movers:
+        with _cols[_i]:
+            _rows("涨跌幅榜", movers)
+        _i += 1
+    if hot:
+        with _cols[min(_i, len(_cols) - 1)]:
+            _rows("热度榜", hot, "按用户关注度排，跟涨跌幅是两个口径")
+
+    if premarket:
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        _rows("美股盘前异动", premarket, "开盘方向最早的线索")
+
+    if market in ("HK", "A"):
+        try:
+            ipos = get_ipo_calendar(market, limit=6)
+        except Exception:
+            ipos = []
+        if ipos:
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+            st.markdown(
+                "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 6px'>新股上市</div>",
+                unsafe_allow_html=True,
+            )
+            for ip in ipos:
+                _pr = ""
+                if ip.get("price_min") and ip.get("price_max"):
+                    _pr = (f"{ip['price_min']:,.2f}" if ip["price_min"] == ip["price_max"]
+                           else f"{ip['price_min']:,.2f}-{ip['price_max']:,.2f}")
+                elif ip.get("ipo_price"):
+                    _pr = f"{ip['ipo_price']:,.2f}"
+                st.markdown(
+                    f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
+                    f"border-bottom:1px solid var(--fa-border)'>"
+                    f"<span style='color:var(--fa-faint);font-size:0.78rem;min-width:76px'>"
+                    f"{_esc(ip.get('list_date', ''))}</span>"
+                    f"<span style='flex:1;color:var(--fa-text);font-size:0.86rem'>{_esc(ip['name'])}"
+                    f"<span style='color:var(--fa-faint);font-size:0.76rem'> {_esc(ip['symbol'])}</span></span>"
+                    f"<span style='color:var(--fa-text-2);font-size:0.8rem'>"
+                    f"{('招股价 ' + _pr) if _pr else ''}</span>"
+                    f"<span style='color:var(--fa-faint);font-size:0.76rem;min-width:78px;text-align:right'>"
+                    f"{('每手 ' + format(int(ip['lot_size']), ',')) if ip.get('lot_size') else ''}</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+
+@st.fragment
 def _render_hot_sectors(market: str):
     """"热门板块"——按热度（成交额代理）排序的行业板块，3×3宫格展示前9名，
     "更多板块"展开到前30。点击板块卡片会跳到该板块的成分股列表（复用
@@ -2506,6 +2630,8 @@ def _labeled_line(label: str, value: str) -> str:
         f"<span style='color:var(--fa-text-2)'>：{_esc(value)}</span></div>"
     )
 
+
+_CN_TZ_APP = timezone(timedelta(hours=8))
 
 _PORTFOLIO_SECTIONS = (
     "总体评估", "集中度风险", "行业集中", "市场敞口",
@@ -3202,7 +3328,30 @@ def _render_event_calendar():
         ratings = get_rating_changes("US")
     except Exception:
         ratings = []
-    if not events and not ratings:
+
+    # 财报日历刻意只查"我关心的股票"，不列全市场。富途一个7天窗口就返回90条
+    # 全美股财报，堆在首页是纯噪音——用户真正在意的只有自己持仓、自选、以及
+    # 排行榜上被推荐的那几支。按需过滤之后这块才跟项目其余部分真正联动：
+    # "你持仓的甲骨文下周四出财报"是有行动价值的，"今天有37家公司出财报"不是。
+    _watch: set = set()
+    try:
+        _em = st.session_state.get("user_email")
+        if _em:
+            for pp in get_positions(_em):
+                if pp.get("market") == "US":
+                    _watch.add(str(pp.get("symbol", "")).upper())
+        for _mk, _rows in (get_latest_advice(limit_per_market=5) or {}).items():
+            if _mk == "US":
+                for _r in _rows or []:
+                    _watch.add(str(_r.get("symbol", "")).upper())
+    except Exception:
+        pass
+    try:
+        earnings = get_earnings_dates(tuple(sorted(_watch)), days=21) if _watch else {}
+    except Exception:
+        earnings = {}
+
+    if not events and not ratings and not earnings:
         return
 
     st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
@@ -3235,6 +3384,29 @@ def _render_event_calendar():
                 f"{_star_text.get(e['star'], '')}</span>"
                 f"<span style='color:var(--fa-text-2);font-size:0.8rem;min-width:96px;text-align:right'>"
                 f"{_right}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+    if earnings:
+        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 8px'>"
+            "你的持仓与关注股接下来的财报日</div>",
+            unsafe_allow_html=True,
+        )
+        for _sym, _e in sorted(earnings.items(), key=lambda kv: kv[1].get("date") or "9999"):
+            _eps = f"预期EPS {_e['eps_predict']}" if _e.get("eps_predict") else ""
+            st.markdown(
+                f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
+                f"border-bottom:1px solid var(--fa-border)'>"
+                f"<span style='color:var(--fa-faint);font-size:0.78rem;min-width:76px'>"
+                f"{_esc(_e.get('date', ''))}</span>"
+                f"<span style='flex:1;color:var(--fa-text);font-size:0.86rem'>"
+                f"{_esc(_e.get('name') or _sym)}"
+                f"<span style='color:var(--fa-faint);font-size:0.78rem'> {_esc(_sym)}</span></span>"
+                f"<span style='color:var(--fa-faint);font-size:0.78rem'>{_esc(_e.get('period', ''))}</span>"
+                f"<span style='color:var(--fa-text-2);font-size:0.8rem;min-width:118px;text-align:right'>"
+                f"{_esc(_eps)}</span></div>",
                 unsafe_allow_html=True,
             )
 
@@ -3494,6 +3666,158 @@ def _render_home_page():
                 st.rerun()
 
 
+@st.fragment
+def _render_chips_section(symbol: str, market: str):
+    """个股的"资金与筹码"——谁在买、谁在卖。
+
+    2026-09-05新增。详情页原本有价格、K线、财务、技术面、新闻、AI分析，
+    覆盖了"值多少钱"和"走成什么样"，但一直缺一整个维度：持有这只股票的人
+    在做什么。价格告诉你成交在什么位置，成交量告诉你有多热，两者都答不了
+    "是谁在买"——大单持续净流入而股价没动，跟小单堆量把价格推上去，是完全
+    不同的两件事。
+
+    四块数据按"从快到慢"排：当日资金流向是今天的事，空头和机构持仓是按期
+    披露的（滞后但反映中长期立场），内部人交易是不定期的事件。放在一个区块
+    里互相对照才有意义——比如主力在流出、同时机构持股比例连续下降，这两条
+    互相印证；如果主力流出但内部人在买，那就是分歧，值得多看一眼。
+
+    做成 fragment：这几个接口的缓存周期从30分钟到12小时不等，跟详情页其余
+    部分（3秒刷新的价格、缓存住的K线）完全不是一个节奏。
+    """
+    try:
+        cap = get_capital_distribution(symbol, market)
+    except Exception:
+        cap = {}
+    try:
+        shorts = get_short_interest(symbol, market)
+    except Exception:
+        shorts = []
+    try:
+        inst = get_institutional_holding(symbol, market)
+    except Exception:
+        inst = []
+    try:
+        insiders = get_insider_trades(symbol, market)
+    except Exception:
+        insiders = []
+
+    if not (cap or shorts or inst or insiders):
+        return
+
+    st.divider()
+    st.subheader("资金与筹码")
+
+    _cur = {"HK": "HK$", "US": "$", "A": "¥"}.get(market, "")
+
+    def _amt(v):
+        """金额按数量级换单位。资金流动辄以亿计，原样打印一串数字没人读得出来。"""
+        if v is None:
+            return "-"
+        a = abs(v)
+        if a >= 1e8:
+            return f"{_cur}{v / 1e8:,.2f}亿"
+        if a >= 1e4:
+            return f"{_cur}{v / 1e4:,.0f}万"
+        return f"{_cur}{v:,.0f}"
+
+    if cap:
+        _mn = cap.get("main_net")
+        _c = UP_COLOR if (_mn or 0) > 0 else (DOWN_COLOR if (_mn or 0) < 0 else "var(--fa-muted)")
+        _pct = cap.get("main_net_pct")
+        st.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 8px'>"
+            f"当日资金流向　超大单+大单算主力，中单+小单算散户</div>",
+            unsafe_allow_html=True,
+        )
+        c1, c2, c3, c4 = st.columns(4)
+        c1.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>主力净流入</div>"
+            f"<div style='font-size:1.25rem;font-weight:600;color:{_c}'>{_amt(_mn)}</div>"
+            + (f"<div style='font-size:0.74rem;color:var(--fa-faint)'>占当日成交 {_pct:+.1f}%</div>"
+               if _pct is not None else ""),
+            unsafe_allow_html=True,
+        )
+        for col, label, key in (
+            (c2, "超大单", "super_net"), (c3, "大单", "big_net"), (c4, "散户（中+小单）", "retail_net"),
+        ):
+            v = cap.get(key)
+            vc = UP_COLOR if (v or 0) > 0 else (DOWN_COLOR if (v or 0) < 0 else "var(--fa-muted)")
+            col.markdown(
+                f"<div style='font-size:0.76rem;color:var(--fa-faint)'>{label}</div>"
+                f"<div style='font-size:1.05rem;font-weight:600;color:{vc}'>{_amt(v)}</div>",
+                unsafe_allow_html=True,
+            )
+
+    _cols = []
+    if shorts:
+        _cols.append("short")
+    if inst:
+        _cols.append("inst")
+    if _cols:
+        st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+        _cc = st.columns(len(_cols))
+        for _i, _kind in enumerate(_cols):
+            with _cc[_i]:
+                if _kind == "short":
+                    _s0 = shorts[0]
+                    st.markdown(
+                        f"<div style='font-size:0.76rem;color:var(--fa-faint);margin-bottom:6px'>"
+                        f"空头持仓（{_esc(_s0['date'])}）</div>"
+                        f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
+                        f"border-bottom:1px solid var(--fa-border)'>"
+                        f"<span style='font-size:0.84rem;color:var(--fa-text-2)'>占流通股</span>"
+                        f"<span style='font-size:0.84rem'>{_s0['short_percent']:.2f}%</span></div>"
+                        f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
+                        f"border-bottom:1px solid var(--fa-border)'>"
+                        f"<span style='font-size:0.84rem;color:var(--fa-text-2)'>回补天数</span>"
+                        f"<span style='font-size:0.84rem'>{_s0['days_to_cover']:.2f} 天</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.caption("回补天数=空头持仓/日均成交量，越大说明一旦上涨越容易踩踏")
+                else:
+                    _i0 = inst[0]
+                    _chg = _i0["holder_pct_change"]
+                    _ic = UP_COLOR if _chg > 0 else (DOWN_COLOR if _chg < 0 else "var(--fa-muted)")
+                    st.markdown(
+                        f"<div style='font-size:0.76rem;color:var(--fa-faint);margin-bottom:6px'>"
+                        f"机构持股（{_esc(_i0['period'])}）</div>"
+                        f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
+                        f"border-bottom:1px solid var(--fa-border)'>"
+                        f"<span style='font-size:0.84rem;color:var(--fa-text-2)'>持股比例</span>"
+                        f"<span style='font-size:0.84rem'>{_i0['holder_pct']:.2f}%"
+                        f"<span style='color:{_ic}'> {_chg:+.2f}</span></span></div>"
+                        f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
+                        f"border-bottom:1px solid var(--fa-border)'>"
+                        f"<span style='font-size:0.84rem;color:var(--fa-text-2)'>持有机构数</span>"
+                        f"<span style='font-size:0.84rem'>{_i0['institution_quantity']:,}"
+                        f"<span style='color:var(--fa-faint)'> "
+                        f"{_i0['institution_quantity_change']:+d}</span></span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.caption("看的是环比变化——机构在加仓还是在撤，比现在持有多少更说明问题")
+
+    if insiders:
+        st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+        with st.expander(f"内部人交易（近 {len(insiders)} 笔）"):
+            st.caption(
+                "高管用自己的钱买入是少有的、说话的人要为结果付钱的信号；"
+                "卖出的解读要谨慎，可能只是行权套现或个人资金安排，跟看空不是一回事。"
+            )
+            for it in insiders:
+                st.markdown(
+                    f"<div style='display:flex;align-items:baseline;gap:10px;padding:7px 2px;"
+                    f"border-bottom:1px solid var(--fa-border)'>"
+                    f"<span style='color:var(--fa-faint);font-size:0.76rem;min-width:64px'>"
+                    f"{_esc(it['date'])}</span>"
+                    f"<span style='flex:1.4;color:var(--fa-text);font-size:0.84rem'>{_esc(it['name'])}</span>"
+                    f"<span style='flex:2;color:var(--fa-faint);font-size:0.76rem'>{_esc(it['title'])}</span>"
+                    f"<span style='color:var(--fa-text-2);font-size:0.8rem'>{_esc(it['transaction_type'])}</span>"
+                    f"<span style='color:var(--fa-text);font-size:0.82rem;min-width:88px;text-align:right'>"
+                    f"{it['shares']:,.0f} 股</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+
 def _render_stock_detail(symbol: str, market: str, name: str):
     # 之前这里还挂着 _inject_auto_refresh(30,...) 强制整页每30秒rerun一次——
     # 是_render_price_header改成@st.fragment(run_every=3)独立刷新之前的老
@@ -3612,6 +3936,10 @@ def _render_stock_detail(symbol: str, market: str, name: str):
 
     _stock_name_for_news = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
     _render_news_section(_stock_name_for_news, symbol=symbol, market=market)
+
+    # 资金筹码放在新闻之后、AI分析之前：它跟新闻一样是"事实材料"，而AI分析是
+    # 基于所有材料的结论，材料该排在结论前面。
+    _render_chips_section(symbol, market)
 
     st.divider()
     _head_col, _refresh_col = st.columns([5, 1])
@@ -5485,6 +5813,9 @@ else:
             st.divider()
             st.markdown("**热门板块**")
             _render_hot_sectors(mkt_code)
+            # 异动榜/热度榜/新股放在板块之后：板块回答"哪个方向在动"，
+            # 这一块回答"具体哪几支在动"，从面到点，顺序上是收敛的。
+            _render_market_extras(mkt_code)
 
         elif active_section == "持仓":
             if not st.session_state.get("logged_in"):

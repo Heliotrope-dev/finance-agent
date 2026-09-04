@@ -939,6 +939,17 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
 5. 明确写清楚为什么——依据是财报里的哪一点、技术面的哪个信号、价格位置怎么样，
    不要空泛地说"综合来看""值得关注"这类没有信息量的话。
 6. 只能用给定的数据做判断，不能编造任何数字或消息。
+6b. 关于"筹码面（谁在买谁在卖）"这一段（不是每支股票都有，没有就是没这类
+   数据，正常，不要提"缺少筹码数据"）：里面可能有当日主力资金净流入流出、
+   空头持仓和回补天数、机构持股环比变化、内部人交易。它的用法跟基本面技术面
+   不一样——不要把它当成独立的第五个打分项，它的价值在于给其它维度做交叉验证：
+   - 技术面转强但主力资金净流出，说明这波是散户在推，技术信号的可靠性要打折；
+   - 基本面平平但机构连续加仓、内部人在买，说明可能有报表之外的信息在起作用，
+     可以适度上调数据确定性，但要讲明这是推测不是事实；
+   - 空头回补天数大（比如超过5天）意味着一旦上涨容易踩踏，那是上行风险不是
+     下行风险，不要把"空头多"简单当成利空；
+   - 内部人买入和卖出不对称：买入是较强的正面信号（高管拿自己的钱押注），
+     卖出可能只是行权套现或个人资金安排，不等于看空，两者不能对称解读。
 7. 结论是"买入"时，必须给一个具体的止损参考位（比如"若跌破X元/较建仓价回撤
    超过X%应考虑止损"），不能只说"控制仓位""注意风险"这类没有具体数字的空话——
    跟持仓判断要求给卖出触发条件是同一个道理，新买入同样需要一个明确的退出
@@ -1084,26 +1095,105 @@ _DEBATE_JUDGE_ADDENDUM = """
 """
 
 
+
+def _chips_summary_text(symbol: str, market: str) -> str:
+    """筹码面摘要：当日资金流向、空头持仓、机构持股变化、内部人交易。
+
+    2026-09-05新增。此前判断链条覆盖了基本面（财务/估值）、技术面（均线/
+    MACD）、价格位置、新闻、分析师预期——全都是"这家公司值多少钱""价格走成
+    什么样"，唯独缺一整个维度：持有这只股票的人在做什么。
+
+    这个维度补上之后有个别处替代不了的作用：它能给其它维度做交叉验证。
+    技术面转强但主力在净流出，说明这波是散户在推，可靠性打折；财务面平平但
+    机构连续两季加仓、内部人在买，说明有基本面之外的信息在起作用。这种
+    "互相印证还是互相打架"的判断，是单看任何一个维度都做不出来的。
+
+    每一段都可能取不到（港股没有空头数据、A股没有机构持仓披露、大多数股票
+    近期没有内部人交易），取不到就整段不出现，不写"暂无"占位——prompt里
+    塞满"暂无"会稀释真正有内容的部分。
+    """
+    parts = []
+
+    try:
+        cap = ds.get_capital_distribution(symbol, market)
+    except Exception:
+        cap = {}
+    if cap and cap.get("main_net") is not None:
+        unit = {"HK": "港币", "US": "美元", "A": "人民币"}.get(market, "")
+        mn, rn = cap["main_net"], cap.get("retail_net") or 0
+        pct = cap.get("main_net_pct")
+        line = (f"当日主力资金（超大单+大单）净{'流入' if mn >= 0 else '流出'}"
+                f"{abs(mn) / 1e8:.2f}亿{unit}")
+        if pct is not None:
+            line += f"（占当日总成交{pct:+.1f}%）"
+        line += f"；散户资金（中单+小单）净{'流入' if rn >= 0 else '流出'}{abs(rn) / 1e8:.2f}亿{unit}"
+        parts.append(line)
+
+    try:
+        shorts = ds.get_short_interest(symbol, market)
+    except Exception:
+        shorts = []
+    if shorts:
+        s0 = shorts[0]
+        line = (f"空头持仓（{s0['date']}）：占流通股{s0['short_percent']:.2f}%，"
+                f"按日均成交量需{s0['days_to_cover']:.2f}天回补")
+        if len(shorts) > 1:
+            d = s0["short_percent"] - shorts[1]["short_percent"]
+            line += f"，较上期{'增加' if d > 0 else '减少'}{abs(d):.2f}个百分点"
+        parts.append(line)
+
+    try:
+        inst = ds.get_institutional_holding(symbol, market)
+    except Exception:
+        inst = []
+    if inst:
+        i0 = inst[0]
+        parts.append(
+            f"机构持股（{i0['period']}）：占比{i0['holder_pct']:.2f}%"
+            f"（环比{i0['holder_pct_change']:+.2f}个百分点），"
+            f"持有机构{i0['institution_quantity']:,}家"
+            f"（环比{i0['institution_quantity_change']:+d}家）"
+        )
+
+    try:
+        insiders = ds.get_insider_trades(symbol, market, limit=5)
+    except Exception:
+        insiders = []
+    if insiders:
+        items = "；".join(
+            f"{it['date']} {it['name']}（{it['title'][:24]}）{it['transaction_type']} {it['shares']:,.0f}股"
+            for it in insiders[:4]
+        )
+        parts.append(
+            "内部人交易：" + items
+            + "。注意：买入是较强的正面信号（高管用自己的钱押注），"
+              "卖出则可能只是行权套现或个人资金安排，不等于看空，不要把两者对称解读"
+        )
+
+    return "\n".join(parts)
+
 def _build_judge_user_content(symbol: str, market: str, name: str, financial_summary: str,
                                technical_summary: str, news_summary: str, position_summary: str,
-                               valuation_summary: str = "") -> str:
+                               valuation_summary: str = "", chips_summary: str = "") -> str:
     return (
         f"股票：{name}（{symbol}，{market}股）\n\n"
         f"财务摘要：\n{financial_summary or '（暂无财务数据）'}\n\n"
         f"估值：{valuation_summary or '（暂无估值数据）'}\n\n"
         f"技术面信号：{technical_summary or '（数据不足）'}\n\n"
         f"价格位置（52周区间）：{position_summary or '（数据不足）'}\n\n"
-        f"近期新闻：\n{news_summary or '（暂无相关新闻）'}"
+        + (f"筹码面（谁在买谁在卖）：\n{chips_summary}\n\n" if chips_summary else "")
+        + f"近期新闻：\n{news_summary or '（暂无相关新闻）'}"
     )
 
 
 def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summary: str,
                              technical_summary: str, news_summary: str, position_summary: str = "",
-                             valuation_summary: str = "", holding: bool = True) -> dict:
+                             valuation_summary: str = "", holding: bool = True,
+                             chips_summary: str = "") -> dict:
     """带多空辩论的判断——只给持仓用（见上面的成本考量注释）。bull/bear两个
     论证并发生成（互不依赖，同时发也不影响独立性——两边都只能看到原始数据，
     看不到对方的论证，这才是真正各自独立的论据，不是一个抄另一个）。"""
-    data_context = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary)
+    data_context = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary, chips_summary)
 
     def _call_stance(client, model, system_prompt):
         # 真实故障(2026-09-02)：持仓页"英伟达/阿里巴巴/美光科技/亚马逊/
@@ -1225,8 +1315,9 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
 
 def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
                  technical_summary: str, news_summary: str, position_summary: str = "",
-                 valuation_summary: str = "", holding: bool = False) -> dict:
-    user_content = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary)
+                 valuation_summary: str = "", holding: bool = False,
+                 chips_summary: str = "") -> dict:
+    user_content = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary, chips_summary)
     system_prompt = _JUDGE_SYSTEM + _HOLDING_ADDENDUM if holding else _JUDGE_SYSTEM
     # max_retries=0+timeout=90：真实故障(2026-09-02)排查judge_stock_with_
     # debate那边的卡死问题时顺带发现——这里的.create()调用同样从来没设过
@@ -1520,14 +1611,18 @@ def _judge_one(item: dict, source: str) -> dict | None:
     consensus = _analyst_consensus_text(symbol, market)
     if consensus:
         valuation = (valuation + "\n" if valuation else "") + "分析师一致预期：" + consensus
+    # 筹码面（2026-09-05新增）：资金流向/空头/机构持股/内部人交易。跟基本面
+    # 和技术面是并列的第三个维度，它的独特价值是给另外两个做交叉验证——
+    # 技术面转强但主力净流出，说明这波是散户在推，可靠性要打折。
+    chips = _chips_summary_text(symbol, market)
     try:
         # 持仓判断走多空辩论版本（更扎实但3倍AI调用），候选池初筛(source=
         # "screen")继续用单次判断——几十支候选一天判断一遍，辩论版本的
         # 调用量级在那个场景下不划算，见judge_stock_with_debate上面的注释。
         if holding:
-            verdict = judge_stock_with_debate(symbol, market, name, fin, tech, news, position, valuation, holding=True)
+            verdict = judge_stock_with_debate(symbol, market, name, fin, tech, news, position, valuation, holding=True, chips_summary=chips)
         else:
-            verdict = judge_stock(symbol, market, name, fin, tech, news, position, valuation, holding=False)
+            verdict = judge_stock(symbol, market, name, fin, tech, news, position, valuation, holding=False, chips_summary=chips)
     except Exception as e:
         return {"symbol": symbol, "market": market, "name": name, "error": str(e)}
     return {

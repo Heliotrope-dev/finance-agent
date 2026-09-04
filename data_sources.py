@@ -2996,3 +2996,295 @@ def get_rating_changes(market: str = "US", limit: int = 12) -> list[dict]:
             "target_pct": ((tp - ltp) / ltp * 100) if (tp and ltp) else None,
         })
     return out[:limit]
+
+def _unwrap_futu(r):
+    """把富途接口的返回统一拆成 DataFrame。
+
+    这些接口的返回形状不一致：多数是 (ret, df)，但榜单类（盘前榜、涨跌幅榜、
+    热度榜）是 (ret, (总数, df))，还有的是三元组。第一次接这几个接口时就是
+    照着 (ret, df) 拆，结果全判成失败——数据其实是好的，只是被我拆错了。
+    统一在这里兜住，调用方不用各写一遍。
+    """
+    if not r or r[0] != ft.RET_OK:
+        return None
+    data = r[1] if len(r) > 1 else None
+    if isinstance(data, tuple):
+        # (总数, df) 这种，取里面那个 DataFrame
+        for x in data:
+            if hasattr(x, "columns"):
+                return x
+        return None
+    return data if hasattr(data, "columns") else None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_capital_distribution(symbol: str, market: str) -> dict:
+    """当日资金流向分布。返回主力/大单/中单/小单的净流入（单位：原始货币）。
+
+    2026-09-05新增。这是港股A股散户最常看、而这个项目一直缺的一个维度：
+    价格告诉你成交在什么位置，成交量告诉你有多热，但都答不了"是谁在买"。
+    大单持续净流入而股价没动，跟小单堆量把价格推上去，是完全不同的两件事。
+
+    富途把单笔成交按金额分成超大/大/中/小四档，分别给流入流出。这里算出
+    "主力净流入"=(超大单+大单)的净额——机构和游资的单子集中在这两档，
+    中小单主要是散户。这个口径跟行情软件上通用的"主力资金"一致。
+    """
+    code = _futu_code(symbol, market)
+    if not code:
+        return {}
+    df = _unwrap_futu(_futu_call(lambda c: c.get_capital_distribution(code), timeout=15, default=None))
+    if df is None or df.empty:
+        return {}
+    row = df.iloc[0]
+
+    def _f(k):
+        try:
+            return float(row.get(k) or 0)
+        except Exception:
+            return 0.0
+
+    su_in, bg_in, md_in, sm_in = _f("capital_in_super"), _f("capital_in_big"), _f("capital_in_mid"), _f("capital_in_small")
+    su_out, bg_out, md_out, sm_out = _f("capital_out_super"), _f("capital_out_big"), _f("capital_out_mid"), _f("capital_out_small")
+    main_net = (su_in + bg_in) - (su_out + bg_out)
+    retail_net = (md_in + sm_in) - (md_out + sm_out)
+    total_in, total_out = su_in + bg_in + md_in + sm_in, su_out + bg_out + md_out + sm_out
+    return {
+        "super_net": su_in - su_out, "big_net": bg_in - bg_out,
+        "mid_net": md_in - md_out, "small_net": sm_in - sm_out,
+        "main_net": main_net, "retail_net": retail_net,
+        "total_in": total_in, "total_out": total_out,
+        # 净额占当日总成交的比例，用来判断这个流入"重不重"——绝对金额在
+        # 不同市值的股票之间没法横向比，占比才可比。
+        "main_net_pct": (main_net / (total_in + total_out) * 100) if (total_in + total_out) else None,
+        "update_time": str(row.get("update_time") or ""),
+    }
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_short_interest(symbol: str, market: str) -> list[dict]:
+    """空头持仓（美股）。返回近几期的 [{date, shares_short, short_percent, days_to_cover}]。
+
+    2026-09-05新增。days_to_cover（空头回补天数）= 空头持仓 / 日均成交量，
+    衡量"如果空头要全部平仓需要几天"——这个数字大意味着一旦上涨容易踩踏，
+    是判断轧空风险的标准指标，光看空头数量看不出来。
+    """
+    code = _futu_code(symbol, market)
+    if not code or market != "US":
+        return []
+    df = _unwrap_futu(_futu_call(lambda c: c.get_short_interest(code), timeout=15, default=None))
+    if df is None or df.empty:
+        return []
+    out = []
+    for _, r in df.iterrows():
+        try:
+            out.append({
+                "date": str(r.get("timestamp_str") or "")[:10],
+                "shares_short": float(r.get("shares_short") or 0),
+                "short_percent": float(r.get("short_percent") or 0),
+                "days_to_cover": float(r.get("days_to_cover") or 0),
+            })
+        except Exception:
+            continue
+    return out[:6]
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def get_institutional_holding(symbol: str, market: str) -> list[dict]:
+    """机构持股比例的历史变化。返回 [{period, holder_pct, holder_pct_change, institution_quantity}]。
+
+    2026-09-05新增。持股比例本身是个静态数字，真正有信息量的是"这一季比上
+    一季多了还是少了"——机构在加仓还是在撤，比它现在持有多少更能说明问题。
+    """
+    code = _futu_code(symbol, market)
+    if not code:
+        return []
+    df = _unwrap_futu(_futu_call(lambda c: c.get_shareholders_institutional(code), timeout=15, default=None))
+    if df is None or df.empty:
+        return []
+    out = []
+    for _, r in df.iterrows():
+        try:
+            out.append({
+                "period": str(r.get("period_text") or ""),
+                "holder_pct": float(r.get("holder_pct") or 0),
+                "holder_pct_change": float(r.get("holder_pct_change") or 0),
+                "institution_quantity": int(r.get("institution_quantity") or 0),
+                "institution_quantity_change": int(r.get("institution_quantity_change") or 0),
+            })
+        except Exception:
+            continue
+    return out[:6]
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def get_insider_trades(symbol: str, market: str, limit: int = 8) -> list[dict]:
+    """内部人（高管/董事/大股东）交易记录。
+
+    2026-09-05新增。这是信息含量最高的一类数据之一：公司高管用自己的钱买入
+    自家股票，是少有的"说话的人要为结果付钱"的信号。卖出的解读要谨慎得多
+    ——高管卖股票可能只是行权后套现或者个人资金安排，跟看空不是一回事，
+    所以展示时买入卖出要分开说，不能笼统算成"内部人在交易"。
+    """
+    code = _futu_code(symbol, market)
+    if not code:
+        return []
+    df = _unwrap_futu(_futu_call(lambda c: c.get_insider_trade_list(code), timeout=15, default=None))
+    if df is None or df.empty:
+        return []
+    out = []
+    for _, r in df.iterrows():
+        try:
+            shares = float(r.get("trade_shares") or 0)
+        except Exception:
+            shares = 0.0
+        if not shares:
+            continue
+        out.append({
+            "name": str(r.get("name") or ""),
+            "title": str(r.get("title") or ""),
+            "date": str(r.get("max_trade_date_str") or r.get("min_trade_date_str") or "")[:10],
+            "shares": shares,
+            "transaction_type": str(r.get("transaction_type") or ""),
+        })
+    return out[:limit]
+
+def _futu_code(symbol: str, market: str) -> str:
+    """(代码, 市场) 转成富途的 code 格式。项目里这个转换原本散在各个函数里
+    各写一遍（f"HK.{s}" if m=="HK" else f"US.{s}" 这样），A股的前缀规则还
+    不一样，新接口一多就该收口了。"""
+    s = str(symbol or "").strip()
+    if not s:
+        return ""
+    m = (market or "").upper()
+    if m == "HK":
+        return f"HK.{s}"
+    if m == "US":
+        return f"US.{s}"
+    if m == "A":
+        # 6开头是上交所，其余（0/3）是深交所——跟 sim_trader._a_share_prefix 同一套规则
+        return f"{'SH' if s.startswith('6') else 'SZ'}.{s}"
+    return ""
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_market_rank(kind: str, market: str = "HK", count: int = 10) -> list[dict]:
+    """榜单。kind: "top_movers"(涨跌幅) / "hot"(热度) / "us_premarket"(美股盘前)。
+
+    2026-09-05新增。这三个接口的返回是 (ret, (总数, df)) 而不是常见的
+    (ret, df)，统一走 _unwrap_futu 拆。
+    """
+    mk = getattr(ft.Market, market, None)
+    if kind == "us_premarket":
+        r = _futu_call(lambda c: c.get_us_pre_market_rank(count=count), timeout=20, default=None)
+    elif kind == "hot":
+        if mk is None:
+            return []
+        r = _futu_call(lambda c: c.get_hot_list(mk, count=count), timeout=20, default=None)
+    else:
+        if mk is None:
+            return []
+        r = _futu_call(lambda c: c.get_top_movers_rank(mk, count=count), timeout=20, default=None)
+    df = _unwrap_futu(r)
+    if df is None or df.empty:
+        return []
+    out = []
+    for _, row in df.iterrows():
+        sec = str(row.get("security") or "")
+        def _f(*keys):
+            for k in keys:
+                v = row.get(k)
+                if v is not None and str(v) not in ("N/A", "nan", ""):
+                    try:
+                        return float(v)
+                    except Exception:
+                        pass
+            return None
+        out.append({
+            "symbol": sec.split(".")[-1],
+            "market": sec.split(".")[0] if "." in sec else market,
+            "name": str(row.get("name") or ""),
+            "price": _f("cur_price", "price", "last_price"),
+            "change_pct": _f("change_ratio", "change_rate", "change_pct"),
+            "volume_ratio": _f("volume_ratio"),
+        })
+    return out[:count]
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_ipo_calendar(market: str = "HK", limit: int = 8) -> list[dict]:
+    """新股上市日历。"""
+    mk = getattr(ft.Market, market, None)
+    if mk is None:
+        return []
+    df = _unwrap_futu(_futu_call(lambda c: c.get_ipo_list(mk), timeout=20, default=None))
+    if df is None or df.empty:
+        return []
+    out = []
+    for _, r in df.iterrows():
+        def _s(k):
+            v = r.get(k)
+            return "" if v is None or str(v) in ("N/A", "nan") else str(v)
+        def _f(k):
+            try:
+                v = float(r.get(k))
+                return v if v == v else None   # 过滤 NaN
+            except Exception:
+                return None
+        out.append({
+            "symbol": str(r.get("code") or "").split(".")[-1],
+            "name": _s("name"),
+            "list_date": _s("list_time")[:10],
+            "apply_end": _s("apply_end_time")[:10],
+            "ipo_price": _f("ipo_price"),
+            "price_min": _f("ipo_price_min"),
+            "price_max": _f("ipo_price_max"),
+            "lot_size": _f("lot_size"),
+        })
+    out.sort(key=lambda x: x["list_date"] or "9999")
+    return out[:limit]
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_earnings_dates(symbols: tuple, days: int = 21) -> dict:
+    """查这批美股接下来的财报日。返回 {symbol: {"date","period","eps_predict"}}。
+
+    2026-09-05新增。刻意做成"按给定清单查"而不是"列出全市场"：这个接口一次
+    返回全市场几十上百家（7天窗口就有90条），全列在首页是噪音——用户关心的
+    只有自己持仓、自选、以及排行榜上的那些。做成按需过滤，这个模块才跟项目
+    其余部分真正联动，而不是又一块孤立的信息墙。
+
+    接口限制单次查询跨度不超过7天，所以按周分段查再合并。
+    """
+    import datetime as _dt
+
+    want = {str(s).upper() for s in symbols if s}
+    if not want:
+        return {}
+    today = _dt.date.today()
+    found: dict = {}
+    for week in range(0, max(1, (days + 6) // 7)):
+        start = today + _dt.timedelta(days=week * 7)
+        end = min(start + _dt.timedelta(days=6), today + _dt.timedelta(days=days))
+        if start > end:
+            break
+        df = _unwrap_futu(_futu_call(
+            lambda c, a=str(start), b=str(end): c.get_earnings_calendar(
+                market=ft.Market.US, begin_date=a, end_date=b),
+            timeout=25, default=None,
+        ))
+        if df is None or df.empty:
+            continue
+        for _, r in df.iterrows():
+            sym = str(r.get("security") or "").split(".")[-1].upper()
+            if sym not in want or sym in found:
+                continue
+            def _s(k):
+                v = r.get(k)
+                return "" if v is None or str(v) in ("N/A", "nan") else str(v)
+            found[sym] = {
+                "date": _s("earnings_date")[:10],
+                "period": _s("period_text"),
+                "eps_predict": _s("eps_predict"),
+                "name": _s("name"),
+            }
+    return found

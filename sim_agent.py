@@ -566,6 +566,15 @@ _AGENT_SYSTEM = f"""你是一个正在用虚拟资金自主管理富途模拟盘
 - 它是收盘后算的，看不到今天盘中发生的事，所以它不是命令，只是一份更厚的参考。它没有覆盖
   的标的（大多数候选都没有）就是没有这条信息，不要因为缺这条就默认它是负面的。
 
+关于持仓行里的"当日主力资金净流入/流出占成交X%"这一条（2026-09-05新增，
+可能取不到，取不到就没有这一段）：这是超大单加大单的净额占当日总成交的比例，
+代表机构和游资在进还是在出。用法：
+- 有浮盈的票，主力还在净流入说明这波还有人在接，可以再拿一拿；主力已经转成
+  净流出而价格还没跌，往往是出货的前半段，止盈的优先级要提上来。
+- 有浮亏的票，主力持续净流出是补刀信号，止损别拖；主力反而在净流入说明有资金
+  在承接，可以给多一点时间。
+- 这条不能单独用来开仓，它只说明"现在谁在场"，不说明"这家公司值不值这个价"。
+
 关于"当前宏观环境"这一条：你会看到美联储/通胀/就业/中国政策四个议题各一句方向性结论，
 来自本系统每天两次抓取真实数据后生成的宏观简报。用户明确要求你"结合这些综合考量，不仅仅是
 分析该家公司的股票"。具体怎么用：
@@ -837,6 +846,11 @@ def _run_cycle_locked(email: str) -> dict:
             extra.append(f"52周位置{(_px - _lo) / (_hi - _lo) * 100:.0f}%")
         if q.get("PE_TTM") is not None:
             extra.append(f"PE(TTM){q['PE_TTM']:.1f}")
+        # 主力资金（2026-09-05新增）。止盈止损判断最缺的就是这条：浮盈了要不
+        # 要走，看主力还在不在里面比看盈亏数字本身更有判断力。
+        if p.get("_main_net_pct") is not None:
+            _mp = p["_main_net_pct"]
+            extra.append(f"当日主力资金净{'流入' if _mp >= 0 else '流出'}占成交{abs(_mp):.1f}%")
         adv_h = advice_map.get((_sym, p.get("market")))
         if adv_h and adv_h.get("action"):
             _sc = f"/{adv_h['score']}分" if adv_h.get("score") is not None else ""
@@ -937,6 +951,19 @@ def _run_cycle_locked(email: str) -> dict:
     # 撑得很长，而决策真正需要的是方向性判断（利率往哪走、通胀是升是降），
     # 不是完整论证过程。
     macro_text = _macro_context_text()
+
+    # 持仓的主力资金流向（2026-09-05新增）。候选股不取——一轮几十支，每支
+    # 一次接口调用太重；持仓通常只有几支，而"我拿着的票今天主力在进还是在出"
+    # 恰恰是止盈止损判断最需要的那条信息。
+    try:
+        import data_sources as _ds2
+        for _p in (holdings or []):
+            _cap = _ds2.get_capital_distribution(_p.get("symbol", ""), _p.get("market", ""))
+            if _cap and _cap.get("main_net") is not None:
+                _p["_main_net_pct"] = _cap.get("main_net_pct")
+                _p["_main_net"] = _cap.get("main_net")
+    except Exception:
+        pass
 
     lessons = tracker.get_sim_agent_lessons(email, limit=5)
     lessons_text = "\n".join(f"- {l['lesson_text']}" for l in lessons) if lessons else "（还没有跨天的长期复盘记录）"
