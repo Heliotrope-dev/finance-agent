@@ -2130,12 +2130,17 @@ def _render_home_map():
         # 从 padding 4px 8px/font-size 0.75rem 缩到 2px 5px/0.6rem，
         # iconSize 从 [90,50] 缩到 [68,38]，但没有缩到看不清的程度
         # （名称+点数+涨跌幅三行还是各自独占一行，只是整体更紧凑）。
+        # 标签去掉白底、边框和投影，直接把字写在地图上。原来每个指数都是一个
+        # 带边框带阴影的小白卡，十一个白卡浮在一张全彩地图上，卡片本身成了
+        # 主要的视觉噪声。底图换成近白的 Positron 之后，深色字直接压在上面
+        # 就够清楚了；再加一层白色文字描边兜底，保证落在海面或深一点的地块上
+        # 也读得清。
         inner = (
-            f"<div style='background:#fff;border:1px solid #ddd;border-radius:5px;"
-            f"padding:2px 5px;font-size:0.6rem;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)'>"
-            f"<div style='font-weight:600;color:#0f172a'>{name}</div>"
+            f"<div style='padding:1px 3px;font-size:0.62rem;white-space:nowrap;line-height:1.3;"
+            f"text-shadow:0 1px 2px rgba(255,255,255,.95),0 0 4px rgba(255,255,255,.9)'>"
+            f"<div style='font-weight:600;color:#17181C'>{name}</div>"
             f"<div style='color:{color};font-weight:700'>{idx['最新']:,.2f}</div>"
-            f"<div style='color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
+            f"<div style='color:{color};font-size:0.58rem'>{idx['涨跌幅']:+.2f}%</div>"
             f"</div>"
         )
         href = href_by_name.get(name)
@@ -2168,6 +2173,21 @@ def _render_home_map():
     map_html = f"""
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+      /* 瓦片去色+提亮+压对比，得到一张近白的灰阶底图。saturate(0)负责去色，
+         brightness/contrast 把 OSM 那种偏重的米黄陆地推到接近页面底色，
+         最后一点 opacity 让它整体退到背景层次，不跟前景数据抢。 */
+      #home-map .leaflet-tile-pane {{
+          filter: saturate(0) brightness(1.14) contrast(.86);
+          opacity: .82;
+      }}
+      /* 署名条也压淡，它是合规必需但不该有存在感。 */
+      #home-map .leaflet-control-attribution {{
+          background: rgba(255,255,255,.6) !important; font-size: 9px !important;
+      }}
+      #home-map .leaflet-control-attribution a {{ color: #A8ABB3 !important; }}
+      #home-map .leaflet-control-attribution {{ color: #A8ABB3 !important; }}
+    </style>
     <div id="home-map" style="height:420px;border-radius:8px;overflow:hidden"></div>
     <script>
     // 用户反馈缩放功能容易误触，干脆整个禁掉——不止滚轮缩放，双击/触摸
@@ -2178,6 +2198,17 @@ def _render_home_map():
         scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false,
         boxZoom: false, keyboard: false, zoomControl: false, dragging: true,
     }}).setView([12, 25], 2);
+    // 底图仍然用免费的 OpenStreetMap 瓦片，但在前端把它整体转成灰阶。
+    //
+    // 标准 OSM 是蓝海+米黄陆地+彩色路网的全彩底图，跟这套灰白黑的界面撞得很
+    // 厉害——一张全彩地图摆在页面最上方，真正该抢眼的涨跌红绿反而被它压住。
+    // 先试过换成 CARTO Positron（业界常用的极简灰底图），但实测它现在已经
+    // 要 API key 了，不带 key 的瓦片整片打上"API KEY REQUIRED"水印，直接
+    // 不可用。与其为一张背景图引入一个需要注册和额度管理的外部依赖，不如
+    // 继续用零门槛的 OSM，然后用一层 CSS 滤镜把它去色并提亮——效果就是想要的
+    // 那张近白灰底图，而且深浅可以自己调，不受第三方样式变更影响。
+    // 滤镜只作用在瓦片层(.leaflet-tile-pane)，我们自己的指数标签在 marker 层，
+    // 不会被一起去色，涨跌红绿照常。
     L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
         attribution: '&copy; OpenStreetMap contributors', maxZoom: 8
     }}).addTo(map);
@@ -2232,11 +2263,13 @@ def _render_home_map():
                     var changePct = parseFloat(fields[32]);
                     if (isNaN(last) || isNaN(changePct)) return;
                     var color = changeAmt >= 0 ? '{UP_COLOR}' : '{DOWN_COLOR}';
-                    var inner = "<div style='background:#fff;border:1px solid #ddd;border-radius:5px;"
-                        + "padding:2px 5px;font-size:0.6rem;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15)'>"
-                        + "<div style='font-weight:600;color:#0f172a'>" + name + "</div>"
+                    // 这份必须跟上面首次渲染那段保持完全一致的样式，否则
+                    // 3秒一次的行情刷新会把这几个标签又变回带框的白卡。
+                    var inner = "<div style='padding:1px 3px;font-size:0.62rem;white-space:nowrap;line-height:1.3;"
+                        + "text-shadow:0 1px 2px rgba(255,255,255,.95),0 0 4px rgba(255,255,255,.9)'>"
+                        + "<div style='font-weight:600;color:#17181C'>" + name + "</div>"
                         + "<div style='color:" + color + ";font-weight:700'>" + fmtNum(last) + "</div>"
-                        + "<div style='color:" + color + "'>" + (changePct >= 0 ? '+' : '') + changePct.toFixed(2) + "%</div>"
+                        + "<div style='color:" + color + ";font-size:0.58rem'>" + (changePct >= 0 ? '+' : '') + changePct.toFixed(2) + "%</div>"
                         + "</div>";
                     // 3秒轮询刷新图标时也要重新套上跳转链接，不然刷新一次链接就消失了
                     var href = hrefByName[name];
