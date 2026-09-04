@@ -2766,14 +2766,23 @@ def _render_ai_assistant():
         # 最吵的一个元素，而且正好压在首页地图的右下角。缩到48px、换成墨色、
         # 投影收到几乎看不见，往里再收一点避开地图边缘的指数标签。
         ".st-key-ai_assistant_popover{position:fixed;bottom:26px;right:26px;z-index:9999;}"
+        # 浮标从"墨色实心圆"改成白底发丝描边。一个纯黑圆点浮在这套近乎无色的
+        # 界面上，是页面里唯一一块高对比实色，视觉上比它承担的功能重得多
+        # （用户原话是"看着怪怪的"）。改成跟次要按钮同一套语言：平时只是一个
+        # 带细边的白圆，悬停才填墨色——存在感够找得到，但不抢戏。
         ".st-key-ai_assistant_popover button{"
-        "border-radius:50%!important;width:48px;height:48px;padding:0!important;"
-        "background:#17181C!important;border-color:#17181C!important;"
-        "box-shadow:0 2px 12px rgba(23,24,28,.18)!important;"
+        "border-radius:50%!important;width:50px;height:50px;padding:0!important;"
+        "background:#FFFFFF!important;border:1px solid #DBDCE3!important;"
+        "box-shadow:0 2px 14px rgba(23,24,28,.10)!important;"
+        "transition:background .16s ease,border-color .16s ease!important;"
         "}"
-        ".st-key-ai_assistant_popover button:hover{background:#000!important;border-color:#000!important;}"
-        ".st-key-ai_assistant_popover button p{color:#fff!important;font-size:.78rem!important;"
-        "font-weight:560!important;letter-spacing:.07em;}"
+        ".st-key-ai_assistant_popover button:hover{background:#17181C!important;border-color:#17181C!important;}"
+        ".st-key-ai_assistant_popover button p{color:#17181C!important;font-size:.76rem!important;"
+        "font-weight:600!important;letter-spacing:.08em;transition:color .16s ease;}"
+        ".st-key-ai_assistant_popover button:hover p{color:#fff!important;}"
+        # 浮层本体：收掉Streamlit默认的厚投影和圆角，跟站内卡片同一套。
+        "[data-testid='stPopoverBody']{border-radius:12px!important;"
+        "border:1px solid #EAEAEF!important;box-shadow:0 8px 32px rgba(23,24,28,.10)!important;}"
         # popover 触发键默认会在文字右边带一个下拉小箭头。这颗按钮是个圆形
         # 浮标，里面只放两个字母，多一个箭头会挤成"AI⌄"，既不居中也不好看。
         ".st-key-ai_assistant_popover button svg,"
@@ -2813,12 +2822,19 @@ def _render_ai_assistant():
                 # 空对话只是个输入框，用户不知道能问啥——加一句纯展示的
                 # 引导语，不写进_assistant_messages（不进模型上下文，也不会
                 # 被当成一轮真实对话历史发出去）。
+                # 引导语原来套了一个assistant气泡，看着像AI已经先说了一句话，
+                # 但它其实是静态文案、不进上下文。改成一段安静的说明文字，
+                # 不伪装成对话；顺便把能问什么按类别列清楚，比一句话更实用。
                 st.markdown(
-                    _chat_bubble(
-                        "assistant",
-                        "可以问我：这支股票为什么打这个分、我的持仓现在要不要动、"
-                        "推荐股排行榜准不准。",
-                    ),
+                    "<div style='padding:10px 2px;color:var(--fa-faint);font-size:0.82rem;"
+                    "line-height:1.9'>"
+                    "我能看到你的持仓、自选、历史判断记录，以及AI模拟盘的实时状态。<br>"
+                    "可以问我：<br>"
+                    "· 我的持仓现在要不要动<br>"
+                    "· 这支股票为什么打这个分<br>"
+                    "· AI模拟盘最近在买什么、为什么<br>"
+                    "· 推荐股排行榜到底准不准"
+                    "</div>",
                     unsafe_allow_html=True,
                 )
             for m in st.session_state["_assistant_messages"]:
