@@ -748,6 +748,29 @@ def build_fed_watch_chart(rows: list[dict]) -> go.Figure:
     return fig
 
 
+# 环形图专用色板。跟折线用的 _MULTI_COLORS 分开，因为同一个颜色在两种图里
+# 的观感完全不同：折线是细线，深色只是克制；环形图是大面积色块，_MULTI_COLORS
+# 打头那个近黑的深石板 #2F3A45 一旦落在占比最大的扇区上，整个圆就是一坨黑。
+# 用户反馈"这个持仓的图看着太不吉利了，这颜色跟死了一样"——在中文财经语境里
+# 这个观感是实打实的问题，不是审美偏好。
+#
+# 这一组全是中明度的暖中性色：陶土、雾蓝、沙金、燕麦这类，饱和度依然压得很低
+# 以维持整站克制的调子，但没有任何一个接近黑，大面积铺开也不压抑。
+# 刻意避开高饱和的正红和正绿——这两个色在本项目里有明确的涨跌语义，占比图跟
+# 涨跌无关，用了会让人误读成"这块在涨/在跌"。
+_DONUT_COLORS = [
+    "#A8896B",  # 暖陶土
+    "#8CA0AE",  # 雾蓝
+    "#C9B18C",  # 沙金
+    "#9A8AA3",  # 灰紫
+    "#B08B8B",  # 灰玫
+    "#8E9BA6",  # 石青
+    "#BFAE9B",  # 燕麦
+    "#93A08C",  # 灰橄榄
+    "#C2A6A0",  # 藕荷
+]
+
+
 def build_position_donut(
     holdings: list[dict], total_value_cny: float, currency_symbol: str = "¥", show_legend: bool = False,
 ) -> go.Figure:
@@ -780,7 +803,7 @@ def build_position_donut(
     labels = [r["label"] for r in rows]
     values = [r["value_cny"] for r in rows]
     colors = [
-        NEUTRAL_COLOR if r["label"] == "其他" else _MULTI_COLORS[i % len(_MULTI_COLORS)]
+        NEUTRAL_COLOR if r["label"] == "其他" else _DONUT_COLORS[i % len(_DONUT_COLORS)]
         for i, r in enumerate(rows)
     ]
 
