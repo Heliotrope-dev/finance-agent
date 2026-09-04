@@ -235,12 +235,119 @@ def build_context(email: str | None) -> str:
                     f"持有{shares:g}股，平均成本约{avg_cost:.2f}{p.get('currency', 'CNY')}"
                 )
                 if adv:
-                    excerpt = (adv.get("fundamental_verdict") or "")[:200]
+                    # 200->140：这段是多行的打分明细+基本面长文，每支持仓都带
+                    # 200字，持仓一多上下文就撑爆了。压缩换行后取前140字，
+                    # 保留结论和最关键的那句，细节让它用工具现查。
+                    excerpt = " ".join((adv.get("fundamental_verdict") or "").split())[:140]
                     line += f"\n    AI最新参考：{adv['action']}（{adv.get('created_at', '')[:10]}）\n    依据摘要：{excerpt}"
                 return line
             parts.append("用户当前持仓：\n" + "\n".join(_fmt_pos(p) for p in held))
         else:
             parts.append("用户当前没有持仓记录。")
+
+        # 自选（shares<=0，只关注不持仓）。2026-09-04补：之前这里只取
+        # shares>0 的真实持仓，自选整个看不见——而这个用户恰好持仓为0、
+        # 自选21支，等于助手眼里"这个人没有任何数据"，问"我关注了哪些票"
+        # 只能答不知道。自选是这个人主动挑出来的标的，比持仓更能说明他在
+        # 看什么，必须给。
+        watch = [p for p in positions if (p.get("shares") or 0) <= 0]
+        if watch:
+            parts.append(
+                f"用户的自选（只关注、未持仓，共{len(watch)}支）：\n"
+                + "\n".join(
+                    f"  {p.get('name') or p.get('symbol')}（{p.get('symbol')}·{p.get('market')}）"
+                    + (f" AI最新参考：{pos_advice[p['symbol']]['action']}"
+                       if pos_advice.get(p.get("symbol")) else "")
+                    for p in watch[:30]
+                )
+            )
+    except Exception:
+        pass
+
+    # ── AI模拟盘全景 ────────────────────────────────────────────────────
+    # 2026-09-04新增。这是整个网站最活跃的一块（每5分钟一次自主决策、有真实
+    # 下单记录和收益曲线），但助手此前对它一无所知——用户问"模拟盘现在多少钱"
+    # "刚才为什么买那支"，只能答不知道，而这些数据就在同一个库里。
+    # 只取摘要+最近几条，不把三十轮决策全塞进来。
+    try:
+        import sim_agent as _sa
+        _sim_email = _sa.advisor._EMAIL
+        cash = tracker.get_sim_virtual_cash(_sim_email)
+        snaps = tracker.get_equity_snapshots(_sim_email, limit=1)
+        # 优先取真正跑完决策的轮次。非开盘时段会连续记很多条"跳过：当前没有
+        # 市场开盘"，直接取最近5条的话夜里问它"模拟盘最近在干嘛"，答的全是
+        # 五条跳过，一点信息量都没有。
+        _all_runs = tracker.get_sim_agent_runs(_sim_email, limit=30)
+        runs = [r for r in _all_runs if r.get("status") != "跳过"][:5] or _all_runs[:2]
+        sim_lines = []
+        if cash is not None:
+            usd = cash / 7.8
+            sim_lines.append(f"  虚拟现金约 ${usd:,.0f}（内部按港币记账 HK${cash:,.0f}）")
+        if snaps:
+            _s0 = snaps[0]
+            _net = (_s0.get("net_value_hkd") or 0) / 7.8
+            sim_lines.append(
+                f"  最近一次资产快照：总额约 ${_net:,.0f}（起始本金 $10,000）"
+            )
+        if runs:
+            sim_lines.append("  最近几次决策：")
+            for r in runs:
+                _rt = (r.get("reasoning_text") or "").replace("\n", " ")[:120]
+                sim_lines.append(
+                    f"    {(r.get('run_at') or '')[:16]} {r.get('status')} · {r.get('note','')}"
+                    + (f"\n      理由摘要：{_rt}" if _rt else "")
+                )
+        lessons = tracker.get_sim_agent_lessons(_sim_email, limit=3)
+        if lessons:
+            sim_lines.append("  跨天复盘经验：")
+            for l in lessons:
+                sim_lines.append(f"    {(l.get('lesson_text') or '')[:120]}")
+        if sim_lines:
+            parts.append(
+                "AI模拟炒股盘的实时状态（内置AI用虚拟资金自主交易港股/美股，"
+                "开盘时段每5分钟决策一次，跟用户自己的持仓是两回事，别混为一谈）：\n"
+                + "\n".join(sim_lines)
+            )
+    except Exception:
+        pass
+
+    # ── 用户自己的使用记录 ──────────────────────────────────────────────
+    try:
+        ov = tracker.get_user_overview(email)
+        _bits = [
+            f"自选{ov.get('watch_count', 0)}支", f"持仓{ov.get('hold_count', 0)}支",
+            f"累计生成过{ov.get('analysis_count', 0)}次个股AI分析",
+            f"搜索过{ov.get('search_count', 0)}次",
+        ]
+        if ov.get("first_seen"):
+            _bits.append(f"最早记录在{ov['first_seen'][:10]}")
+        parts.append("用户的使用概况：" + "，".join(_bits) + "。")
+    except Exception:
+        pass
+
+    try:
+        hist = tracker.get_search_history(email, limit=8)
+        if hist:
+            parts.append(
+                "用户最近搜索过：" + "、".join(
+                    f"{h.get('query')}（{h.get('market')}）" for h in hist
+                )
+            )
+    except Exception:
+        pass
+
+    try:
+        seen = tracker.get_history(email, limit=8)
+        if seen:
+            parts.append(
+                "用户最近看过并生成过AI分析的标的（含当时的方向判断）：\n"
+                + "\n".join(
+                    f"  {h.get('name') or h.get('symbol')}（{h.get('symbol')}）"
+                    f" {(h.get('created_at') or '')[:10]} 判断：{h.get('verdict') or '—'}"
+                    + (f"，综合得分{h['score']}" if h.get("score") is not None else "")
+                    for h in seen
+                )
+            )
     except Exception:
         pass
 
