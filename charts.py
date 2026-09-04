@@ -658,7 +658,12 @@ def build_macro_series_chart(series: dict) -> go.Figure:
                 hovertemplate="%{x}　实际 %{y:,.2f}<extra></extra>",
             )
         )
-        _apply_chart_theme(fig, height=240, legend=has_predict,
+        # 折线这一支比柱状那支更高（320 vs 260）。这类序列的纵轴是自适应的、
+        # 跨度本来就窄（失业率整段只有4.0%~4.5%这半个百分点），矮画布会把
+        # 曲线压成一条几乎平的线，自适应纵轴省下来的分辨率又被高度吃回去了。
+        # 柱状图靠柱长表达，高度矮一点不影响读数；折线靠斜率表达，必须给够
+        # 垂直空间才看得出拐点。
+        _apply_chart_theme(fig, height=320, legend=has_predict,
                            margin=dict(l=6, r=16, t=26, b=6))
         fig.update_xaxes(type="category")
         fig.update_yaxes(autorange=True, rangemode="normal")

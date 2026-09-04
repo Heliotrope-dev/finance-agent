@@ -495,6 +495,19 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 /* 持仓/自选列表的行。去掉卡片边框、改成发丝分隔的平铺行；行内那个
    "AI持仓判断"折叠框也一并去掉边框和底色，变成一行安静的可展开文字。
    目标是把"卡片里套卡片"压成一张干净的行情列表。 */
+/* 行情页的指数行。跟 pos_row_ 完全同一套扁平样式：透明底、只留一条底部
+   发丝线。单独写一条而不是并进上面那个选择器组，是因为指数行没有展开区，
+   下面那些针对 stExpander 的规则对它没有意义，混在一起反而看不出哪条是
+   给谁的。 */
+[class*="st-key-idx_row_"] {
+    border: none !important; background: transparent !important;
+    border-bottom: 1px solid var(--fa-border) !important;
+    border-radius: 0 !important; padding: 10px 2px !important;
+    gap: 0 !important;
+}
+[class*="st-key-idx_row_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
+[class*="st-key-idx_row_"]:hover { background: rgba(23,24,28,0.015) !important; }
+
 [class*="st-key-pos_row_"] {
     border: none !important; background: transparent !important;
     border-bottom: 1px solid var(--fa-border) !important;
@@ -1836,7 +1849,13 @@ def _render_index_snapshot(mkt_code: str):
         flash_class = ""
         if prev is not None and prev != idx["最新"]:
             flash_class = "price-flash-up" if idx["最新"] > prev else "price-flash-down"
-        with st.container(border=True):
+        # 2026-09-04用户反馈"行情那边的按钮没修，要修成透明化的跟其他的保持
+        # 一致"。原来用 st.container(border=True)，Streamlit 会画一个白底加
+        # 完整边框的卡片——整站别处（持仓、排行榜、成分股）早就统一成了
+        # "透明底 + 一条底部发丝线"的扁平行，只有这里还是老样式，三个白框
+        # 摞在一起在这套灰白底子上特别扎眼。改成带 key 的容器，复用
+        # st-key-idx_row_ 的扁平样式（跟 pos_row_ 同一套）。
+        with st.container(key=f"idx_row_{mkt_code}_{idx['名称']}"):
             st.markdown(
                 f"<a class='idx-card-link' href='{href}' target='_self'>"
                 f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:4px'>"
