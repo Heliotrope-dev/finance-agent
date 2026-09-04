@@ -4894,6 +4894,54 @@ def _show_stock_search_dialog(email: str):
                     st.error(f"没查到「{h['query']}」的行情。")
 
 
+@st.dialog("添加自选")
+def _show_add_watchlist_dialog(email: str):
+    """自选专用的添加入口：找到标的就直接加进自选，不问股数和金额。
+
+    2026-09-04用户反馈"我加自选股为啥给我跳出来持仓的界面，就直接加到自选股
+    里面去好了"。之前这个加号跟持仓页共用 _show_add_position_dialog，弹出来
+    标题写着"添加持仓"、要填买入金额和股数——可自选的定义就是"只关注、不持仓"，
+    让用户为了加一个关注去面对一张持仓表单，本身就是把两件事搞混了。虽然那张
+    表单在两个数字都留空时会退化成加自选，但那是个要用户自己发现的隐藏行为，
+    不是入口该有的样子。
+
+    落库走 add_watch_only（shares=0），跟持仓表是同一张表的两种状态，
+    自选分区和持仓分区各自按 shares 是否大于0 过滤，不需要新建表。
+    """
+    query = st.text_input("代码或名称（如 600519 / 腾讯 / 特斯拉）", key="_wl_add_query")
+    candidates = st.session_state.get("_wl_add_candidates")
+
+    def _add(sym_info: dict):
+        add_watch_only(email, sym_info["symbol"], sym_info["name"], market=sym_info["market"])
+        st.session_state.pop("_wl_add_candidates", None)
+        st.session_state.pop("_wl_add_query_text", None)
+        st.rerun()
+
+    if st.button("添加", type="primary", use_container_width=True, key="_wl_add_btn") and query:
+        cands = detect_symbol_candidates(query)
+        if not cands:
+            st.error(f"没查到「{query}」——试试直接输代码，或者换个更常见的名称。")
+        elif len(cands) == 1:
+            info = _resolve_confirmed_symbol(email, query, cands[0]["market"])
+            if info:
+                _add(info)
+        else:
+            st.session_state["_wl_add_candidates"] = cands
+            st.session_state["_wl_add_query_text"] = query
+            st.rerun(scope="fragment")
+
+    if candidates:
+        cq = st.session_state.get("_wl_add_query_text", "")
+        st.info(f"「{cq}」在多个市场都有上市，选一个：")
+        cand_cols = st.columns(len(candidates))
+        for ccol, c in zip(cand_cols, candidates):
+            if ccol.button(f"{c['market_label']}（{c['symbol']}）",
+                           key=f"_wl_add_cand_{c['market']}_{c['symbol']}", use_container_width=True):
+                info = _resolve_confirmed_symbol(email, cq, c["market"])
+                if info:
+                    _add(info)
+
+
 @st.dialog("添加持仓")
 def _show_add_position_dialog(email: str):
     confirmed = st.session_state.get("_pos_add_confirmed")
@@ -5286,7 +5334,7 @@ else:
                 if search_col.button("", icon=":material/search:", key="watch_search_icon", type="tertiary", help="搜索"):
                     _show_stock_search_dialog(_email)
                 if add_col.button("", icon=":material/add:", key="watch_add_icon", type="tertiary", help="添加自选"):
-                    _show_add_position_dialog(_email)
+                    _show_add_watchlist_dialog(_email)
 
                 if not watch_items:
                     st.write("")
