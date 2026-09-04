@@ -3087,6 +3087,25 @@ def _show_closure_notice(items: list[dict]):
         )
     st.caption("休市期间该市场不接受委托，AI 模拟盘也不会在这些日子里做决策。")
     if st.button("知道了", type="primary", use_container_width=True, key="_closure_ack"):
+        # 点"知道了"= 今天不再提醒，直接把当天配额打满。
+        #
+        # 第一版这里只是 st.rerun()，用户反馈"点知道了没反应"——因为配额是
+        # 在弹出之前就加了1，rerun 之后次数才1、还没到3，判断照样成立，
+        # 弹窗立刻又出来，看上去就像按钮失灵。
+        #
+        # 三次配额的正确含义是给"没点确认就走开"的情况留的（用右上角叉关掉、
+        # 或者直接切页），那种情况下当天还会再提醒最多两次；一旦明确点了
+        # "知道了"，就是看到并确认过了，今天不该再打扰。
+        import datetime as _d
+        _t = str(_d.date.today())
+        st.session_state[f"_closure_n_{_t}"] = 99
+        _em = st.session_state.get("user_email")
+        if _em:
+            try:
+                for _ in range(3):
+                    bump_closure_notice_count(_em, _t)
+            except Exception:
+                pass
         st.rerun()
 
 
@@ -3113,6 +3132,16 @@ def _maybe_show_closure_notice():
         return
 
     today = str(_dt.date.today())
+
+    # 同一次会话内只弹一次。用户反馈"从首页点去自选股又跳出来了"——切分区
+    # 是一次页内重跑，判断会重新执行一遍，于是每切一次就弹一次。
+    #
+    # 这个公告的本意是"打开网站时提醒你一句"，不是"每次操作都提醒"。所以
+    # 分成两层：会话内只弹一次（切分区、点按钮都不会再弹），跨会话按天计数
+    # 最多三次（真正重新打开网站才有机会再提醒）。
+    if st.session_state.get("_closure_seen_session"):
+        return
+
     _email = st.session_state.get("user_email")
 
     # 已登录用户的次数落库，整页刷新之后仍然有效（项目里的跳转全是整页导航，
@@ -3139,6 +3168,7 @@ def _maybe_show_closure_notice():
         return
 
     # 只有真的要弹才计数——没有休市安排时不该消耗配额。
+    st.session_state["_closure_seen_session"] = True
     st.session_state[f"_closure_n_{today}"] = shown + 1
     if _email:
         try:
