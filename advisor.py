@@ -207,7 +207,11 @@ def _load_secrets_into_env():
     _client() 的 os.environ fallback 生效。venv 是 Python 3.10，没有 tomllib
     （3.11+ 才有），用 toml 包（streamlit 自身依赖链里就有，不用额外装）。
     """
-    if os.environ.get("QWEN_API_KEY"):
+    # 提前返回的条件要覆盖所有供应商，不能只看千问：2026-09-05加第三家
+    # SiliconFlow 时踩到——只要环境里已经有 QWEN_API_KEY 就整个跳过加载，
+    # 新加的 SILICONFLOW_API_KEY 永远读不进来，兜底供应商等于没配。
+    # 每加一家供应商都要把它的key加进这个判断。
+    if all(os.environ.get(k) for k in ("QWEN_API_KEY", "ZHIPU_API_KEY", "SILICONFLOW_API_KEY")):
         return
     try:
         secrets = toml.load(_SECRETS_PATH)
@@ -290,6 +294,30 @@ def _client() -> OpenAI:
     return OpenAI(api_key=key, base_url=_QWEN_BASE, max_retries=2, timeout=60)
 
 
+# 第三家供应商（2026-09-05新增）。千问周额度耗尽的同一天，智谱的资源包也
+# 用光了（1113 余额不足或无可用资源包），两家同时归零、整条AI链路停摆——
+# 两家冗余在"同时耗尽"这种相关性故障面前是不够的。
+#
+# 走 SiliconFlow 而不是 DeepSeek 官方：官方那个key实测402欠费，而
+# SiliconFlow 上的 deepseek-ai/DeepSeek-V3 实测2.3秒返回、质量正常，比智谱
+# 的 glm-4.5-air 快一个数量级。选 V3 还有一层：它不是推理模型，没有隐藏
+# 思考链跟正文抢 max_tokens 的问题，这个项目为智谱把好几处预算提了2到4倍，
+# 换到V3上那些预算是绰绰有余的；而且这个项目最早就是基于DeepSeek写的提示词，
+# 天然适配。
+_SF_MODEL = "deepseek-ai/DeepSeek-V3"
+_SF_BASE = "https://api.siliconflow.cn/v1"
+
+
+def _siliconflow_client() -> OpenAI | None:
+    key = os.environ.get("SILICONFLOW_API_KEY", "")
+    if not key:
+        return None
+    try:
+        return OpenAI(api_key=key, base_url=_SF_BASE, max_retries=1, timeout=60)
+    except Exception:
+        return None
+
+
 def _zhipu_client() -> OpenAI | None:
     """空头辩论用的独立供应商客户端——没配key或初始化失败时返回None，
     调用方（_fetch_stance）据此回落到_client()，不让整个辩论功能因为
@@ -369,6 +397,8 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
     for client_fn, model, who, budget_mult in (
         (_client, _MODEL, "千问", 1.0),
         (_zhipu_client, _ZHIPU_MODEL, "智谱", 2.0),
+        # DeepSeek-V3 不是推理模型，没有隐藏思考链抢预算的问题，倍数用1.0。
+        (_siliconflow_client, _SF_MODEL, "SiliconFlow", 1.0),
     ):
         # 熔断：这家刚刚才因为配额耗尽/限流失败过，冷却期内直接跳过，不再
         # 白撞一次。投研顾问一轮要judge一百多支股票，千问额度耗尽的那几天

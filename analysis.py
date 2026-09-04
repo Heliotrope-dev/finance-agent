@@ -37,9 +37,11 @@ def _create_stream_with_failover(**kwargs):
     import advisor
 
     primary_err = None
+    errors: list[tuple[str, Exception]] = []
     for client_fn, model, who in (
         (_client, _MODEL, "千问"),
         (advisor._zhipu_client, advisor._ZHIPU_MODEL, "智谱"),
+        (advisor._siliconflow_client, advisor._SF_MODEL, "SiliconFlow"),
     ):
         try:
             client = client_fn()
@@ -55,10 +57,14 @@ def _create_stream_with_failover(**kwargs):
             return stream
         except Exception as e:
             primary_err = primary_err or e
+            errors.append((who, e))
             if not advisor._is_failover_worthy(e):
                 raise
             print(f"[failover/analysis] {who}失败({type(e).__name__})，尝试下一家")
             continue
+    if errors:
+        detail = "；".join(f"{w}: {type(e).__name__} {e}" for w, e in errors)
+        raise RuntimeError(f"所有AI供应商都失败了 —— {detail}") from errors[0][1]
     raise primary_err if primary_err else RuntimeError("没有任何可用的AI供应商")
 
 
