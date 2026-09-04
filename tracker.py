@@ -1523,60 +1523,112 @@ def get_position_advice(email: str) -> dict:
 
 
 def get_score_evidence_text(source: str = "watchlist") -> str:
-    """把打分体系的事后回测结果整理成一段可以直接塞进prompt的实证结论。
+    """把打分体系的事后回测结论整理成一段可以直接塞进prompt的实证文字。
 
-    2026-09-04新增。起因是把打分机制拿真实数据测了一遍，结果是反直觉的：
-    786条已回填样本里，综合得分越高、7天后的表现反而越差（70-89分档平均
-    -1.06%、上涨占比30.7%；30-49分档平均-0.12%、上涨占比47.8%），单调递减。
-    拆到维度看，"价格位置安全边际"是反向最强的一维（高分组-0.88% vs
-    低分组-0.28%），"技术面确认"是唯一正向的一维（高分组-0.42% vs
-    低分组-0.74%），"数据确定性"几乎没有预测力。
+    2026-09-04第一版把结论写成"7天窗口、分数越高表现越差、单调递减"，两处都
+    不准确，已更正——错误的前提喂给AI比不喂更糟，这里把更正过程一并记下来，
+    免得以后又照着直觉重写一遍：
 
-    刻意不去直接反转打分权重——786条样本、7天窗口、单一市场周期，照着这个
-    结果调权重很容易变成对一段行情的过拟合，而且一旦调了，下次再想评估
-    "打分到底有没有用"就失去了干净的对照。改成把这个结论如实喂给AI，让它
-    带着自己系统的历史战绩去判断：它仍然看得到原始分数，只是同时知道这个
-    分数在历史上是怎么表现的。人也随时能从这段文字看出结论有没有变。
+    一、窗口不是7天，是约1天。watchlist 这条线的回填走的是"次日核对"
+        （get_due_for_advice_review 传 min_age_days=1）。实测786条已回填样本
+        的 created_at 到 review_at 间隔中位数0.99天、均值1.20天。
+
+    二、"分数越高表现越差"是合并统计造成的假象（辛普森悖论）。按市场拆开：
+        美股(n=477) 70-89档-0.65%/上涨41.6%，30-49档+0.34%/上涨55.9%
+                    ——高分没有优势，但谈不上单调反向；
+        港股(n=281) 70-89档-1.42%，50-69档-1.07%，30-49档-1.85%
+                    ——根本不单调，最低档反而最差，各档全负；
+        A股(n=28)   样本太小，不作结论。
+        港股整体基线就差（各档全负），而它在高分档里占比又比美股高得多
+        （89/281=32% vs 77/477=16%），于是把合并后的高分档整体拖了下去。
+
+    所以真正站得住的结论只有一条：这套综合得分对"次日涨跌"没有可证实的预测力。
+    而它本来也不该有——40分基本面质量+30分价格位置安全边际，占了70%的权重，
+    衡量的是公司质地和估值位置，那是按季度起作用的东西，拿来预测明天从设计上
+    就不成立。这是衡量口径错配（用一个慢信号去打一个快窗口的分），不是模型算错。
+
+    据此仍然不改打分权重：真要改，正确的做法是把回看窗口拉长到跟信号的时间
+    尺度匹配，而不是把一个为季度设计的评分硬掰成日内择时指标。改权重还会让
+    "这套打分到底有没有用"失去干净的对照。这里只把事实和它的边界如实交给AI。
 
     样本不足时返回空字符串——没有证据就不要编一段"经验"出来误导它。
     """
     try:
         bt = get_score_band_backtest(source=source, min_sample=5)
-        dim = get_dimension_predictive_value(source=source, min_sample=6)
     except Exception:
         return ""
     total = bt.get("total_reviewed") or 0
     if total < 100:
         return ""
 
-    band_bits = []
-    for b in bt.get("bands", []):
-        if b.get("count") and b.get("avg_return_pct") is not None:
-            band_bits.append(
-                f"{b['band']}分档{b['count']}条平均{b['avg_return_pct']:+.2f}%、上涨占比{b['win_rate_pct']:.0f}%"
-            )
-    dim_bits = []
-    for name, d in (dim or {}).items():
-        hi, lo = (d.get("高分组") or {}), (d.get("低分组") or {})
-        if hi.get("avg_return_pct") is None or lo.get("avg_return_pct") is None:
-            continue
-        direction = "正向" if hi["avg_return_pct"] > lo["avg_return_pct"] else "反向"
-        dim_bits.append(
-            f"{name}：高分组{hi['avg_return_pct']:+.2f}% vs 低分组{lo['avg_return_pct']:+.2f}%（{direction}）"
+    # 真实回看间隔从数据里实算，不写死。2026-09-04把 watchlist 的校验窗口从
+    # 0.9天改成6.9天之后，库里会有一段时间同时存在"1天口径"和"7天口径"两批
+    # 已回填数据；任何写死的窗口描述在过渡期都会是错的，而错误的前提喂给AI
+    # 比不喂更糟（这一版就是因为上一版写死"7天"而实际是1天才重写的）。
+    lags = []
+    try:
+        with closing(_conn()) as c:
+            for ca, ra in c.execute(
+                "SELECT created_at, review_at FROM advice "
+                "WHERE source = ? AND review_price IS NOT NULL AND review_at IS NOT NULL",
+                (source,),
+            ):
+                try:
+                    lags.append(
+                        (datetime.fromisoformat(ra) - datetime.fromisoformat(ca)).total_seconds() / 86400
+                    )
+                except Exception:
+                    continue
+    except Exception:
+        lags = []
+    if lags:
+        lags.sort()
+        _med = lags[len(lags) // 2]
+        _lo, _hi = lags[0], lags[-1]
+        window_txt = (
+            f"核对窗口按实际回填时间算，中位数{_med:.1f}天"
+            + (f"（区间{_lo:.1f}~{_hi:.1f}天）" if _hi - _lo > 0.5 else "")
         )
-    if not band_bits:
+    else:
+        window_txt = "核对窗口未知"
+
+    by_market = bt.get("按市场") or {}
+    _label = {"US": "美股", "HK": "港股", "A": "A股"}
+    mkt_lines = []
+    for mk in ("US", "HK", "A"):
+        sub = by_market.get(mk)
+        if not sub:
+            continue
+        bands = sub.get("bands") if isinstance(sub, dict) else sub
+        bits = [
+            f"{b['band']}分档{b['count']}条平均{b['avg_return_pct']:+.2f}%、上涨{b['win_rate_pct']:.0f}%"
+            for b in (bands or [])
+            if b.get("count") and b.get("avg_return_pct") is not None
+        ]
+        if bits:
+            mkt_lines.append(f"    {_label.get(mk, mk)}：" + "；".join(bits))
+    if not mkt_lines:
         return ""
 
     return (
-        f"本系统打分体系的事后实证（{total}条已回填样本，7天窗口，是客观统计不是理论）：\n"
-        f"  按综合得分分档：" + "；".join(band_bits) + "\n"
-        + ("  按维度：" + "；".join(dim_bits) + "\n" if dim_bits else "")
-        + "  怎么用这段数据：综合得分高不等于后市会涨，历史上甚至是相反的，"
-          "所以不要把高分当成买入理由本身。特别注意\"价格位置安全边际\"这一维——"
-          "\"52周低位所以安全\"在这份数据上是站不住的，低位往往意味着还在下跌趋势里，"
-          "便宜不等于要涨。相对而言\"技术面确认\"是唯一表现出正向预测力的维度，"
-          "真实放量和趋势确认比\"看起来便宜\"更值得信。样本量和窗口都有限，"
-          "这不是铁律，但足以推翻\"分数越高越该买\"这个默认假设。"
+        f"本系统打分体系的事后实证（{total}条已回填样本，{window_txt}，"
+        f"是客观统计不是理论）：\n"
+        + "\n".join(mkt_lines) + "\n"
+        "  必须按市场分开看：三个市场的候选池口径完全不同（A股是当天涨停股池，"
+        "港美股是人气榜/蓝筹），混在一起统计会出现辛普森悖论——港股整体基线更差、"
+        "又在高分档占比更高，会把合并后的高分档拖低，看上去像\"分数越高越差\"，"
+        "拆开后并不成立。\n"
+        "  站得住的结论只有一条：在上面这个窗口上，这套综合得分没有可证实的预测力。"
+        "需要说明的是，之前绝大多数样本是按\"次日核对\"回填的，而综合得分里"
+        "基本面质量40分+价格位置30分占了七成权重，衡量的是公司质地和估值位置，"
+        "那是按季度起作用的东西——拿它去打一天的分，从设计上就不可能成立，"
+        "这是衡量口径错配，不代表这套评分本身没有价值。校验窗口已于2026-09-04"
+        "从次日改成一周，新样本会在更接近它该被检验的尺度上重新积累，在那之前"
+        "不要拿旧结论下死判断。\n"
+        "  怎么用：把综合得分当作\"这家公司的质地和估值位置如何\"的描述，不要当作"
+        "\"明天会不会涨\"的理由。短周期的买卖时点要靠技术面确认（真实放量、趋势"
+        "成立）和当下的盘面证据，不能靠高分背书。尤其\"52周低位所以安全\"这句话，"
+        "在短周期里没有数据支持——低位往往意味着还在下跌趋势里。"
     )
 
 
