@@ -291,25 +291,90 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 /* 按钮系统。全站只有三种按钮，各自职责清楚，不再每个页面自己写一套：
    次要（默认）= 白底发丝边框；主要 = 墨色实底；安静（tertiary）= 无边框弱化，
    用在图标按钮和返回这类不该抢戏的位置。 */
-.stButton button {
-    background: var(--fa-surface) !important; border: 1px solid var(--fa-border-2) !important;
-    color: var(--fa-text) !important; border-radius: var(--fa-radius-sm) !important;
-    font-size: 0.855rem !important; font-weight: 500 !important; padding: 7px 15px !important;
+/* 次要按钮：透明底 + 发丝描边，不是"白盒子"。
+   页面底色是 #FAFAFB，按钮如果填纯白，就会从底上浮出来一块，再加一圈边框，
+   看着就是一个标准的表单控件方盒——这正是用户说的"大白框"。改成背景透明、
+   直接吃页面底色，只留一条极淡的描边勾出可点范围；悬停时才填一块浅灰给出
+   反馈。同一颗按钮，从"一块白方框"变成"一个轮廓"，页面立刻安静下来。 */
+/* 下面这一组选择器是整套按钮系统的唯一入口。Streamlit 的按钮不止 st.button
+   一种：表单提交键、弹层触发键各自是独立的 testid，只写 .stButton button 会
+   漏掉它们，于是页面上就会出现"大部分按钮是新样式、个别还是旧样式"的割裂。
+   全部并到同一组选择器上，样式只此一份，以后加新按钮也自动继承。 */
+.stButton button,
+[data-testid="stFormSubmitButton"] button,
+[data-testid="stPopover"] button {
+    background: transparent !important; border: 1px solid var(--fa-border) !important;
+    color: var(--fa-text-2) !important; border-radius: var(--fa-radius-sm) !important;
+    font-size: 0.845rem !important; font-weight: 500 !important; padding: 6px 14px !important;
     box-shadow: none !important;
     transition: background .15s ease, border-color .15s ease, color .15s ease;
 }
-.stButton button:hover { background: var(--fa-fill) !important; border-color: var(--fa-border-2) !important; color: var(--fa-text) !important; }
-.stButton button:active { background: #ECEDF0 !important; }
-.stButton button:focus, .stButton button:focus-visible { box-shadow: none !important; outline: none !important; }
+.stButton button:hover,
+[data-testid="stFormSubmitButton"] button:hover,
+[data-testid="stPopover"] button:hover {
+    background: var(--fa-fill) !important; border-color: var(--fa-border-2) !important;
+    color: var(--fa-text) !important;
+}
+.stButton button:active,
+[data-testid="stFormSubmitButton"] button:active { background: #E9EAEE !important; }
+.stButton button:focus, .stButton button:focus-visible,
+[data-testid="stFormSubmitButton"] button:focus,
+[data-testid="stFormSubmitButton"] button:focus-visible,
+[data-testid="stPopover"] button:focus,
+[data-testid="stPopover"] button:focus-visible { box-shadow: none !important; outline: none !important; }
+.stButton button:disabled,
+[data-testid="stFormSubmitButton"] button:disabled {
+    background: transparent !important; border-color: var(--fa-border) !important;
+    color: var(--fa-faint) !important;
+}
 
-.stButton button[kind="primary"], .stButton button[data-testid="stBaseButton-primary"] {
+/* "展开/更多/收起"这类按钮不是动作，是一个揭示更多内容的入口。它们大多是
+   整行宽度，画成带边框的大方块时会在页面中间横出一道很重的横条。改成没有
+   边框、没有底色的居中弱化文字，上面压一条发丝分割线——跟编辑类网站的
+   "加载更多"是同一种处理，存在感刚好够点，又不会把版面切断。 */
+[class*="st-key-_detail_expand_btn"] button,
+[class*="st-key-_idx_expand_btn"] button,
+[class*="st-key-_ai_sim_runs_more"] button,
+[class*="st-key-_ai_sim_orders_more"] button,
+[class*="st-key-_more_limit_pool"] button,
+[class*="st-key-_sectors_more_btn"] button,
+[class*="st-key-_sectors_collapse_btn"] button,
+[class*="st-key-_movers_collapse_btn"] button,
+[class*="st-key-_movers_expand_btn"] button {
+    background: transparent !important; border: none !important;
+    border-top: 1px solid var(--fa-border) !important;
+    border-radius: 0 !important; color: var(--fa-muted) !important;
+    font-size: 0.82rem !important; font-weight: 500 !important;
+    padding: 13px 8px 6px !important; letter-spacing: .02em;
+}
+[class*="st-key-_detail_expand_btn"] button:hover,
+[class*="st-key-_idx_expand_btn"] button:hover,
+[class*="st-key-_ai_sim_runs_more"] button:hover,
+[class*="st-key-_ai_sim_orders_more"] button:hover,
+[class*="st-key-_more_limit_pool"] button:hover,
+[class*="st-key-_sectors_more_btn"] button:hover,
+[class*="st-key-_sectors_collapse_btn"] button:hover,
+[class*="st-key-_movers_collapse_btn"] button:hover,
+[class*="st-key-_movers_expand_btn"] button:hover {
+    background: transparent !important; color: var(--fa-text) !important;
+}
+
+/* 主要动作：唯一填实底的按钮。一屏里只应该有一个，让"这一步该点哪"没有歧义。 */
+.stButton button[kind="primary"],
+.stButton button[data-testid="stBaseButton-primary"],
+[data-testid="stFormSubmitButton"] button[kind="primary"],
+[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] {
     background: var(--fa-ink) !important; border-color: var(--fa-ink) !important; color: #fff !important;
 }
-.stButton button[kind="primary"]:hover, .stButton button[data-testid="stBaseButton-primary"]:hover {
+.stButton button[kind="primary"]:hover,
+.stButton button[data-testid="stBaseButton-primary"]:hover,
+[data-testid="stFormSubmitButton"] button[kind="primary"]:hover,
+[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"]:hover {
     background: #000 !important; border-color: #000 !important; color: #fff !important;
 }
 /* 安静按钮：默认几乎看不见，悬停才浮出一块底。项目里的图标按钮（搜索/添加/
    对比/删除/返回）全部用它，不该在页面上摆一圈边框抢注意力。 */
+/* 安静档：连描边都没有，只在悬停时浮出一块底。图标按钮和返回键走这一档。 */
 .stButton button[kind="tertiary"], .stButton button[data-testid="stBaseButton-tertiary"] {
     background: transparent !important; border: 1px solid transparent !important;
     color: var(--fa-muted) !important;
@@ -2337,6 +2402,10 @@ def _render_ai_assistant():
         ".st-key-ai_assistant_popover button:hover{background:#000!important;border-color:#000!important;}"
         ".st-key-ai_assistant_popover button p{color:#fff!important;font-size:.78rem!important;"
         "font-weight:560!important;letter-spacing:.07em;}"
+        # popover 触发键默认会在文字右边带一个下拉小箭头。这颗按钮是个圆形
+        # 浮标，里面只放两个字母，多一个箭头会挤成"AI⌄"，既不居中也不好看。
+        ".st-key-ai_assistant_popover button svg,"
+        ".st-key-ai_assistant_popover button [data-testid='stIconMaterial']{display:none!important;}"
         "</style>",
         unsafe_allow_html=True,
     )

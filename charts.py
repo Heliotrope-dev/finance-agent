@@ -33,6 +33,24 @@ _AUX_STRONG = "#5B6470"
 _AUX_SOFT = "#A6ADB6"
 
 
+def _style_subplot_titles(fig):
+    """把 make_subplots 生成的子图标题改成左对齐小灰字。
+
+    默认是居中的深色中号字，很像模板图。标题在这里的作用是索引（"下面这块是
+    成交量"），不是装饰，应该待在左上角安静地待着，不该在图正上方居中占一行。
+    刻意放在 make_subplots 刚建完图、还没添加任何自定义注释的时候调用——那时
+    layout.annotations 里有且只有子图标题，按位置改最稳；等到图画完再去
+    annotations 里靠 xref 认哪些是子图标题，Plotly 不同版本用的是
+    "paper" 还是 "x domain" 并不一致，容易全部认漏。
+    """
+    for ann in fig.layout.annotations:
+        ann.update(
+            font=dict(family=_CHART_FONT, size=11, color=_CHART_MUTED),
+            x=0, xanchor="left",
+        )
+    return fig
+
+
 def _apply_chart_theme(fig, height=None, *, legend=False, grid="y", margin=None, hovermode=None):
     """给一张图套上全站统一的图表视觉。
 
@@ -118,7 +136,10 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
     # （CSS的rgba()要十进制分量），这两组数字是UP_COLOR(#e02020)/DOWN_COLOR
     # (#22a06b)按十六进制拆开换算过来的，跟上面line_color是同一个颜色，
     # 只是多了0.08的透明度做填充，不是另外瞎起的一个颜色。
-    fill_color = "rgba(224,32,32,0.08)" if up else "rgba(34,160,107,0.08)"
+    # 从 theme.py 换算，不再硬编码。原来写死的 rgba(224,32,32)/rgba(34,160,107)
+    # 是 2026-09-04 换色板之前的旧红旧绿，跟页面上其它地方的涨跌色已经不是同一个
+    # 色号了——同一屏里两种红，是那种说不出哪里怪但就是不舒服的来源。
+    fill_color = _hex_to_rgba(UP_COLOR if up else DOWN_COLOR, 0.07)
 
     # 指数没有真实成交量（指数本身不是被直接交易的标的，Futu的分时接口对指数
     # 返回的成交量是0），这种情况下按成交量加权算均价没有意义——分母全是0，
@@ -133,7 +154,8 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
         df["均价"] = df["价格"].expanding().mean()
 
     prev_tick = df["价格"].shift(1).fillna(base)
-    df["量色"] = ["#e02020" if p >= pt else "#22a06b" for p, pt in zip(df["价格"], prev_tick)]
+    # 同上：成交量柱的红绿也从 theme.py 取，不写死。
+    df["量色"] = [UP_COLOR if p >= pt else DOWN_COLOR for p, pt in zip(df["价格"], prev_tick)]
 
     # 铺满整个交易时段的时间框架，实际数据按 hm（HH:MM）左连接上去——还没走到的
     # 分钟自然是空值，图上就是留白，而不是把横轴压缩到"现在"就截断。
@@ -148,6 +170,7 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
             row_heights=[0.7, 0.3], vertical_spacing=0.08,
             subplot_titles=("", "成交量"),
         )
+        _style_subplot_titles(fig)
     else:
         fig = make_subplots(rows=1, cols=1)
 
@@ -210,6 +233,7 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
         row_heights=[0.5, 0.2, 0.3], vertical_spacing=0.09,
         subplot_titles=("", "成交量", "MACD"),
     )
+    _style_subplot_titles(fig)
 
     fig.add_trace(
         go.Candlestick(
