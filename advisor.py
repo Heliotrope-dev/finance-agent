@@ -1601,12 +1601,35 @@ _PORTFOLIO_SYSTEM = """你是一位理性、保守的投研助理，正在给一
    算出来的数字，不要重新编一个不一致的数字。
 9. 最后必须附一句："仅供参考，不构成投资建议，请自行判断。"
 
-严格按以下格式输出（不要多余寒暄）：
-总体评估：<两三句话，这个组合现在处于什么状态，健康还是有明显问题>
+9(补). 行业集中度必须单独判断，不能跟市场敞口混为一谈。市场分散不等于
+   风险分散——全部持仓都在港股但分属四个行业，和全部都在港股且全是科技股，
+   风险完全不是一回事，后者是同一个赌注下了四次。如果某个行业占比明显偏高
+   （比如超过40%这个量级），要指出这是"隐藏的集中度"，比单一个股占比高更
+   容易被忽略。行业分类覆盖率不足时（数据里会说明）要如实讲清楚这个结论
+   的可靠性有限，不能拿半残的分布当完整结论。
+
+10. 宏观适配单独判断：结合给你的当前宏观环境（利率方向、通胀、就业），
+   说明这个组合现在是站对了位置还是逆着环境。要落到具体持仓上，不能只
+   复述宏观本身——"利率下行利好成长股，而你的组合里XX和YY都是长久期成长
+   股，这个方向是顺的"才叫适配分析，"当前降息预期升温"只是复述。宏观和
+   个股冲突时说清楚以哪个为准。
+
+11. 排序要按严重程度，不是按持仓顺序。整份体检最前面必须先说最该处理的
+   那一件事，用户只看前三行也要知道当下最大的问题是什么。如果组合确实没有
+   明显问题，就明确说"没有需要马上处理的问题"，不要为了显得有内容而把小事
+   说成大事。
+
+严格按以下格式输出（不要多余寒暄，每一段都以段名加中文冒号开头，段名不要
+自己改写或增减）：
+总体评估：<两三句话。第一句必须是当下最该处理的那一件事，没有问题就直说没有>
 集中度风险：<引用真实的占比数字，明确指出是否过于集中>
+行业集中：<引用真实的行业占比数字，指出有没有"看着分散实际是同一个赌注"的
+情况；覆盖率不足时如实说明结论的局限>
 市场敞口：<引用真实的敞口数字，指出有没有明显失衡>
+宏观适配：<这个组合在当前利率/通胀/就业环境下是顺风还是逆风，要落到具体持仓上>
 逐支跟踪：<对每一支持仓单独一行，格式"标的名（代码）：【动作】具体股数
-+金额——理由"，动作必须是继续持有/加仓/减仓/定投/止盈/割肉之一>
++金额——理由"，动作必须是继续持有/加仓/减仓/定投/止盈/割肉之一。按处理
+优先级排序，最该动的排最前面，不要按持仓市值顺序>
 新增配置建议：<结合近期AI候选，1-2支能改善组合结构的标的+参考仓位+理由，
 没有合适的就如实说没有>
 操作建议：<组合层面的触发条件，每条一行，必须可执行>
@@ -1722,6 +1745,30 @@ def advise_portfolio(email: str) -> dict | None:
     for r in rows:
         by_market[r["market"]] = by_market.get(r["market"], 0) + r["weight_pct"]
 
+    # 行业敞口（2026-09-04新增）。用户反馈组合分析"说的都没啥逻辑"，缺的
+    # 就是这一层：市场分散不等于风险分散——五支全是港股科技股，市场敞口那
+    # 一行看着是"HK 100%"一项，实际上是同一个赌注，板块一回调五支一起跌。
+    # 只有把行业集中度也算出来，"这些持仓摆在一起是否健康"才算真的回答了。
+    try:
+        _ind = ds.get_owner_industries([(r["symbol"], r["market"]) for r in rows])
+    except Exception:
+        _ind = {}
+    by_industry: dict[str, float] = {}
+    for r in rows:
+        r["industry"] = _ind.get((r["symbol"], r["market"]), "")
+        key = r["industry"] or "未知行业"
+        by_industry[key] = by_industry.get(key, 0) + r["weight_pct"]
+    _known_ind_pct = sum(w for k, w in by_industry.items() if k != "未知行业")
+    industry_line = "、".join(
+        f"{k} {w:.1f}%" for k, w in sorted(by_industry.items(), key=lambda x: -x[1])
+    )
+    if _known_ind_pct < 60:
+        # 富途对美股普遍没有行业分类，覆盖率低的时候要明说，不能让AI拿一份
+        # 半残的分布当完整结论用。
+        industry_line += ("　注意：只有约%.0f%%的仓位查得到行业分类"
+                          "（美股在数据源里普遍没有行业标签），"
+                          "行业集中度只能作为参考，不能当成完整结论。" % _known_ind_pct)
+
     single_advice = tracker.get_position_advice(email)
 
     # 用户明确要求组合分析不能只谈配置比例，还要"持续关注这些持仓股的异动
@@ -1750,7 +1797,7 @@ def advise_portfolio(email: str) -> dict | None:
         per_pct_shares = r["shares"] / r["weight_pct"] if r["weight_pct"] else 0
         per_pct_cny = r["value_cny"] / r["weight_pct"] if r["weight_pct"] else 0
         holdings_lines.append(
-            f"- {r['name']}（{r['symbol']}·{r['market']}）：仓位占比{r['weight_pct']:.1f}%，"
+            f"- {r['name']}（{r['symbol']}·{r['market']}·{r.get('industry') or '行业未知'}）：仓位占比{r['weight_pct']:.1f}%，"
             f"当前持有{r['shares']:g}股，现价{r['price']:.2f}，浮动盈亏{r['pnl_pct']:+.1f}%，"
             f"单支AI最近判断：{adv_action}\n"
             f"  每变动1个百分点仓位≈{per_pct_shares:.0f}股（约¥{per_pct_cny:,.0f}）\n"
@@ -1789,6 +1836,13 @@ def advise_portfolio(email: str) -> dict | None:
     except Exception:
         candidates_text = "（读取失败）"
 
+    # 宏观环境：跟 sim_agent 用的是同一份已落库的简报，不额外触发AI调用。
+    try:
+        import sim_agent as _sa
+        _macro_text = _sa._macro_context_text()
+    except Exception:
+        _macro_text = "（宏观简报暂时读不到）"
+
     user_content = (
         f"组合总资产（折人民币）：¥{total_value_cny:,.0f}，共{len(rows)}支持仓"
         + (f"（另有{skipped}支因行情/汇率暂时获取不到未计入）" if skipped else "") + "\n"
@@ -1796,28 +1850,27 @@ def advise_portfolio(email: str) -> dict | None:
         f"集中度：最大单一持仓占比{top1_pct:.1f}%，前三大合计占比{top3_pct:.1f}%，"
         f"HHI指数{hhi:.3f}（0-1，越接近1越集中，0.15以下通常认为分散度尚可）\n\n"
         f"市场敞口：{'，'.join(f'{m} {w:.1f}%' for m, w in sorted(by_market.items(), key=lambda x: -x[1]))}\n\n"
+        f"行业敞口：{industry_line}\n\n"
+        f"当前宏观环境（判断这个组合在当下的利率/通胀环境里是否站对了位置）：\n{_macro_text}\n\n"
         f"各持仓明细：\n" + "\n".join(holdings_lines) + "\n\n"
         f"近期AI候选（全市场量化初筛+AI判断，不是专门为这个组合挑的，仅供你参考是否有能改善组合结构的）：\n"
         + candidates_text
     )
 
-    resp = _client().chat.completions.create(
-        model=_MODEL,
-        messages=[
+    # 走统一的故障转移入口，千问顶不住自动换智谱（见 chat_with_failover）。
+    text = chat_with_failover(
+        [
             {"role": "system", "content": _PORTFOLIO_SYSTEM},
             {"role": "user", "content": user_content},
         ],
-        # 同judge_stock的踩坑记录：DeepSeek隐藏思考链跟正式输出共用预算。
-        # 这个prompt要求已经很细（逐支六选一动作+量化换算+资金上限+候选
-        # 交叉引用+标红），8000/12000/16000都实测过finish_reason=length
-        # 拿到空内容——这个prompt的隐藏思考链比前几版都长，调到24000。
-        max_tokens=24000,
-        temperature=0.3,
-        stream=False,
+        # 同judge_stock的踩坑记录：隐藏思考链跟正式输出共用预算。这个prompt
+        # 要求已经很细（逐支六选一动作+量化换算+资金上限+候选交叉引用+行业
+        # 集中+宏观适配），8000/12000/16000都实测过finish_reason=length拿到
+        # 空内容，用24000。
+        max_tokens=24000, temperature=0.3, timeout=300, tag="portfolio",
     )
-    text = resp.choices[0].message.content or ""
-    if not text.strip():
-        raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
+    # 空内容的检查由 chat_with_failover 统一做了（空正文被当成失败，会先
+    # 换一家再试），这里不需要重复判断——原来那句还引用了已经不存在的 resp。
 
     holdings_json = json.dumps(
         [{"symbol": r["symbol"], "name": r["name"], "weight_pct": round(r["weight_pct"], 2),

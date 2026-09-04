@@ -345,6 +345,24 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
    整行宽度，画成带边框的大方块时会在页面中间横出一道很重的横条。改成没有
    边框、没有底色的居中弱化文字，上面压一条发丝分割线——跟编辑类网站的
    "加载更多"是同一种处理，存在感刚好够点，又不会把版面切断。 */
+/* 容器本身也要撑满一行。按钮上的 width:100% 撑的是它的父容器，而
+   Streamlit 给按钮的外层容器默认是收缩宽度的——只给按钮加宽度，撑开的
+   仍然是一个本来就很窄的盒子，文字看着还是贴在左边（"更多板块"就是这样，
+   上面那条发丝线也只有短短一截）。 */
+[class*="st-key-_detail_expand_btn"],
+[class*="st-key-_idx_expand_btn"],
+[class*="st-key-_ai_sim_runs_more"],
+[class*="st-key-_ai_sim_orders_more"],
+[class*="st-key-_more_limit_pool"],
+[class*="st-key-_sectors_more_btn"],
+[class*="st-key-_sectors_collapse_btn"],
+[class*="st-key-_movers_collapse_btn"],
+[class*="st-key-_home_news_more"],
+[class*="st-key-_home_news_collapse"],
+[class*="st-key-_movers_expand_btn"] {
+    width: 100% !important;
+}
+
 [class*="st-key-_detail_expand_btn"] button,
 [class*="st-key-_idx_expand_btn"] button,
 [class*="st-key-_ai_sim_runs_more"] button,
@@ -1852,7 +1870,6 @@ def _render_a_share_overview():
         bcols = st.columns(6)
         for col, key in zip(bcols, ["上涨", "下跌", "涨停", "跌停", "平盘", "活跃度"]):
             col.metric(key, breadth.get(key, "—"))
-        st.caption(f"统计时间：{breadth.get('统计日期', '未知')}（数据来自乐咕乐股网）")
 
     st.divider()
     up_col, down_col = st.columns(2)
@@ -2414,6 +2431,43 @@ def _labeled_line(label: str, value: str) -> str:
         f"<span style='font-weight:600;color:var(--fa-text)'>{_esc(label)}</span>"
         f"<span style='color:var(--fa-text-2)'>：{_esc(value)}</span></div>"
     )
+
+
+_PORTFOLIO_SECTIONS = (
+    "总体评估", "集中度风险", "行业集中", "市场敞口",
+    "宏观适配", "逐支跟踪", "新增配置建议", "操作建议",
+)
+
+
+def _parse_portfolio_text(text: str) -> dict:
+    """把组合分析按段名切开。跟 _parse_advice_text 同一套约定（段名+中文
+    冒号），只是段名清单不同——组合分析和单支判断是两种不同的输出格式，
+    共用一个段名清单会互相误切。
+
+    段名必须出现在行首才算数：正文里完全可能出现"市场敞口"这四个字（比如
+    "市场敞口已经说明了这层风险"），如果不限定行首，那句话会被当成新一段
+    的开头，把前一段拦腰截断。
+    """
+    parts: dict[str, str] = {}
+    text = text or ""
+    positions = []
+    for name in _PORTFOLIO_SECTIONS:
+        for sep in ("：", ":"):
+            idx = text.find(f"\n{name}{sep}")
+            if idx != -1:
+                positions.append((idx + 1, name, len(name) + 1))
+                break
+            if text.startswith(f"{name}{sep}"):
+                positions.append((0, name, len(name) + 1))
+                break
+    positions.sort()
+    for i, (idx, name, off) in enumerate(positions):
+        start = idx + off
+        end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+        body = text[start:end].strip()
+        if body:
+            parts[name] = body
+    return parts
 
 
 def _parse_advice_text(text: str) -> dict:
@@ -4071,7 +4125,25 @@ def _render_portfolio_advice(email: str, positions: list):
             )
 
         _render_trade_signals(advice.get("signals_json", ""))
-        st.markdown(_render_bold_as_red(advice["analysis_text"]), unsafe_allow_html=True)
+        # 分小节渲染而不是把整段AI原文糊成一片。2026-09-04用户反馈组合分析
+        # "说的都没啥逻辑"——内容本来就是分段生成的(总体评估/集中度/行业集中/
+        # 市场敞口/宏观适配/逐支跟踪/...)，但渲染时全是同一号字的连续段落，
+        # 段名混在正文里，看上去就是一大坨，读者根本分不出哪句是结论哪句是
+        # 依据。按段名切开、段名用小标题样式，层次一出来"有没有逻辑"就看得见了。
+        _parts = _parse_portfolio_text(advice["analysis_text"])
+        if _parts:
+            for _name in _PORTFOLIO_SECTIONS:
+                _body = _parts.get(_name)
+                if not _body:
+                    continue
+                st.markdown(
+                    f"<div style='font-size:0.72rem;letter-spacing:.08em;color:var(--fa-faint);"
+                    f"text-transform:none;margin:16px 0 6px'>{_name}</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(_render_bold_as_red(_body), unsafe_allow_html=True)
+        else:
+            st.markdown(_render_bold_as_red(advice["analysis_text"]), unsafe_allow_html=True)
     else:
         st.caption("AI 组合分析还没生成过。")
 

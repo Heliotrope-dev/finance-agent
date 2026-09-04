@@ -2740,3 +2740,47 @@ def get_stock_notices(symbol: str) -> pd.DataFrame:
     df = df.rename(columns={"公告标题": "新闻标题", "公告日期": "日期", "公告类型": "分类", "网址": "url"})
     df = df.sort_values("日期", ascending=False)
     return df[["日期", "新闻标题", "分类", "url"]].head(10)
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def get_owner_industries(items: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
+    """批量查这批港美股各自的所属行业板块。返回 {(symbol, market): 行业名}。
+
+    2026-09-04为组合分析新增。原来的组合体检只算"市场敞口"(港股占多少、
+    美股占多少)，但市场分散不等于风险分散——五支全是港股科技股，市场敞口
+    看着是100%港股一项，实际上是同一个赌注，一旦板块回调五支一起跌。用户
+    反馈组合分析"说的都没啥逻辑"，缺的正是这一层：只有把行业集中度算出来，
+    "这些持仓摆在一起是否健康"才算真的回答了。
+
+    富途的 get_owner_plate 一次能查一批，但一支股票会同时挂在很多板块下
+    （腾讯控股实测返回十几条：港股科网股、港股通、AI应用、腾讯概念、蓝筹股、
+    手游股……）。这里只取 plate_type 为 INDUSTRY 的那条——CONCEPT 是题材
+    概念，同一支股票能挂七八个，拿来算集中度会把权重重复计算好几遍，得出
+    的分散度是假的。行业分类每支股票只有一个，是稳定的分类维度。
+
+    行业分类基本不变，缓存24小时；查不到的就不放进结果，调用方按"未知行业"
+    处理，不猜。
+    """
+    codes = [f"HK.{s}" if m == "HK" else f"US.{s}" for s, m in items if m in ("HK", "US")]
+    if not codes:
+        return {}
+    code_to_item = {(f"HK.{s}" if m == "HK" else f"US.{s}"): (s, m) for s, m in items if m in ("HK", "US")}
+    out: dict[tuple[str, str], str] = {}
+    # 分小批查：一支股票会返回二三十个板块，一次塞四个代码就超过一百行，
+    # 实测响应会被截断——四个代码的批次里只有两个拿到了行业分类，单独再查
+    # 却查得到。按3个一批走，多花几次调用换取结果完整。
+    for i in range(0, len(codes), 3):
+        chunk = codes[i:i + 3]
+        ret, data = _futu_call(lambda ctx, c=chunk: ctx.get_owner_plate(c), default=(None, None))
+        if ret != ft.RET_OK or data is None or data.empty:
+            continue
+        for _, row in data.iterrows():
+            if str(row.get("plate_type")) != "INDUSTRY":
+                continue
+            item = code_to_item.get(row["code"])
+            if item and item not in out:
+                out[item] = str(row.get("plate_name") or "").strip()
+    # 美股在富途这边普遍没有INDUSTRY分类（苹果的41个板块里一个行业分类都
+    # 没有，全是概念板块），所以美股这边覆盖率天然偏低。查不到的不放进结果，
+    # 调用方按"未知行业"如实处理，不拿概念板块凑数——概念板块一支股票能挂
+    # 七八个，用来算集中度会把权重重复计算，得出的分散度是假的。
+    return {k: v for k, v in out.items() if v}
