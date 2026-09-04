@@ -279,16 +279,28 @@ div[data-testid="stButtonGroup"] button[aria-checked="true"], div[data-testid="s
 div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { color: inherit !important; }
 
 /* ── 卡片与容器 ───────────────────────────────────────────────────────── */
+/* 2026-09-05用户定的全局规则："现在我们项目里不要出现显眼的框框，保持透明统一"。
+   这条改成在源头上生效，而不是逐个调用点去改：Streamlit 的 st.container(border=True)
+   和 st.expander 都会画一个白底加完整边框的盒子，页面上一堆这种盒子摞在一起，
+   跟本项目"透明底加一条发丝线"的基调是两套语言。之前是发现一处改一处（指数行、
+   核心股、板块、内部人交易…），改到第五处就该明白这是个全局问题——在这里统一
+   成透明底加一条底部发丝线，以后新写的代码不用再单独处理。
+   分区之间的层次靠留白和标题字重表达，不靠画框。 */
 [data-testid="stVerticalBlockBorderWrapper"] {
-    background: var(--fa-surface) !important; border: 1px solid var(--fa-border) !important;
-    border-radius: var(--fa-radius) !important;
+    background: transparent !important;
+    border: none !important;
+    border-bottom: 1px solid var(--fa-border) !important;
+    border-radius: 0 !important;
+    padding: 4px 0 10px !important;
 }
 /* 边框其实挂在内层的<details>上，不是 stExpander 这一层，套外层是没用的。 */
 [data-testid="stExpander"] details {
-    background: var(--fa-surface) !important; border: 1px solid var(--fa-border) !important;
-    border-radius: var(--fa-radius) !important; box-shadow: none !important;
+    background: transparent !important;
+    border: none !important;
+    border-bottom: 1px solid var(--fa-border) !important;
+    border-radius: 0 !important; box-shadow: none !important;
 }
-[data-testid="stExpander"] summary { padding: 12px 16px !important; font-size: 0.87rem !important; border-radius: var(--fa-radius) !important; }
+[data-testid="stExpander"] summary { padding: 11px 2px !important; font-size: 0.87rem !important; border-radius: var(--fa-radius) !important; }
 [data-testid="stExpander"] summary:hover { background: var(--fa-fill) !important; }
 [data-testid="stExpander"] summary p { font-weight: 500 !important; color: var(--fa-text-2) !important; }
 

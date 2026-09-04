@@ -1219,10 +1219,24 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
         # 30秒（配合下面外层deadline从60秒放宽到90秒），给兜底调用留出
         # 足够从容的时间窗口，不再是同一个数字既当"主力超时"又顶着"整体
         # deadline"用。
-        resp = client.with_options(max_retries=0, timeout=30).chat.completions.create(
+        # timeout 30->90、max_tokens 4000->12000（2026-09-05）。
+        #
+        # 上面那几段关于30秒的推理是针对千问的，前提在千问额度耗尽之后失效了：
+        # 现在多头（千问）必然429立刻回落智谱、空头本来就走智谱，两边都挤在
+        # 智谱上。而智谱的 glm-4.5-air 是推理模型，隐藏思考链跟正文共用
+        # max_tokens——4000在思考阶段就烧穿返回空内容；30秒也远不够，同一天
+        # 实测单支judge在air上要47到59秒。结果就是多空双方同时失败，报
+        # "双方供应商都没能在预算内给出结果"，持仓的辩论判断整个跑不出来。
+        #
+        # 这里顺带记一个当前的降级事实：千问不可用期间，"两家独立供应商互相
+        # 独立出论证"这个性质是不成立的，两边其实是同一个模型跑两套不同的
+        # system prompt。辩论的价值因此打了折扣（同一个模型的左右手互搏，
+        # 共同的知识盲区不会被对方发现），但比整个功能失效要好。千问额度
+        # 09-08恢复之后这个性质会自动回来，不需要改代码。
+        resp = client.with_options(max_retries=0, timeout=90).chat.completions.create(
             model=model,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": data_context}],
-            max_tokens=4000,  # 论据比最终判断的六段结构化输出短得多，但同样的空内容坑保底调高一点
+            max_tokens=12000,
             temperature=0.5,  # 辩论双方要有观点区分度，比最终判断的0.3稍高
             stream=False,
         )
@@ -1262,7 +1276,11 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
             (_BULL_SYSTEM, _client(), _MODEL, _zhipu_client(), _ZHIPU_MODEL),
             (_BEAR_SYSTEM, _zhipu_client(), _ZHIPU_MODEL, _client(), _MODEL),
         ],
-        _fetch_stance, timeout=90, max_workers=2,
+        # 外层deadline 90->240：单次stance超时放宽到90秒，加上失败后回落到
+        # 另一家再跑一次，两段串起来最坏接近180秒，外层必须比这个宽出余量，
+        # 否则回落调用又会被外层提前放弃——跟这个函数历史上踩过的是同一个坑
+        # （"不是没兜底，是留给兜底的时间太紧张"）。
+        _fetch_stance, timeout=240, max_workers=2,
     )
     if 0 not in stance_results or 1 not in stance_results:
         raise RuntimeError("多空论证生成失败（可能是网络/AI调用超时，双方供应商都没能在预算内给出结果），跳过这次辩论判断。")
