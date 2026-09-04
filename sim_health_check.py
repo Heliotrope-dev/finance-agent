@@ -34,6 +34,7 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 _DB = Path(__file__).parent / "data" / "track_record.db"
 _CN_TZ = timezone(timedelta(hours=8))
@@ -49,9 +50,13 @@ _REPEAT_BLOCK_LIMIT = 3
 _CONSEC_FAIL_LIMIT = 3
 # 连续多少轮零成交算可疑。开盘时段一个多小时一笔没成交，值得看一眼。
 _NO_TRADE_LIMIT = 12
-# 最近一次运行距今多久算停摆（分钟）。cron是5分钟一轮，非开盘时段会记"跳过"
-# 但仍然会留下记录，所以正常情况下任何时候都不该超过这个数太多。
-_STALE_MINUTES = 25
+# 最近一次运行距今多久算停摆（分钟）。
+# 2026-09-04跟着决策架构一起改的：原来是25分钟，依据是"cron 5分钟一轮，
+# 休市时段也会记一条跳过，所以任何时候都不该断"。改成事件驱动之后这个前提
+# 没了——sim_watch 只在交易时段被触发，而且只有真正叫醒AI决策才写记录，
+# 休市时段本来就不该有心跳。阈值按新的保底间隔(15分钟)加上一轮决策本身的
+# 耗时和抖动余量取40分钟，并且只在开市时段检查（见 _markets_open_now）。
+_STALE_MINUTES = 40
 # 虚拟现金台账跟最新快照差多少算对不上（港币）。快照和结算是两个时点写的，
 # 有小额差异正常，几十块以上就不对劲了。
 _CASH_DRIFT_HKD = 50.0
@@ -60,6 +65,29 @@ _CASH_DRIFT_HKD = 50.0
 def _rows(conn, sql, args=()):
     conn.row_factory = sqlite3.Row
     return [dict(r) for r in conn.execute(sql, args)]
+
+
+def _markets_open_now() -> bool:
+    """港股或美股任一在交易时段内。
+
+    刻意不 import sim_agent 复用那边的 _market_is_open：这个体检脚本是纯
+    标准库、只读数据库的独立工具，不碰富途也不加载项目的重模块——正是因为
+    这样，它在主程序出问题的时候仍然跑得起来，这是监控该有的性质。代价是
+    时段表在两处各写一份，所以两边都留了注释互相指认。
+    与 sim_agent._MARKET_HOURS 保持一致：港股 09:30-12:00 / 13:00-16:00，
+    美股 09:30-16:00，各自按本地时区，周末不开。
+    """
+    for tz_name, spans in (
+        ("Asia/Hong_Kong", ((9.5, 12.0), (13.0, 16.0))),
+        ("America/New_York", ((9.5, 16.0),)),
+    ):
+        now = datetime.now(ZoneInfo(tz_name))
+        if now.weekday() >= 5:
+            continue
+        hour = now.hour + now.minute / 60
+        if any(a <= hour <= b for a, b in spans):
+            return True
+    return False
 
 
 def _to_cn(iso: str):
@@ -142,15 +170,23 @@ def check(db_path: Path = _DB) -> list[str]:
                 f"[决策停摆] 最近连续{consec}轮失败（最新一条：{runs[0]['note']}）——决策链路实质已经停了"
             )
 
-        # 4) 停摆：最近一次运行距今太久
-        latest = _to_cn(runs[0]["run_at"])
-        if latest:
-            gap = (datetime.now(_CN_TZ) - latest).total_seconds() / 60
-            if gap > _STALE_MINUTES:
-                problems.append(
-                    f"[心跳丢失] 最近一次决策是{_fmt(runs[0]['run_at'])}，距今{gap:.0f}分钟——"
-                    f"cron是5分钟一轮，超过{_STALE_MINUTES}分钟说明脚本没被触发或每次都卡死"
-                )
+        # 4) 停摆：最近一次运行距今太久。
+        #
+        # 只在港美股任一开市时才查。休市时段没有心跳是设计如此，不是故障——
+        # 这条判据第一版没有这个前提（那时决策脚本24小时每5分钟都会写一条
+        # 跳过记录），改成事件驱动之后如果照搬，每天收盘后到次日开盘之间会
+        # 一直误报。会对正常运行报警的监控比没有监控更糟，这个坑这个文件里
+        # 已经踩过一次（见下面第5条零成交连击的注释），不能再踩第二次。
+        if _markets_open_now():
+            latest = _to_cn(runs[0]["run_at"])
+            if latest:
+                gap = (datetime.now(_CN_TZ) - latest).total_seconds() / 60
+                if gap > _STALE_MINUTES:
+                    problems.append(
+                        f"[心跳丢失] 开市时段内最近一次决策是{_fmt(runs[0]['run_at'])}，"
+                        f"距今{gap:.0f}分钟——盯盘器每2分钟一轮、保底15分钟必有一次决策，"
+                        f"超过{_STALE_MINUTES}分钟说明没被触发或每次都卡死"
+                    )
 
         # 5) 长时间零成交。
         #
