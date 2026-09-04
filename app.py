@@ -235,21 +235,28 @@ hr, [data-testid="stDivider"] hr { border: none !important; border-top: 1px soli
 .st-key-fa_nav [data-testid="stRadioOption"]:has(input:checked) p { color: var(--fa-text) !important; font-weight: 600 !important; }
 
 /* 其余位置的横向 radio（市场切换、K线周期、走势范围）统一成安静的分段控件：
-   去掉原生小圆点，做成紧凑的胶囊，选中态用墨色实底。跟下面 stButtonGroup
-   的选中态保持同一套视觉，页面上"选择一项"这件事只有一种长相。
-   顶部导航那组的规则选择器更具体（.st-key-fa_nav ...），会盖掉这里，
-   所以导航仍然是下划线标签页，不受影响。 */
-[data-testid="stRadio"] [role="radiogroup"] { gap: 5px; align-items: center; }
+   去掉原生小圆点，做成下划线标签页，跟顶部导航同一套长相。
+   2026-09-04改：原来选中态是"墨色实底+白字"的胶囊，页面上就是一块突兀的
+   黑方块，跟这套灰白克制的底子撞得厉害。整站"选择一项"这件事本来就只该有
+   一种视觉语言，而导航已经定了下划线这一种，次级选择器（市场、K线周期、
+   区间）没有理由再造第二种更重的样式——分量还压过了导航本身。
+   改成同款下划线：默认灰字无底色，选中只是字变墨色加粗、底下一条线。 */
+[data-testid="stRadio"] [role="radiogroup"] { gap: 2px; align-items: stretch; }
 [data-testid="stRadioOption"] {
-    padding: 4px 12px !important; margin: 0 !important;
-    border: 1px solid transparent !important; border-radius: var(--fa-radius-sm) !important;
-    transition: background .14s ease, color .14s ease;
+    padding: 5px 2px !important; margin: 0 14px 0 0 !important;
+    background: transparent !important;
+    border: 0 !important; border-bottom: 2px solid transparent !important;
+    border-radius: 0 !important;
+    transition: border-color .14s ease, color .14s ease;
 }
 [data-testid="stRadioOption"] > div > div > div:not([data-testid="stMarkdownContainer"]) { display: none !important; }
 [data-testid="stRadioOption"] p { font-size: 0.84rem !important; font-weight: 500 !important; color: var(--fa-muted) !important; }
-[data-testid="stRadioOption"]:hover { background: var(--fa-fill) !important; }
-[data-testid="stRadioOption"]:has(input:checked) { background: var(--fa-ink) !important; border-color: var(--fa-ink) !important; }
-[data-testid="stRadioOption"]:has(input:checked) p { color: #fff !important; }
+[data-testid="stRadioOption"]:hover { background: transparent !important; }
+[data-testid="stRadioOption"]:hover p { color: var(--fa-text-2) !important; }
+[data-testid="stRadioOption"]:has(input:checked) {
+    background: transparent !important; border-bottom-color: var(--fa-ink) !important;
+}
+[data-testid="stRadioOption"]:has(input:checked) p { color: var(--fa-text) !important; font-weight: 600 !important; }
 div[data-testid="stButtonGroup"] button, div[data-testid="stButtonGroup"] [role="radio"] {
     background: var(--fa-surface) !important; border: 1px solid var(--fa-border) !important;
     color: var(--fa-muted) !important; border-radius: var(--fa-radius-sm) !important;
