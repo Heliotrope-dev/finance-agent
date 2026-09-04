@@ -568,9 +568,27 @@ def build_macro_series_chart(series: dict) -> go.Figure:
             return f"{v/1000:.0f}k"
         return f"{v:.0f}" if float(v).is_integer() else f"{v:.1f}"
 
+    # 选柱还是选折线，看的不是"有没有市场预期"，而是这条序列本身是"水平值"
+    # 还是"增量值"。
+    #
+    # 失业率在4.1%~4.5%之间摆动，柱状图从0起画出来十几根几乎一样高的柱子，
+    # 高低差完全看不出来——图本身没起作用，读者只能去读数字，那还不如列个
+    # 表格。非农就业人数在-15.6万到+21.4万之间，有正有负、量级差好几倍，
+    # 零轴是有真实含义的分界（增员还是裁员），柱状图才对。
+    #
+    # 判据用"极差占最大值的比例"：低于25%说明这是一条在某个水平附近小幅
+    # 波动的序列（利率、失业率、通胀率这类"水位"指标），画折线并让纵轴按
+    # 数据范围自适应；超过25%说明波动本身就是主要信息（CPI同比、非农增量），
+    # 柱状图的长度对比才有意义。含负值的一律用柱——零轴的方向性不能丢。
+    _vals_all = [v for v in actual if v is not None]
+    _flat = False
+    if _vals_all:
+        _mx, _mn = max(_vals_all), min(_vals_all)
+        _flat = _mn >= 0 and _mx > 0 and (_mx - _mn) / _mx < 0.25
+
     fig = go.Figure()
 
-    if not has_predict:
+    if not has_predict or _flat:
         # 纯水平值序列：折线 + 自适应纵轴。只在首尾和极值处标数字，
         # 每个点都标会糊成一片。
         vals = [v for v in actual if v is not None]
@@ -586,7 +604,8 @@ def build_macro_series_chart(series: dict) -> go.Figure:
                 text=[_fmt(v) if i in label_idx else "" for i, v in enumerate(actual)],
                 textposition="top center",
                 textfont=dict(size=10, color=_AUX_STRONG),
-                hovertemplate="%{x}　%{y:,.2f}<extra></extra>",
+                customdata=[("无" if pv is None else _fmt(pv)) for pv in predict],
+                hovertemplate="%{x}　实际 %{y:,.2f}　预期 %{customdata}<extra></extra>",
             )
         )
         _apply_chart_theme(fig, height=230, legend=False, margin=dict(l=6, r=16, t=26, b=6))
@@ -596,27 +615,41 @@ def build_macro_series_chart(series: dict) -> go.Figure:
             fig.update_yaxes(ticksuffix="%")
         return fig
 
+    # 市场预期不再画成柱顶那道横杠。用户反馈"为啥每个柱体上面都有一个黑黑
+    # 的一条线啊去掉"——问题是CPI这类指标的预期和实际几乎总是贴在一起，那道
+    # 横杠就正好压在柱子顶端，既看不出偏离（差值太小，肉眼分不出高低），
+    # 又把数值标签划穿了（实测 Mar 2026 的"3.5%"被横杠拦腰划掉）。一个既不
+    # 提供信息又破坏可读性的图元，不如去掉。
+    # 预期值改成两种方式呈现：偏离明显时直接写进柱子上方的标签（"3.4% 预期3.1%"），
+    # 偏离可以忽略时只显示实际值；完整数字始终在悬停里。这样"超没超预期"这个
+    # 信息只在真正有偏离的那几期出现，反而更容易被注意到。
+    # 标签只写实际值，预期放进悬停。中间试过"3.4% 预期3.1%"这种把偏离直接
+    # 写进标签的做法，实际效果更糟：一屏十四根柱子，柱身本来就窄，Plotly为了
+    # 把长标签塞进柱宽会自动缩字号，缩完小到看不清，而且有偏离的和没偏离的
+    # 标签长短不一，整排看过去参差不齐。宁可标签短而统一、每个都看得清，
+    # 也不要为了多塞一个数字把所有数字都变得读不了。
     fig.add_trace(
         go.Bar(
             x=x, y=actual, name="实际值",
             marker_color=_AUX_STRONG, marker_line_width=0, opacity=0.85,
             text=[_fmt(v) for v in actual], textposition="outside",
-            textfont=dict(size=10, color=_AUX_STRONG), cliponaxis=False,
-            hovertemplate="%{x}　实际 %{y:,.2f}<extra></extra>",
+            textfont=dict(size=11, color=_AUX_STRONG), cliponaxis=False,
+            customdata=[("无" if pv is None else _fmt(pv)) for pv in predict],
+            hovertemplate="%{x}　实际 %{y:,.2f}　预期 %{customdata}<extra></extra>",
         )
     )
-    fig.add_trace(
-        go.Scatter(
-            x=x, y=predict, name="市场预期", mode="markers",
-            marker=dict(size=13, color=_CHART_INK, symbol="line-ew",
-                        line=dict(color=_CHART_INK, width=2.4)),
-            hovertemplate="%{x}　预期 %{y:,.2f}<extra></extra>",
-        )
-    )
+    # 禁止Plotly按柱宽自动缩放标签字号——柱子窄的时候它会一路缩到看不清，
+    # 而这些数字正是这张图要传达的主要内容。宁可让它挤一点也要保持可读。
+    fig.update_layout(uniformtext=dict(minsize=10, mode="show"))
     fig.update_layout(bargap=0.45)
     if is_pct:
         fig.update_yaxes(ticksuffix="%")
-    _apply_chart_theme(fig, height=250, legend=True, margin=dict(l=6, r=16, t=26, b=6))
+    # 标签写在柱子外侧，纵轴顶部留出空间，否则最高那根的标签会被裁掉
+    _vals = [v for v in actual if v is not None]
+    if _vals:
+        _lo, _hi = min(0, min(_vals)), max(_vals)
+        fig.update_yaxes(range=[_lo, _hi * 1.18 if _hi > 0 else _hi * 0.82])
+    _apply_chart_theme(fig, height=250, legend=False, margin=dict(l=6, r=16, t=26, b=6))
     return fig
 
 

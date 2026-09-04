@@ -3136,11 +3136,30 @@ def _render_macro_briefs():
                 for _i, _sr in enumerate(_series):
                     if not _sr.get("points"):
                         continue
+                    # 说明文字要跟着图的形态走。带市场预期的指标画成柱+横线，
+                    # 说明"柱子高过横线就是超预期"；没有预期数据的水平值序列
+                    # 画的是折线，那句关于柱子和横线的说明就完全对不上了——
+                    # 用户反馈"图上咋没标注我看不懂"，一部分正是这句驴唇不对
+                    # 马嘴的说明造成的。顺带把原来那句删繁就简：颜色语义已经
+                    # 去掉了，不需要再解释"跟行情涨跌无关"。
+                    # 说明要跟实际画出来的图形一致。图形选柱还是折线由
+                    # build_macro_series_chart 按序列形态决定（水平值走折线、
+                    # 增量值走柱），这里用同一套判据推一遍，避免说明和图对不上
+                    # ——之前就出现过折线图配着"柱=实际值"说明的情况。
+                    _pts = _sr["points"]
+                    _has_pred = any(pt.get("predict") is not None for pt in _pts)
+                    _vv = [p["value"] for p in _pts if p.get("value") is not None]
+                    _is_flat = bool(_vv) and min(_vv) >= 0 and max(_vv) > 0 and (max(_vv) - min(_vv)) / max(_vv) < 0.25
+                    if _has_pred and not _is_flat:
+                        _legend = "柱=实际值，悬停可看当时的市场预期"
+                    elif _has_pred:
+                        _legend = "近期走势，悬停可看当时的市场预期"
+                    else:
+                        _legend = "近期走势"
                     st.markdown(
                         f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:10px 0 2px'>"
                         f"{_esc(_sr.get('name',''))}　"
-                        f"<span style='color:var(--fa-faint)'>柱=实际值，横线=当时的市场预期；"
-                        f"柱子颜色表示相对预期是超还是不及，跟行情涨跌无关</span></div>",
+                        f"<span style='color:var(--fa-faint)'>{_legend}</span></div>",
                         unsafe_allow_html=True,
                     )
                     st.plotly_chart(
