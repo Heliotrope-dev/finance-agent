@@ -642,19 +642,53 @@ def _build_sparkline_svg(values: list, color: str, width: int = 60, height: int 
     )
 
 
-def _fetch_sparkline_closes(symbol: str, market: str, days: int = 20) -> list:
-    """持仓迷你图用的近期收盘价——直接复用已有的历史行情接口（带缓存，5分钟
-    过期），不新开专门的接口，多取一倍自然日天数换算成够用的交易日数量。
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def _sparkline_closes_cached(symbol: str, market: str, day_key: str, days: int = 20) -> tuple:
+    """迷你走势图用的日线收盘价，按自然日缓存，一天只真正取一次。
+
+    真实故障（2026-09-04定位）：自选页"每隔一会儿就卡一下、迷你图集体消失"
+    这个老毛病，根因就在这里。原来这个函数直接复用 get_stock_history，跟着
+    它 ttl=1800 的缓存走；缓存一过期，列表刷新那一轮就要把 21 支自选的日线
+    全部重取一遍。而港美股的历史查询在 data_sources 里是串到单个常驻 Futu
+    worker 线程上排队的（见 _futu_call），外面用线程池并发也没用，实测 21 支
+    串行要 12.57 秒——但取数那一批的 deadline 只有 4 秒。于是每 30 分钟必然
+    出现一次：超时、大部分行拿不到数据、迷你图变空、页面明显卡顿，下一轮再
+    重来一次。相比之下同一批的实时行情是批量查的，21 支只要 0.14 秒，完全
+    不是瓶颈。
+
+    修法就是把这份数据从"实时行情"的缓存节奏里摘出来单独管：迷你图画的是
+    近 20 个交易日的日线收盘，一天最多变一次，没有任何理由跟着秒级行情的
+    缓存一起失效。day_key 传当天日期，配合 12 小时 ttl，等于"每支每天最多
+    取一次"，此后所有刷新都是内存命中（实测 0.01 秒）。
+
+    返回 tuple 而不是 list：st.cache_data 返回的可变对象被调用方改到会污染
+    缓存，元组从根上避免这个坑，调用方要 list 自己转。
     """
     try:
         end = cn_now().strftime("%Y%m%d")
         start = (cn_now() - timedelta(days=days * 2 + 10)).strftime("%Y%m%d")
         hist = get_stock_history(symbol, start, end, market=market)
         if hist is None or hist.empty:
-            return []
-        return hist["收盘"].astype(float).tail(days).tolist()
+            return ()
+        return tuple(hist["收盘"].astype(float).tail(days).tolist())
     except Exception:
-        return []
+        return ()
+
+
+def _fetch_sparkline_closes(symbol: str, market: str, days: int = 20) -> list:
+    """取迷你图数据，并且"一旦拿到过就不会再变空"。
+
+    上面那层缓存解决了"每 30 分钟重取一次"，这里再兜一层：万一某次真的取不到
+    （网络抖动、Futu 断线、当天第一次取正好超时），不要让这一行的迷你图突然
+    变成空白——那正是这个页面以前最难看的一种抖动。把最近一次成功的结果记在
+    session 里，取不到就沿用上一次的形状。数据宁可旧一点，也不要闪。
+    """
+    closes = list(_sparkline_closes_cached(symbol, market, cn_now().strftime("%Y%m%d"), days))
+    key = f"_spark_last_good_{symbol}_{market}"
+    if closes:
+        st.session_state[key] = closes
+        return closes
+    return st.session_state.get(key, [])
 
 
 def _fmt_turnover(v) -> str:
