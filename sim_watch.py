@@ -126,7 +126,12 @@ def check() -> dict:
     prices: dict = {}
     for symbol, market, is_held in watched:
         q = quotes.get((symbol, market)) or {}
-        last = q.get("last_price")
+        # 键名是中文。data_sources._futu_snapshot_row_to_dict 把富途返回的
+        # DataFrame 转成了中文键的字典（最新价/昨收/涨跌幅…），不是原始的
+        # last_price/prev_close_price。第一版这里照着 DataFrame 的英文列名写，
+        # 取到的永远是 None——盯盘器从上线起就是瞎的，一次异动都触发不了，
+        # 只有15分钟的保底轮在跑，日志里表现为"盯盘0支无异动"。
+        last = q.get("最新价")
         if not last:
             continue
         key = f"{market}:{symbol}"
@@ -139,7 +144,7 @@ def check() -> dict:
                 reasons.append(f"{symbol}({market}) 较上次观测{jump:+.1f}%")
 
         if is_held:
-            prev_close = q.get("prev_close_price")
+            prev_close = q.get("昨收")
             if prev_close:
                 day = (last - prev_close) / prev_close * 100
                 if abs(day) >= _SWING_PCT:
