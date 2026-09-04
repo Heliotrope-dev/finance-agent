@@ -2946,9 +2946,18 @@ def _render_my_page():
             # st.button：这一页的行全是HTML div加发丝线，插一个Streamlit按钮
             # 进去会自带一套完全不同的盒模型和间距，跟上下行对不齐。链接则是
             # 把现有的div原样包起来，外观一点不变。
+            # flex 直接加在 <a> 上，里面只放两个 span，不再嵌一层 <div>。
+            # 第一版是 <a> 包一个 display:flex 的 <div>，结果整行挤成了
+            # "500001A股 · 08-22"——右对齐没了、间距也没了。Streamlit 的
+            # markdown 会把这段塞进 <p>，而浏览器遇到 <p> 里的块级 <div> 会
+            # 提前把 <p> 闭掉，<a> 和它包着的 <div> 的父子关系当场被打散，
+            # 内层的 flex 布局跟着失效。项目里别处的 *-card-link 是同一个坑
+            # （文件顶部那段CSS注释记过），这里直接不嵌块级元素来规避。
             st.markdown(
                 "<style>a.my-search-link, a.my-search-link:link, a.my-search-link:visited {"
-                "text-decoration:none !important; color:inherit !important; display:block; cursor:pointer;"
+                "text-decoration:none !important; color:inherit !important; cursor:pointer;"
+                "display:flex !important; justify-content:space-between; align-items:baseline;"
+                "padding:9px 0; border-bottom:1px solid var(--fa-border);"
                 "} a.my-search-link:hover { background: rgba(23,24,28,0.02); }</style>",
                 unsafe_allow_html=True,
             )
@@ -2962,11 +2971,9 @@ def _render_my_page():
                 )
                 st.markdown(
                     f"<a class='my-search-link' href='{_href}' target='_self'>"
-                    f"<div style='display:flex;justify-content:space-between;align-items:baseline;"
-                    f"padding:9px 0;border-bottom:1px solid var(--fa-border)'>"
                     f"<span style='color:var(--fa-text);font-size:0.9rem'>{_esc(h.get('query',''))}</span>"
                     f"<span style='color:var(--fa-faint);font-size:0.78rem'>"
-                    f"{_mk.get(h.get('market'), h.get('market') or '')} · {_when}</span></div></a>",
+                    f"{_mk.get(h.get('market'), h.get('market') or '')} · {_when}</span></a>",
                     unsafe_allow_html=True,
                 )
 
