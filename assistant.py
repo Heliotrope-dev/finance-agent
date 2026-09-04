@@ -289,6 +289,26 @@ def build_context(email: str | None) -> str:
             sim_lines.append(
                 f"  最近一次资产快照：总额约 ${_net:,.0f}（起始本金 $10,000）"
             )
+        # 模拟盘的持仓明细。实测时助手自己说了一句"持仓的具体明细我这边看不到，
+        # 只能看到现金和总额"——它诚实地承认了盲区，但这个盲区本来就不该有：
+        # 富途模拟盘的持仓一直拿得到，只是没往上下文里放。补上之后，"模拟盘
+        # 现在拿着什么、哪一支亏得最多"这类问题才答得了。
+        try:
+            import sim_trader as _st
+            _snap = _st.get_agent_snapshot()
+            _ps = _snap.get("positions") or []
+            if _ps:
+                sim_lines.append("  模拟盘当前持仓：")
+                for _p in _ps[:12]:
+                    _pl = _p.get("pl_val")
+                    _pl_txt = f"，浮动盈亏{_pl:+,.0f}{_p.get('currency','')}" if _pl is not None else ""
+                    sim_lines.append(
+                        f"    {_p.get('name')}（{_p.get('code')}）{_p.get('qty'):g}股{_pl_txt}"
+                    )
+            elif _ps == []:
+                sim_lines.append("  模拟盘当前空仓。")
+        except Exception:
+            pass
         if runs:
             sim_lines.append("  最近几次决策：")
             for r in runs:
@@ -312,6 +332,15 @@ def build_context(email: str | None) -> str:
         pass
 
     # ── 用户自己的使用记录 ──────────────────────────────────────────────
+    # 打分体系的事后实证。用户问"推荐股排行榜准不准"时，这是唯一诚实的答案
+    # 来源——不是让AI凭感觉说"仅供参考"，而是把786条回填样本算出来的结论摆出来。
+    try:
+        _ev = tracker.get_score_evidence_text()
+        if _ev:
+            parts.append(_ev)
+    except Exception:
+        pass
+
     try:
         ov = tracker.get_user_overview(email)
         _bits = [

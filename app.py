@@ -2777,8 +2777,16 @@ def _render_ai_assistant():
         "transition:background .16s ease,border-color .16s ease!important;"
         "}"
         ".st-key-ai_assistant_popover button:hover{background:#17181C!important;border-color:#17181C!important;}"
+        # 文字居中：Streamlit 按钮里的<p>自带上下 margin，加上 letter-spacing
+        # 会在右侧多出一个字距的空白，两者叠加就是"看着没居中"。这里把
+        # margin 清零、行高压到1，并用 padding-left 抵掉尾部那个字距。
         ".st-key-ai_assistant_popover button p{color:#17181C!important;font-size:.76rem!important;"
-        "font-weight:600!important;letter-spacing:.08em;transition:color .16s ease;}"
+        "font-weight:600!important;letter-spacing:.08em;line-height:1!important;"
+        "margin:0!important;padding-left:.08em;transition:color .16s ease;}"
+        ".st-key-ai_assistant_popover button>div,"
+        ".st-key-ai_assistant_popover button [data-testid='stMarkdownContainer']{"
+        "display:flex!important;align-items:center!important;justify-content:center!important;"
+        "width:100%!important;height:100%!important;}"
         ".st-key-ai_assistant_popover button:hover p{color:#fff!important;}"
         # 浮层本体：收掉Streamlit默认的厚投影和圆角，跟站内卡片同一套。
         "[data-testid='stPopoverBody']{border-radius:12px!important;"

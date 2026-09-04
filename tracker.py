@@ -1522,6 +1522,64 @@ def get_position_advice(email: str) -> dict:
         return {r["symbol"]: dict(r) for r in rows}
 
 
+def get_score_evidence_text(source: str = "watchlist") -> str:
+    """把打分体系的事后回测结果整理成一段可以直接塞进prompt的实证结论。
+
+    2026-09-04新增。起因是把打分机制拿真实数据测了一遍，结果是反直觉的：
+    786条已回填样本里，综合得分越高、7天后的表现反而越差（70-89分档平均
+    -1.06%、上涨占比30.7%；30-49分档平均-0.12%、上涨占比47.8%），单调递减。
+    拆到维度看，"价格位置安全边际"是反向最强的一维（高分组-0.88% vs
+    低分组-0.28%），"技术面确认"是唯一正向的一维（高分组-0.42% vs
+    低分组-0.74%），"数据确定性"几乎没有预测力。
+
+    刻意不去直接反转打分权重——786条样本、7天窗口、单一市场周期，照着这个
+    结果调权重很容易变成对一段行情的过拟合，而且一旦调了，下次再想评估
+    "打分到底有没有用"就失去了干净的对照。改成把这个结论如实喂给AI，让它
+    带着自己系统的历史战绩去判断：它仍然看得到原始分数，只是同时知道这个
+    分数在历史上是怎么表现的。人也随时能从这段文字看出结论有没有变。
+
+    样本不足时返回空字符串——没有证据就不要编一段"经验"出来误导它。
+    """
+    try:
+        bt = get_score_band_backtest(source=source, min_sample=5)
+        dim = get_dimension_predictive_value(source=source, min_sample=6)
+    except Exception:
+        return ""
+    total = bt.get("total_reviewed") or 0
+    if total < 100:
+        return ""
+
+    band_bits = []
+    for b in bt.get("bands", []):
+        if b.get("count") and b.get("avg_return_pct") is not None:
+            band_bits.append(
+                f"{b['band']}分档{b['count']}条平均{b['avg_return_pct']:+.2f}%、上涨占比{b['win_rate_pct']:.0f}%"
+            )
+    dim_bits = []
+    for name, d in (dim or {}).items():
+        hi, lo = (d.get("高分组") or {}), (d.get("低分组") or {})
+        if hi.get("avg_return_pct") is None or lo.get("avg_return_pct") is None:
+            continue
+        direction = "正向" if hi["avg_return_pct"] > lo["avg_return_pct"] else "反向"
+        dim_bits.append(
+            f"{name}：高分组{hi['avg_return_pct']:+.2f}% vs 低分组{lo['avg_return_pct']:+.2f}%（{direction}）"
+        )
+    if not band_bits:
+        return ""
+
+    return (
+        f"本系统打分体系的事后实证（{total}条已回填样本，7天窗口，是客观统计不是理论）：\n"
+        f"  按综合得分分档：" + "；".join(band_bits) + "\n"
+        + ("  按维度：" + "；".join(dim_bits) + "\n" if dim_bits else "")
+        + "  怎么用这段数据：综合得分高不等于后市会涨，历史上甚至是相反的，"
+          "所以不要把高分当成买入理由本身。特别注意\"价格位置安全边际\"这一维——"
+          "\"52周低位所以安全\"在这份数据上是站不住的，低位往往意味着还在下跌趋势里，"
+          "便宜不等于要涨。相对而言\"技术面确认\"是唯一表现出正向预测力的维度，"
+          "真实放量和趋势确认比\"看起来便宜\"更值得信。样本量和窗口都有限，"
+          "这不是铁律，但足以推翻\"分数越高越该买\"这个默认假设。"
+    )
+
+
 def get_user_overview(email: str) -> dict:
     """"我的"页要的那一份个人概览，一次连接里全取完。
 

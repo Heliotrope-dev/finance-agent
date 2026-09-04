@@ -861,6 +861,17 @@ def _run_cycle_locked(email: str) -> dict:
     # sim_agent_report.py每天用真实数据机械算出来的日度复盘，不是AI临时
     # 编的，见该文件头部说明。跟上面"综合战绩"(最近5次决策的短期战绩)是
     # 两个不同的时间尺度——这个是跨天的，能看到反复出现的问题模式。
+    # 打分体系的事后实证结论。2026-09-04把打分机制拿786条真实回填样本测了一遍，
+    # 结果是反直觉的：综合得分越高、7天后表现反而越差，而且"价格位置安全边际"
+    # 这一维反向最强——"52周低位所以安全"在数据上站不住。这恰好解释了这个agent
+    # 反复用"低位+温和放量"模板加仓然后亏钱的行为。把结论如实喂给它，让它带着
+    # 自己系统的历史战绩去判断，而不是继续照着一个已经被数据证伪的模板走。
+    # 见 tracker.get_score_evidence_text 里为什么选择"喂结论"而不是"改权重"。
+    try:
+        _score_evidence = tracker.get_score_evidence_text()
+    except Exception:
+        _score_evidence = ""
+
     lessons = tracker.get_sim_agent_lessons(email, limit=5)
     lessons_text = "\n".join(f"- {l['lesson_text']}" for l in lessons) if lessons else "（还没有跨天的长期复盘记录）"
 
@@ -873,6 +884,7 @@ def _run_cycle_locked(email: str) -> dict:
         f"综合战绩：{scoreboard_text}\n\n"
         f"你过去几次决策后的实际战绩（用于复盘）：\n" + "\n".join(history_lines) + "\n\n"
         f"最近几天的长期复盘记录（每天一条，跨天规律用这个找，比如同一支票反复亏钱）：\n{lessons_text}"
+        + (f"\n\n{_score_evidence}" if _score_evidence else "")
     )
 
     try:
