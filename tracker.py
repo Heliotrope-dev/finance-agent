@@ -271,6 +271,13 @@ def init_db():
         # 突然把正在运行的agent停掉。
         if "sim_agent_enabled" not in us_cols:
             c.execute("ALTER TABLE user_settings ADD COLUMN sim_agent_enabled INTEGER NOT NULL DEFAULT 1")
+        # closure_notice_date：休市公告最后一次弹出的日期（2026-09-05新增）。
+        # 这个标记必须落库，不能只放 session_state：项目里的卡片跳转全是
+        # <a href="?open_symbol=..."> 的整页导航，每跳一次就是一个新的
+        # Streamlit 会话，session_state 跟着清空，弹窗于是每点一只股票就重来
+        # 一遍——比不提醒还烦人。
+        if "closure_notice_date" not in us_cols:
+            c.execute("ALTER TABLE user_settings ADD COLUMN closure_notice_date TEXT NOT NULL DEFAULT ''")
 
         # simulated_orders：AI模拟盘每次自动下单的执行记录——富途自己的订单
         # 历史会被清理/查询接口只能看近期，这里单独留一份，让"回看"页能展示
@@ -704,6 +711,28 @@ def get_simulated_orders(email: str, limit: int = 50) -> list[dict]:
             "SELECT * FROM simulated_orders WHERE email = ? ORDER BY created_at DESC LIMIT ?", (email, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+
+def get_closure_notice_date(email: str) -> str:
+    """休市公告上次弹出的日期（YYYY-MM-DD），没弹过返回空串。"""
+    init_db()
+    with closing(_conn()) as c:
+        row = c.execute(
+            "SELECT closure_notice_date FROM user_settings WHERE email = ?", (email,)
+        ).fetchone()
+        return (row[0] if row and row[0] else "")
+
+
+def set_closure_notice_date(email: str, day: str) -> None:
+    init_db()
+    with closing(_conn()) as c:
+        c.execute(
+            "INSERT INTO user_settings (email, closure_notice_date) VALUES (?, ?) "
+            "ON CONFLICT(email) DO UPDATE SET closure_notice_date = excluded.closure_notice_date",
+            (email, day),
+        )
+        c.commit()
 
 
 def get_unnotified_orders(email: str, limit: int = 20) -> list[dict]:

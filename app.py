@@ -75,6 +75,7 @@ from tracker import (
     add_search_history, get_search_history, get_latest_leaderboard, get_user_overview,
     get_latest_macro_briefs,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
+    get_closure_notice_date, set_closure_notice_date,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
     get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
     get_equity_snapshots, get_period_pnl,
@@ -2955,9 +2956,34 @@ def _maybe_show_closure_notice():
     """
     import datetime as _dt
 
+    # 详情页不弹。项目里的卡片跳转全是 <a href="?open_symbol=..."> 的整页导航，
+    # 用户点一只股票就是一次整页刷新——如果照弹，点几只股票就要关几次弹窗，
+    # 比不提醒还烦。
+    #
+    # 判据用 session_state 里有没有详情页标记，不用 query_params：那几个
+    # open_* 参数在上游的处理块里已经被 st.query_params.clear() 清掉并
+    # rerun 过了，等执行到这里参数早就没了。第一版就是照着参数判的，结果
+    # 一点用没有，弹窗照旧每次都出来。
+    if (st.session_state.get("_detail_symbol")
+            or st.session_state.get("_index_detail_code")
+            or st.session_state.get("_sector_detail_name")):
+        return
+
     today = str(_dt.date.today())
     if st.session_state.get("_closure_notice_shown") == today:
         return
+
+    # 已登录用户把"今天弹过了"落库，这样整页刷新之后也不会重弹；游客没有
+    # email 可挂，退回只用 session_state（游客本来也不会长时间反复刷）。
+    _email = st.session_state.get("user_email")
+    if _email:
+        try:
+            if get_closure_notice_date(_email) == today:
+                st.session_state["_closure_notice_shown"] = today
+                return
+        except Exception:
+            pass
+
     try:
         items = [
             c for c in get_market_closures(days=10)
@@ -2966,6 +2992,11 @@ def _maybe_show_closure_notice():
     except Exception:
         items = []
     st.session_state["_closure_notice_shown"] = today
+    if _email:
+        try:
+            set_closure_notice_date(_email, today)
+        except Exception:
+            pass
     if items:
         _show_closure_notice(items)
 
