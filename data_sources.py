@@ -2820,3 +2820,179 @@ def get_fed_rate_path(lookback_days: int = 800) -> dict:
     if out and pts[-1]["date"] != out[-1]["date"]:
         out.append({"date": pts[-1]["date"], "value": out[-1]["value"]})
     return {"name": "美联储目标利率上限", "unit": sr.get("unit") or "PERCENT", "points": out}
+
+# 节假日名称表。富途的 request_trading_days 只返回"哪些天是交易日"，不带
+# 节日名称——休市日是拿工作日减去交易日反推出来的，反推得到日期，得不到原因。
+# 用户要求公告里写清"因为什么节假日"，所以名称只能本地维护。
+#
+# 只列到2027年初：这种表放长了必然过期，而过期的表比没有表更糟——会理直气壮
+# 地报出一个错误的节日名。查不到名称时公告照常发，只说"休市"不说原因，
+# 宁可少一句话也不要说错。
+_HOLIDAY_NAMES: dict[str, str] = {
+    # 美股
+    "2026-09-07": "劳动节", "2026-11-26": "感恩节", "2026-12-25": "圣诞节",
+    "2027-01-01": "元旦", "2026-11-27": "感恩节次日（提前收市）",
+    # 港股
+    "2026-10-01": "国庆节", "2026-10-19": "重阳节",
+    "2026-12-25 HK": "圣诞节", "2026-12-26 HK": "节礼日",
+    # A股
+    "2026-09-25": "中秋节", "2026-10-02": "国庆节", "2026-10-05": "国庆节",
+    "2026-10-06": "国庆节", "2026-10-07": "国庆节",
+}
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def get_market_closures(days: int = 30) -> list[dict]:
+    """未来 days 天内港股/美股/A股的休市安排。
+
+    返回 [{"date": "2026-09-07", "market": "US", "market_label": "美股",
+           "name": "劳动节", "half_day": False}, ...]，按日期正序。
+
+    2026-09-04新增，给首页的休市公告用。做法是拿富途的交易日清单反推：
+    request_trading_days 返回的是"这段时间里哪些天开市"，把区间内的工作日
+    减去这些天，剩下的就是节假日休市（周末本来就休，不算在内，公告里提周末
+    是废话）。这样不需要维护一张交易日历，跟着交易所的实际安排走。
+
+    trade_date_type 为 HALF 的是半日市（比如平安夜、除夕），照常开市但提前
+    收盘——这种不算休市，但值得在公告里单独提一句，所以一并返回。
+    """
+    import datetime as _dt
+
+    today = _dt.date.today()
+    end = today + _dt.timedelta(days=days)
+    out: list[dict] = []
+    for market, label, mk in (
+        ("HK", "港股", getattr(ft.TradeDateMarket, "HK", None)),
+        ("US", "美股", getattr(ft.TradeDateMarket, "US", None)),
+        ("A", "A股", getattr(ft.TradeDateMarket, "CN", None)),
+    ):
+        if mk is None:
+            continue
+        r = _futu_call(
+            lambda c, m=mk: c.request_trading_days(market=m, start=str(today), end=str(end)),
+            timeout=20, default=None,
+        )
+        if not r or r[0] != ft.RET_OK or not isinstance(r[1], list):
+            continue
+        open_days, half_days = set(), set()
+        for item in r[1]:
+            if isinstance(item, dict):
+                open_days.add(item.get("time"))
+                if str(item.get("trade_date_type")) == "HALF":
+                    half_days.add(item.get("time"))
+            else:
+                open_days.add(str(item))
+        d = today
+        while d <= end:
+            key = str(d)
+            if d.weekday() < 5:
+                if key not in open_days:
+                    out.append({
+                        "date": key, "market": market, "market_label": label,
+                        "name": _HOLIDAY_NAMES.get(f"{key} {market}") or _HOLIDAY_NAMES.get(key, ""),
+                        "half_day": False,
+                    })
+                elif key in half_days:
+                    out.append({
+                        "date": key, "market": market, "market_label": label,
+                        "name": _HOLIDAY_NAMES.get(f"{key} {market}") or _HOLIDAY_NAMES.get(key, ""),
+                        "half_day": True,
+                    })
+            d += _dt.timedelta(days=1)
+    out.sort(key=lambda x: (x["date"], x["market"]))
+    return out
+
+@st.cache_data(ttl=3 * 3600, show_spinner=False)
+def get_economic_events(days: int = 14, min_star: str = "MEDIUM") -> list[dict]:
+    """未来 days 天的经济数据日历。返回 [{date,time,title,country,star,previous,consensus,actual}]。
+
+    2026-09-04新增。首页的宏观专区讲的全是"已经公布的数据是多少"，但对做决策
+    的人来说，"接下来哪天要公布什么"同样重要——非农和CPI公布当天的波动往往比
+    数据本身更值得提前知道。富途的 get_economic_calendar 直接给了这份日程，
+    还带重要性星级和市场一致预期。
+
+    默认过滤掉 LOW 重要性：这个接口一次能返回上百条，其中大量是"某周某某央行
+    持有美债"这类没人交易的边角数据，全列出来会把真正要看的非农、CPI、议息
+    淹掉。宁可少列几条也要保证列出来的每一条都值得看一眼。
+    """
+    import datetime as _dt
+
+    today = _dt.date.today()
+    end = today + _dt.timedelta(days=days)
+    r = _futu_call(
+        lambda c: c.get_economic_calendar(
+            begin_date=str(today), end_date=str(end), market_list=[ft.Market.US],
+        ),
+        timeout=20, default=None,
+    )
+    if not r or r[0] != ft.RET_OK or r[1] is None or not hasattr(r[1], "iterrows"):
+        return []
+    order = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+    floor = order.get(min_star, 2)
+    out = []
+    for _, row in r[1].iterrows():
+        star = str(row.get("star") or "")
+        if order.get(star, 0) < floor:
+            continue
+        ts = row.get("timestamp")
+        try:
+            dt = _dt.datetime.fromtimestamp(float(ts), _CN_TZ) if ts else None
+        except Exception:
+            dt = None
+        out.append({
+            "date": dt.strftime("%m-%d") if dt else "",
+            "time": dt.strftime("%H:%M") if dt else "",
+            "sort_key": float(ts) if ts else 0,
+            "title": str(row.get("title") or ""),
+            "country": str(row.get("country") or ""),
+            "star": star,
+            "previous": str(row.get("previous") or ""),
+            "consensus": str(row.get("consensus") or ""),
+            "actual": str(row.get("actual") or ""),
+        })
+    # 未公布的排前面，已公布的排后面各自按时间正序。
+    #
+    # 第一版只按时间排，结果整个列表被"今天"占满——非农日一天就有十几条数据
+    # 公布，截前12条全是今天已经出完的，而这个模块存在的意义恰恰是"接下来
+    # 要发生什么"。已公布的数值不是没用（可以看今天市场在消化什么），但它是
+    # 背景，不该把待公布的挤出屏幕。
+    now_ts = datetime.now(_CN_TZ).timestamp()
+    for e in out:
+        e["upcoming"] = not e["actual"].strip() and e["sort_key"] > now_ts
+    out.sort(key=lambda x: (not x["upcoming"], x["sort_key"] if x["upcoming"] else -x["sort_key"]))
+    return out
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_rating_changes(market: str = "US", limit: int = 12) -> list[dict]:
+    """分析师评级变动（含目标价调整）。
+
+    2026-09-04新增。这是本项目里少有的"外部专业意见的变化"信号——已有的
+    分析师一致预期是个静态数字，而"某某机构把目标价从450上调到530"是一个
+    带方向和时间的事件，跟盘面异动能对上。
+    """
+    mk = getattr(ft.Market, market, None)
+    if mk is None:
+        return []
+    r = _futu_call(lambda c: c.get_rating_change(market=mk), timeout=20, default=None)
+    if not r or r[0] != ft.RET_OK or r[1] is None or not hasattr(r[1], "iterrows"):
+        return []
+    out = []
+    for _, row in r[1].iterrows():
+        tp, ltp = row.get("target_price"), row.get("last_target_price")
+        try:
+            tp, ltp = float(tp), float(ltp)
+        except Exception:
+            tp = ltp = None
+        out.append({
+            "symbol": str(row.get("security") or "").split(".")[-1],
+            "name": str(row.get("name") or ""),
+            "rating": str(row.get("rating") or ""),
+            "last_rating": str(row.get("last_rating") or ""),
+            "change_type": str(row.get("change_type") or ""),
+            "institution": str(row.get("institution_name") or ""),
+            "target_price": tp,
+            "last_target_price": ltp,
+            "target_pct": ((tp - ltp) / ltp * 100) if (tp and ltp) else None,
+        })
+    return out[:limit]

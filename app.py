@@ -13,6 +13,9 @@ import streamlit.components.v1 as _cv1
 from datetime import datetime, timedelta, timezone
 
 from data_sources import (
+    get_market_closures,
+    get_economic_events,
+    get_rating_changes,
     cn_now,
     _MULTI_INDICES,
     get_stock_kline_futu,
@@ -456,9 +459,9 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 [class*="st-key-sim_run_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
 
 /* "我的"页底部"关于"里的两个折叠面板。默认是白底圆角带框的盒子，跟同一页
-   上面那些发丝线分隔的行（最近搜索、偏好）完全不是一套，在页尾突兀地冒出
+   上面那些发丝线分隔的行（最近搜索那几行）完全不是一套，在页尾突兀地冒出
    两个白盒子。这里把它们压成跟上面一模一样的行：无边框无底色、下面一条
-   发丝线、标签字号字色跟"偏好"那几行对齐，点开才展开正文。 */
+   发丝线、标签字号字色跟"最近搜索"那几行对齐，点开才展开正文。 */
 [class*="st-key-my_about_"] [data-testid="stExpander"] details {
     border: none !important; background: transparent !important; border-radius: 0 !important;
     border-bottom: 1px solid var(--fa-border) !important;
@@ -2697,7 +2700,7 @@ def _render_app_guide():
     """应用指南。2026-09-04侧边栏整个撤掉，这块挪到"我的"分区，正文原样保留。
 
     外面包一层带key的容器：这两个折叠面板原来还是Streamlit默认的白底圆角带框
-    样式，跟同一页上面那些发丝线分隔的行（最近搜索、偏好）不是一套东西，
+    样式，跟同一页上面那些发丝线分隔的行（最近搜索那几行）不是一套东西，
     在"我的"这一页底部突兀地冒出两个白盒子。靠这个key在CSS里把它们压成
     跟上面完全一致的行。
     """
@@ -2780,8 +2783,57 @@ def _render_data_source_health():
             st.caption("暂无兜底数据源失败记录。")
 
 
+@st.dialog("休市公告")
+def _show_closure_notice(items: list[dict]):
+    """开市安排有变时的一次性公告。
+
+    2026-09-04用户要求："如果港股A股美股有特殊节假日休假，在前一天我们点进
+    网页的时候触发弹窗公告，几月几号什么股因为什么节假日休市"。
+
+    只在"临近"时弹：默认看未来3天。提前太久没有行动价值（十月的假期九月初
+    天天弹只会让人学会闭眼点掉），太晚又失去提醒意义。周末不算休市，公告里
+    提周末是废话——休市日是拿工作日减去交易日反推的，天然不含周末。
+    """
+    for it in items:
+        _reason = f"（{it['name']}）" if it.get("name") else ""
+        _what = "提前收市" if it.get("half_day") else "休市"
+        st.markdown(
+            f"<div style='padding:10px 0;border-bottom:1px solid var(--fa-border)'>"
+            f"<div style='font-size:0.95rem;color:var(--fa-text);font-weight:600'>"
+            f"{_esc(it['date'])}　{_esc(it['market_label'])}{_what}{_esc(_reason)}</div></div>",
+            unsafe_allow_html=True,
+        )
+    st.caption("休市期间该市场不接受委托，AI 模拟盘也不会在这些日子里做决策。")
+    if st.button("知道了", type="primary", use_container_width=True, key="_closure_ack"):
+        st.rerun()
+
+
+def _maybe_show_closure_notice():
+    """判断要不要弹休市公告。每个会话每天最多弹一次。
+
+    刻意用 session_state 而不是落库：这是个提示性弹窗，弹多一次的代价只是
+    多点一下，为它建表、写读、清理反而是过度设计。同一天内刷新页面不会重复
+    打扰，换一天或换个会话再提醒一次，正好合适。
+    """
+    import datetime as _dt
+
+    today = str(_dt.date.today())
+    if st.session_state.get("_closure_notice_shown") == today:
+        return
+    try:
+        items = [
+            c for c in get_market_closures(days=10)
+            if (_dt.date.fromisoformat(c["date"]) - _dt.date.today()).days <= 3
+        ]
+    except Exception:
+        items = []
+    st.session_state["_closure_notice_shown"] = today
+    if items:
+        _show_closure_notice(items)
+
+
 def _render_my_page():
-    """"我的"——账户、个人记录、偏好、指南、数据源状态。
+    """"我的"——账户、个人记录、指南、数据源状态。
 
     2026-09-04新增，同时把左侧边栏整个撤掉。原来侧边栏里只有三个折叠面板加一个
     退出按钮，却在每一屏都占掉两百多像素的宽度；而它装的东西（账户、历史回看
@@ -2977,23 +3029,6 @@ def _render_my_page():
                     unsafe_allow_html=True,
                 )
 
-        # ── 偏好 ────────────────────────────────────────────────────────
-        st.markdown("**偏好**")
-        _cap = ov.get("max_capital_cny")
-        _prefs = [
-            ("AI 模拟交易", "已开启" if ov.get("ai_sim_trading") else "已关闭"),
-            ("AI 自主决策循环", "已开启" if ov.get("sim_agent_enabled") else "已关闭"),
-            ("组合分析资金上限", f"¥{_cap:,.0f}" if _cap else "未设置"),
-        ]
-        for k, v in _prefs:
-            st.markdown(
-                f"<div style='display:flex;justify-content:space-between;align-items:baseline;"
-                f"padding:9px 0;border-bottom:1px solid var(--fa-border)'>"
-                f"<span style='color:var(--fa-text-2);font-size:0.88rem'>{k}</span>"
-                f"<span style='color:var(--fa-text);font-size:0.88rem'>{v}</span></div>",
-                unsafe_allow_html=True,
-            )
-
     # ── 指南与数据源（登录与否都能看）─────────────────────────────────
     st.markdown("**关于**")
     _render_app_guide()
@@ -3145,6 +3180,94 @@ def _render_ai_assistant():
 
 
 _MACRO_SECTIONS = ("一句话结论", "现状", "影响", "盯什么")
+
+
+@st.fragment
+def _render_event_calendar():
+    """财经日历——接下来几天要公布什么数据、有哪些评级变动。
+
+    2026-09-04新增。这个项目原本只回答"发生了什么"：行情是已成交的价格，
+    宏观专区是已公布的数据，AI判断是基于已有信息的结论。唯独缺"接下来要
+    发生什么"，而对做决策的人来说这恰恰最可操作——知道周四晚上有CPI，
+    今天就不会在周三满仓押一个方向。
+
+    做成 fragment：这两份数据的刷新节奏（3小时/6小时）跟首页其余内容完全
+    不同，混在一起会让整个首页跟着它一起重跑。
+    """
+    try:
+        events = get_economic_events(days=14)
+    except Exception:
+        events = []
+    try:
+        ratings = get_rating_changes("US")
+    except Exception:
+        ratings = []
+    if not events and not ratings:
+        return
+
+    st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
+    st.markdown("**财经日历**")
+
+    if events:
+        st.markdown(
+            "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 8px'>"
+            "未来两周的重要经济数据　待公布的排在前面，已公布的带实际值</div>",
+            unsafe_allow_html=True,
+        )
+        _star_text = {"HIGH": "高", "MEDIUM": "中"}
+        for e in events[:12]:
+            _actual = e["actual"].strip()
+            # 已公布 vs 待公布用不同的视觉重量：待公布的是"要盯的事"，
+            # 已公布的只是背景，把已公布的压暗，让待公布的自己浮出来。
+            _done = not e.get("upcoming", not _actual)
+            _main_color = "var(--fa-faint)" if _done else "var(--fa-text)"
+            _right = (
+                f"实际 {_esc(_actual)}" if _done
+                else (f"预期 {_esc(e['consensus'])}" if e["consensus"].strip() else "待公布")
+            )
+            st.markdown(
+                f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
+                f"border-bottom:1px solid var(--fa-border)'>"
+                f"<span style='color:var(--fa-faint);font-size:0.78rem;min-width:76px'>"
+                f"{_esc(e['date'])} {_esc(e['time'])}</span>"
+                f"<span style='flex:1;color:{_main_color};font-size:0.86rem'>{_esc(e['title'])}</span>"
+                f"<span style='color:var(--fa-faint);font-size:0.74rem'>"
+                f"{_star_text.get(e['star'], '')}</span>"
+                f"<span style='color:var(--fa-text-2);font-size:0.8rem;min-width:96px;text-align:right'>"
+                f"{_right}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+    if ratings:
+        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 8px'>"
+            "分析师评级与目标价变动（美股）</div>",
+            unsafe_allow_html=True,
+        )
+        _ct = {"UPGRADE": "上调", "DOWNGRADE": "下调", "MAINTAIN": "维持", "INIT": "首次覆盖"}
+        for r in ratings:
+            _c = UP_COLOR if r["change_type"] == "UPGRADE" else (
+                DOWN_COLOR if r["change_type"] == "DOWNGRADE" else "var(--fa-muted)")
+            _tp = ""
+            if r["target_price"]:
+                _tp = f"目标价 {r['target_price']:,.0f}"
+                if r["target_pct"] is not None and abs(r["target_pct"]) >= 0.5:
+                    _tp += f"（{r['target_pct']:+.0f}%）"
+            st.markdown(
+                f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
+                f"border-bottom:1px solid var(--fa-border)'>"
+                f"<span style='flex:2;color:var(--fa-text);font-size:0.86rem'>"
+                f"{_esc(r['name'])}<span style='color:var(--fa-faint);font-size:0.78rem'> "
+                f"{_esc(r['symbol'])}</span></span>"
+                f"<span style='flex:1.4;color:var(--fa-faint);font-size:0.78rem'>"
+                f"{_esc(r['institution'])}</span>"
+                f"<span style='color:{_c};font-size:0.82rem;min-width:44px'>"
+                f"{_ct.get(r['change_type'], r['change_type'])}</span>"
+                f"<span style='color:var(--fa-text-2);font-size:0.8rem;min-width:132px;text-align:right'>"
+                f"{_tp}</span></div>",
+                unsafe_allow_html=True,
+            )
 
 
 def _render_macro_briefs():
@@ -3319,6 +3442,7 @@ def _render_home_page():
 
     st.divider()
     _render_macro_briefs()
+    _render_event_calendar()
 
     st.divider()
     _render_advice_section()
@@ -5269,6 +5393,11 @@ def _show_compare_dialog(positions: list):
     if cached and cached["params"] == (tuple(picked_labels), period_label):
         st.plotly_chart(build_multi_comparison(cached["hist_by_name"]), use_container_width=True, config=_PLOTLY_CONFIG)
 
+
+# 休市公告放在页面主体渲染之前：st.dialog 是模态弹窗，先弹出来再渲染下面的
+# 内容，用户一进站就看到，不用等整页数据加载完。放在详情页分支之前也意味着
+# 从卡片点进详情页时同样会提示——休市信息跟当前看哪一页无关。
+_maybe_show_closure_notice()
 
 _page_slot = st.empty()
 
