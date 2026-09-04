@@ -60,7 +60,11 @@ _VIRTUAL_BUDGET_HKD = 78_000
 # 拿真实Futu数据核对发现那支票当天量比只有0.8（低于日均量），"活跃"是编的，
 # 手上压根没有能验证"活不活跃"的数字。现在给了真数据，AI再说"活跃"就该是
 # 从这两个数字看出来的，不是凭感觉。
-_CANDIDATES_PER_MARKET = 8
+# 8 -> 18（2026-09-04，用户要求"股票可以买所有港股美股，不限于那几只"）。
+# 原来每个市场只给8支，AI每天面对的其实是一个很窄的池子，"不限于候选"这句话
+# 写在提示词里但落不了地——没有数据的标的它按规矩不能编，等于只能在这8支里选。
+# 扩到18之后配合下面改成批量取价，整体耗时反而比原来逐支查更短。
+_CANDIDATES_PER_MARKET = 18
 
 # 2026-09-02用户明确要求"不要全部都是股票，债券期货大宗商品啥的etf让他
 # 合理配置"——个股候选池(_build_candidates里那部分)天然只会挑到当天热门
@@ -143,13 +147,50 @@ def _build_candidates(open_markets: list[str]) -> list[dict]:
         if it["market"] in open_markets:
             by_market.setdefault(it["market"], []).append(it)
 
-    candidates = []
+    # 把用户自己的自选股也并进候选池——它们是这个人真正在看的标的，比纯粹的
+    # 当日涨跌幅榜更贴近他的关注面，而且这条链路本来就有现成的数据。这也是
+    # 把"自选"这个人肉筛选过的池子接进自动决策的一处生态联动。
+    try:
+        for _p in tracker.get_positions(advisor._EMAIL):
+            _m = _p.get("market")
+            if _m in open_markets:
+                by_market.setdefault(_m, []).append({"symbol": _p["symbol"], "name": _p.get("name")})
+    except Exception:
+        pass
+
+    # 逐支 get_stock_realtime 改成整批一次查。港美股的行情查询都排在同一个
+    # 常驻 Futu worker 上串行执行，逐支查时候选池一扩容耗时就线性上涨；
+    # get_stock_realtime_futu_batch 不管清单多长都只占一次调用额度（这个函数
+    # 本身就是2026-09-01为了修自选页撞限流而加的）。改完之后池子从8扩到18
+    # 反而比原来更快。
+    picked: dict[str, list[dict]] = {}
     for market in open_markets:
-        for it in by_market.get(market, [])[:_CANDIDATES_PER_MARKET]:
-            try:
-                spot = ds.get_stock_realtime(it["symbol"], market=market)
-            except Exception:
-                spot = None
+        seen, out = set(), []
+        for it in by_market.get(market, []):
+            if it["symbol"] in seen:
+                continue
+            seen.add(it["symbol"])
+            out.append(it)
+            if len(out) >= _CANDIDATES_PER_MARKET:
+                break
+        picked[market] = out
+
+    _batch_items = [(it["symbol"], m) for m, lst in picked.items() for it in lst if m in ("HK", "US")]
+    try:
+        _quotes = ds.get_stock_realtime_futu_batch(_batch_items) if _batch_items else {}
+    except Exception:
+        _quotes = {}
+
+    candidates = []
+    for market, lst in picked.items():
+        for it in lst:
+            spot = _quotes.get((it["symbol"], market))
+            if not spot:
+                # A股不走批量接口；港美股批量里漏掉的（停牌/快照没返回）退回单查。
+                try:
+                    spot = ds.get_stock_realtime(it["symbol"], market=market)
+                except Exception:
+                    spot = None
             if not spot or not spot.get("最新价"):
                 continue
             candidates.append({
@@ -533,14 +574,37 @@ TLT/IEF这类国债ETF、GLD/USO这类大宗商品ETF、SPY/QQQ/02800这类宽�
 直接放弃，要么把仓位压得比平时更小、止损设得比平时更紧，不能因为量比数字好看就当成
 和"低位+温和放量"同一个风险等级来处理。
 
-第四步·持仓复核与止损——买新的之前，先把"当前持仓"里每一支现有仓位过一遍，看浮动盈亏。
+第四步·持仓复核（卖出侧）——这一步跟"买什么"同等重要，不是买入前的走过场。每一轮都要
+先把"当前持仓"里每一支过一遍，用的是跟候选股完全同一套标准（位置/估值/动能），因为
+你拿到的持仓数据里同样有今日涨跌幅、量比、换手率、52周位置、PE和投研顾问结论。
+一个仓位继续留着，必须是"现在重新看还愿意买"，而不是"当初买了就先放着"。
+
+明确的卖出触发条件，命中任意一条就应该认真考虑卖出，而不是默认持有：
+- 止盈：这支已经兑现了当初设想的空间（比如浮盈已经明显、或者价格从低位区间涨到了
+  52周位置的中高区（60%以上）、估值不再便宜），继续拿着是在赌延续而不是赌修复。
+  账上现金紧张、有更好的机会买不进去时，先卖掉这类"已经赚到该赚的那一段"的仓位。
+- 逻辑证伪：当初买它的理由不成立了（判断的"放量"变成缩量走弱、突破变成假突破、
+  投研顾问从买入/持有转成卖出）。
+- 止损：放量跌破买入时设想的关键位。
+- 换仓：候选里出现明显更好的机会，但现金不够——那就卖掉手里最弱的一支去换。
+  资金是有限的，"不卖就等于放弃所有新机会"，不动本身也是一种代价。
+- 集中度：某一支累计占比过高，即使它还不错也该减一部分。
+
+不要只在亏钱的时候才想起卖出。一个只会买不会卖的账户，现金会被慢慢耗光，最后既没有
+子弹抓新机会，也没有兑现过任何一次判断正确——这是比亏损更隐蔽的失败方式。
+
+同时切记不要追涨杀跌：追涨指的是一支股票已经涨了一大截、你没有等到真正的确认信号（放量、
+突破关键位）就因为"怕错过"冲进去；杀跌指的是仅仅因为价格一时下跌就恐慌性抛售，没有
+真正判断这是不是短期正常波动。这两个都是要避免的散户式冲动反应。
 切记不要追涨杀跌：追涨指的是一支股票已经涨了一大截、你没有等到真正的确认信号（放量、
 突破关键位）就因为"怕错过"冲进去；杀跌指的是仅仅因为价格一时下跌就恐慌性抛售，没有
 真正判断这是不是短期正常波动。这两个都是要避免的散户式冲动反应。但止损不是杀跌——如果
 一支持仓明显在验证你当初的判断是错的（比如放量跌破买入时设想的关键位、或者当初买入的
 理由本身已经被证伪，比如原本判断的"放量"现在变成了缩量走弱），就应该果断卖出锁定亏损，
 不能因为"已经跌了不甘心""再等等说不定会涨回来"就一直拖着装死——那才是真正伤害账户的
-行为，纪律性止损跟情绪化杀跌是两回事，前者是理性执行、后者是恐慌反应。
+行为，纪律性止损跟情绪化杀跌是两回事，前者是理性执行、后者是恐慌反应。同样地，
+纪律性止盈跟"拿不住"也是两回事：按事先设想的空间兑现是执行纪律，一有浮盈就慌忙落袋
+才是拿不住。
 
 第五步·仓位与风险控制（新买入）——单笔买入不能一口气用掉可用额度的大头（原则上不超过
 还剩额度的30-40%），一次判断错了不该伤筋动骨；候选股再有吸引力也不能全仓押单一标的。
@@ -680,10 +744,50 @@ def _run_cycle_locked(email: str) -> dict:
     scoreboard_text = _performance_scoreboard(email, holdings_value_hkd)
     history_lines = _history_context_lines(email, holdings_value_hkd)
 
+    # 持仓补上跟候选股同一套行情数据。
+    #
+    # 真实故障(2026-09-04，用户反馈"这个AI只会买进不会卖出")：查下来近30轮
+    # 信号是 买入24 / 卖出2，严重偏买。但根因不是"AI性格保守"，是信息不对等——
+    # 候选股给了现价/涨跌幅/量比/换手率/52周位置/PE/PB 七项，而持仓这边原来
+    # 只有一行"持有N股，浮动盈亏X"。SOP里第四步要求"对每一支持仓过一遍位置/
+    # 估值/动能/止损"，可它手上根本没有这些数字，这一步实际上无法执行，于是
+    # 只能对着数据齐全的候选股下手。给它同样的数据，卖出侧才谈得上判断。
+    # 用批量接口一次查完（港美股各一次调用），不按支逐个查。
+    _hold_items = [
+        (_symbol_from_code(p.get("code", "")), p.get("market"))
+        for p in snapshot["positions"] if p.get("market") in ("HK", "US")
+    ]
+    try:
+        import data_sources as _ds
+        _hold_quotes = _ds.get_stock_realtime_futu_batch(_hold_items) if _hold_items else {}
+    except Exception:
+        _hold_quotes = {}
+
     holdings_lines = []
     for p in snapshot["positions"]:
         pl_text = f"{p['pl_val']:+,.0f} {p['currency']}" if p.get("pl_val") is not None else "（浮盈亏未知）"
-        holdings_lines.append(f"- {p['name']}（{p['code']}）：持有{p['qty']:g}股，浮动盈亏{pl_text}")
+        _sym = _symbol_from_code(p.get("code", ""))
+        q = _hold_quotes.get((_sym, p.get("market"))) or {}
+        extra = []
+        if q.get("涨跌幅") is not None:
+            extra.append(f"今日{q['涨跌幅']:+.2f}%")
+        if q.get("量比") is not None:
+            extra.append(f"量比{q['量比']:.2f}")
+        if q.get("换手率") is not None:
+            extra.append(f"换手率{q['换手率']:.2f}%")
+        _hi, _lo, _px = q.get("52周最高"), q.get("52周最低"), q.get("最新价")
+        if _hi and _lo and _px and _hi > _lo:
+            extra.append(f"52周位置{(_px - _lo) / (_hi - _lo) * 100:.0f}%")
+        if q.get("PE_TTM") is not None:
+            extra.append(f"PE(TTM){q['PE_TTM']:.1f}")
+        adv_h = advice_map.get((_sym, p.get("market")))
+        if adv_h and adv_h.get("action"):
+            _sc = f"/{adv_h['score']}分" if adv_h.get("score") is not None else ""
+            extra.append(f"投研顾问结论：{adv_h['action']}{_sc}")
+        tail = ("，" + "，".join(extra)) if extra else ""
+        holdings_lines.append(
+            f"- {p['name']}（{p['code']}）：持有{p['qty']:g}股，浮动盈亏{pl_text}{tail}"
+        )
     holdings_text = "\n".join(holdings_lines) if holdings_lines else "（当前空仓）"
 
     # 预算文案给AI看的是"虚拟额度"，不是账户里真实躺着的港股/美股各百万

@@ -387,6 +387,22 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
     background: var(--fa-fill) !important; border-color: transparent !important; color: var(--fa-text) !important;
 }
 
+/* AI每次决策记录。一屏五到三十条，每条都是一个带边框的白盒子时，方框本身
+   就成了这一段最主要的视觉噪声。压成跟全站其它列表一样的发丝线分隔行。 */
+[class*="st-key-sim_run_"] [data-testid="stExpander"] details {
+    border: none !important; background: transparent !important; border-radius: 0 !important;
+    border-bottom: 1px solid var(--fa-border) !important;
+}
+[class*="st-key-sim_run_"] [data-testid="stExpander"] summary {
+    padding: 10px 0 !important; background: transparent !important; border-radius: 0 !important;
+}
+[class*="st-key-sim_run_"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
+[class*="st-key-sim_run_"] [data-testid="stExpander"] summary p {
+    font-size: 0.84rem !important; color: var(--fa-text-2) !important; font-weight: 400 !important;
+}
+[class*="st-key-sim_run_"] [data-testid="stExpander"] summary:hover p { color: var(--fa-text) !important; }
+[class*="st-key-sim_run_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
+
 /* "我的"页底部"关于"里的两个折叠面板。默认是白底圆角带框的盒子，跟同一页
    上面那些发丝线分隔的行（最近搜索、偏好）完全不是一套，在页尾突兀地冒出
    两个白盒子。这里把它们压成跟上面一模一样的行：无边框无底色、下面一条
@@ -3560,7 +3576,9 @@ def _render_ai_sim_dashboard():
         for r in visible_runs:
             when = _to_cn_time_str(r.get("run_at"))
             title = f"{when} · {r['status']}" + (f" · {r['note']}" if r.get("note") else "")
-            with st.expander(title):
+            # 决策记录同样压成发丝线分隔的行，不再是一摞带边框的白盒子——
+            # 这里一屏能有五到三十条，方框叠方框是这一段最主要的视觉噪声。
+            with st.container(key=f"sim_run_{r.get('run_at','')}"), st.expander(title):
                 if r.get("reasoning_text"):
                     st.markdown(_esc(r["reasoning_text"]).replace("\n", "<br>"), unsafe_allow_html=True)
                 try:
