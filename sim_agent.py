@@ -90,12 +90,22 @@ _DIVERSIFIER_ETFS: dict[str, list[tuple[str, str, str]]] = {
         ("TLT", "美国20年期以上国债ETF", "债券"),
         ("IEF", "美国7-10年期国债ETF", "债券"),
         ("GLD", "黄金ETF", "大宗商品"),
+        ("SLV", "白银ETF", "大宗商品"),
         ("USO", "原油ETF", "大宗商品"),
+        ("DBC", "综合大宗商品ETF", "大宗商品"),
+        # 虚拟货币敞口（2026-09-04用户要求把加密资产也纳入考量）。模拟
+        # 账户不能直接买币，但现货比特币/以太坊ETF是在美股挂牌的普通证券，
+        # 下单路径跟买股票完全一样，这是这个账户能拿到加密敞口的唯一方式。
+        ("IBIT", "贝莱德现货比特币ETF", "虚拟货币"),
+        ("ETHA", "贝莱德现货以太坊ETF", "虚拟货币"),
         ("SPY", "标普500指数ETF", "宽基指数"),
         ("QQQ", "纳斯达克100指数ETF", "宽基指数"),
+        ("IWM", "罗素2000小盘股ETF", "宽基指数"),
     ],
     "HK": [
         ("02800", "盈富基金(追踪恒生指数)", "宽基指数"),
+        ("03033", "南方恒生科技ETF", "宽基指数"),
+        ("02840", "SPDR黄金ETF(港股)", "大宗商品"),
     ],
 }
 
@@ -133,6 +143,40 @@ def _market_is_open(market: str) -> bool:
 
 def _open_markets() -> list[str]:
     return [m for m in _AGENT_MARKETS if _market_is_open(m)]
+
+
+def _macro_context_text() -> str:
+    """把首页宏观专区那四篇简报压缩成决策用的几行方向性判断。
+
+    只抽每篇的"一句话结论"。完整简报是给人读的，有现状/影响/盯什么几段，
+    四篇加起来一千多字；决策循环需要的是"利率往哪走、通胀是升是降、就业
+    强不强"这种方向，把完整论证塞进prompt只会稀释真正要看的持仓和候选数据。
+
+    取不到就返回一句说明，不抛异常——宏观是加分项，不该因为它让整轮决策失败。
+    """
+    try:
+        briefs = tracker.get_latest_macro_briefs()
+    except Exception:
+        return "（宏观简报暂时读不到）"
+    if not briefs:
+        return "（还没有生成宏观简报）"
+
+    lines = []
+    for b in briefs:
+        body = (b.get("brief_text") or "").strip()
+        if not body:
+            continue
+        first = ""
+        for seg in body.splitlines():
+            seg = seg.strip()
+            if seg.startswith("一句话结论"):
+                first = seg.split("：", 1)[-1].split(":", 1)[-1].strip()
+                break
+        if not first:
+            first = body.splitlines()[0][:80]
+        title = (b.get("title") or b.get("topic") or "").strip()
+        lines.append(f"- {title}：{first}")
+    return "\n".join(lines) if lines else "（宏观简报内容为空）"
 
 
 def _build_candidates(open_markets: list[str]) -> list[dict]:
@@ -522,6 +566,19 @@ _AGENT_SYSTEM = f"""你是一个正在用虚拟资金自主管理富途模拟盘
 - 它是收盘后算的，看不到今天盘中发生的事，所以它不是命令，只是一份更厚的参考。它没有覆盖
   的标的（大多数候选都没有）就是没有这条信息，不要因为缺这条就默认它是负面的。
 
+关于"当前宏观环境"这一条：你会看到美联储/通胀/就业/中国政策四个议题各一句方向性结论，
+来自本系统每天两次抓取真实数据后生成的宏观简报。用户明确要求你"结合这些综合考量，不仅仅是
+分析该家公司的股票"。具体怎么用：
+- 它决定的是仓位的整体倾向和板块偏好，不是替代个股判断。利率往下走通常利好成长股和长久期
+  资产（科技、生物科技、长债ETF），利率往上走则相反，防御资产和现金更占优；通胀超预期利好
+  黄金和大宗商品ETF；就业明显走弱要警惕的是经济衰退，而不是简单地"降息利好"。
+- 宏观和个股冲突时以个股为主、宏观为辅：宏观说不上什么时候兑现，个股的盘面和估值是当下就
+  能验证的。宏观的作用是让你在同等条件下偏向哪一边，以及决定要不要留更多现金。
+- 你的候选清单里除了个股，还有一批跨资产ETF（债券、大宗商品、虚拟货币、宽基指数），标了
+  "类别"。它们存在的意义就是让你在判断宏观转向时有对应的表达工具——看空股市就减仓个股加
+  国债ETF，看多通胀就加黄金，看好加密周期就用比特币/以太坊ETF表达，而不是只能在个股里
+  打转。这些ETF跟个股一样要走下面完整的SOP，不能因为是ETF就跳过检查。
+
 用户明确要求"写一个完整的SOP，覆盖专家应该看的数据维度，全面思考周到再做决定"——下面
 这套流程是这个测试场景里明确要求你遵守的标准作业程序（不是建议，是硬性要求），对候选股
 清单里每一个你认真考虑的标的，都按这个顺序过一遍，而不是只看涨跌幅一个维度就下判断：
@@ -872,6 +929,15 @@ def _run_cycle_locked(email: str) -> dict:
     except Exception:
         _score_evidence = ""
 
+    # 宏观环境（2026-09-04用户要求"结合美联储、CPI这些综合考量，不仅仅是
+    # 分析该家公司的股票"）。macro_brief.py每天两次把美联储/通胀/就业/中国
+    # 政策四个议题的数据和解读写进库，这里直接取现成的结论喂给决策——不额外
+    # 触发任何AI调用，也不会因为取数失败就让整轮决策挂掉。
+    # 只取"一句话结论"那一段：完整简报每篇三四百字，四篇一千多字会把prompt
+    # 撑得很长，而决策真正需要的是方向性判断（利率往哪走、通胀是升是降），
+    # 不是完整论证过程。
+    macro_text = _macro_context_text()
+
     lessons = tracker.get_sim_agent_lessons(email, limit=5)
     lessons_text = "\n".join(f"- {l['lesson_text']}" for l in lessons) if lessons else "（还没有跨天的长期复盘记录）"
 
@@ -881,6 +947,7 @@ def _run_cycle_locked(email: str) -> dict:
         f"当前持仓：\n{holdings_text}\n\n"
         f"候选股行情（仅供参考，也可以选择不在这些里面操作，只要是当前开盘市场的股票都可以）：\n{candidates_text}\n\n"
         f"今日候选股整体涨跌情况：{breadth_text}\n\n"
+        f"当前宏观环境（做多空判断时要结合这个，不能只看个股自身）：\n{macro_text}\n\n"
         f"综合战绩：{scoreboard_text}\n\n"
         f"你过去几次决策后的实际战绩（用于复盘）：\n" + "\n".join(history_lines) + "\n\n"
         f"最近几天的长期复盘记录（每天一条，跨天规律用这个找，比如同一支票反复亏钱）：\n{lessons_text}"

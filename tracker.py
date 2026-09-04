@@ -295,6 +295,17 @@ def init_db():
             """
         )
 
+        # notified_at：这笔成交有没有推送到微信（2026-09-04新增）。原来的
+        # "实时买卖提醒"是读 data/last_sim_agent_run.log 判断要不要发微信，
+        # 而那个文件每轮都被覆盖：提醒任务只要错过一轮（网关重启、AI调用
+        # 失败——千问额度耗尽那几天就连续失败了25轮），那一轮的成交通知就
+        # 永久丢了，没有任何补发机制。用户明确要求"每笔买入卖出都要通知我"，
+        # 靠一个会被覆盖的临时文件做不到。改成在这张持久表上打标记：没打上
+        # 标记的成功成交，下一轮会继续被捞出来重发，漏一轮只是晚到，不会丢。
+        _so_cols = [r[1] for r in c.execute("PRAGMA table_info(simulated_orders)").fetchall()]
+        if "notified_at" not in _so_cols:
+            c.execute("ALTER TABLE simulated_orders ADD COLUMN notified_at TEXT NOT NULL DEFAULT ''")
+
         # sim_agent_runs：AI模拟盘"自主决策"每次运行的完整记录——2026-09-01
         # 用户要求"全自动、自己学习试错"，这是每15分钟一次的独立决策循环
         # (sim_agent.py，只在港股/美股开盘时跑，A股不参与)，跟每天17:30那次
@@ -693,6 +704,47 @@ def get_simulated_orders(email: str, limit: int = 50) -> list[dict]:
             "SELECT * FROM simulated_orders WHERE email = ? ORDER BY created_at DESC LIMIT ?", (email, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_unnotified_orders(email: str, limit: int = 20) -> list[dict]:
+    """捞出还没推送到微信的成功成交。
+
+    只认 status='成功'——跳过/失败的信号没有真实动作，不值得打扰用户。
+    按时间正序返回，让推送顺序跟成交顺序一致。
+
+    这张表滚动只保留50条，理论上连续漏推超过50笔会丢最早的；实际每轮
+    最多下几单、提醒任务几分钟一次，够不到这个边界。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM simulated_orders WHERE email = ? AND status = '成功' "
+            "AND (notified_at IS NULL OR notified_at = '') ORDER BY created_at ASC LIMIT ?",
+            (email, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_orders_notified(order_ids: list[int]) -> int:
+    """把这些成交标记成已推送。必须在微信发送成功之后才调用。
+
+    发送成功但标记失败会导致重复推送一次——这个方向的错误可以接受；
+    反过来（标记了却没发出去）才是用户明确不想要的"漏掉"。
+    """
+    ids = [int(i) for i in order_ids if str(i).strip()]
+    if not ids:
+        return 0
+    init_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with closing(_conn()) as c:
+        cur = c.execute(
+            "UPDATE simulated_orders SET notified_at = ? WHERE id IN (%s) "
+            "AND (notified_at IS NULL OR notified_at = '')" % ",".join("?" * len(ids)),
+            [now] + ids,
+        )
+        c.commit()
+        return cur.rowcount
 
 
 def log_sim_agent_run(
