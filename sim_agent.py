@@ -185,6 +185,19 @@ def _build_candidates(open_markets: list[str]) -> list[dict]:
                 "pe_ttm": spot.get("PE_TTM"), "pb": spot.get("PB"),
                 "asset_class": asset_class,
             })
+    # 补上每手股数。真实故障(2026-09-04)：AI连续17轮开出的买入全部因为"不足
+    # 一手"被跳过——50股金山软件(每手200)、40股快手(每手100)，一笔都没成交，
+    # 而它对此毫不知情，只能一轮一轮重复同一个买不进去的动作。港股必须按整手
+    # 买是硬约束，喂给它的行情里却唯独缺这一条。批量查+缓存，见
+    # sim_trader.get_lot_sizes的说明。
+    try:
+        _lots = sim_trader.get_lot_sizes([(c["symbol"], c["market"]) for c in candidates])
+        for c in candidates:
+            c["lot_size"] = _lots.get((c["symbol"], c["market"]), 1)
+    except Exception:
+        for c in candidates:
+            c.setdefault("lot_size", 1)
+
     return candidates
 
 
@@ -450,6 +463,13 @@ _AGENT_SYSTEM = f"""你是一个正在用虚拟资金自主管理富途模拟盘
 现在账户资产的实际变化。所有判断只能基于这些真实给出的数字，不能装作自己还查得到分析师
 评级、历史估值分位数、财报细节这些没给你的信息——没有的数据就是没有，不能编。
 
+关于"每手X股"这一条（只有港股/A股会出现，美股没有）：港股和A股必须按整手的
+整数倍下单，不能买零股。所以你给出的股数必须是每手股数的整数倍——开出"50股"
+但这支每手200股，系统取整之后是0手，这一单会被直接跳过、什么都不会发生，
+你这一轮就白跑了。下单前先自己算一遍：一手要多少钱、账上够不够买一手。
+如果连一手都买不起（一手金额 > 本轮实际可用于买入的钱），这支就不是你今天
+的选项，别再反复对它开单——换一支一手金额买得起的，或者干脆这轮不动。
+
 关于"投研顾问结论"这一条：它来自本系统里另一条独立的分析链路，每个交易日收盘后跑一次，
 基于财务报表摘要、近期新闻公告、研报评级、52周价格位置做深度判断，比你手上这份一眼行情
 厚得多，结论是买入/持有/观望/卖出，分数是综合得分（满分100，越高越看好）。怎么用它：
@@ -709,6 +729,12 @@ def _run_cycle_locked(email: str) -> dict:
             parts.append(f"PE(TTM){c['pe_ttm']:.1f}倍")
         if c.get("pb") is not None:
             parts.append(f"PB{c['pb']:.1f}倍")
+        # 港股/A股按整手交易，一手多少股、一手要多少钱，是"这支我到底买不买得起"
+        # 的前提。不给这条，AI只能按"能买几股"算，开出来的股数十有八九不是整手
+        # 的倍数，下单时被取整成0手直接跳过（2026-09-04连续17轮就是这么废掉的）。
+        lot = c.get("lot_size") or 1
+        if lot > 1:
+            parts.append(f"每手{lot}股（一手约{c['price'] * lot:,.0f}）")
         adv = advice_map.get((c.get("symbol"), c.get("market")))
         if adv and adv.get("action"):
             score_text = f"/{adv['score']}分" if adv.get("score") is not None else ""

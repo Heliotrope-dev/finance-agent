@@ -152,15 +152,27 @@ def check(db_path: Path = _DB) -> list[str]:
                     f"cron是5分钟一轮，超过{_STALE_MINUTES}分钟说明脚本没被触发或每次都卡死"
                 )
 
-        # 5) 长时间零成交
+        # 5) 长时间零成交。
+        #
+        # 这里踩过一次自己的坑：第一版把 status=="跳过" 也算进连击。但"跳过"
+        # 绝大多数是"当前没有市场开盘"——港美股都休市的时段本来就该一笔不成交，
+        # 那是正常，不是故障。结果这条判据每天夜里和整个周末都会必然触发，
+        # 变成一个固定误报。会对正常运行报警的监控比没有监控更糟（这是这个
+        # 脚本开头就写着的原则，第一版自己违反了），所以改成只看"真的跑完了
+        # 决策、但一笔没成交"的轮次，跳过的轮次直接不计入、也不打断连击统计。
         no_trade = 0
         for r in runs:
-            if "执行成功0条" in (r["note"] or "") or r["status"] == "跳过":
+            if r["status"] == "跳过":
+                continue          # 休市，不算数也不打断
+            if "执行成功0条" in (r["note"] or ""):
                 no_trade += 1
             else:
                 break
         if no_trade >= _NO_TRADE_LIMIT:
-            problems.append(f"[零成交] 最近连续{no_trade}轮一笔都没成交，值得看一眼是不是闸门卡死或候选池出了问题")
+            problems.append(
+                f"[零成交] 最近连续{no_trade}轮跑完决策但一笔都没成交"
+                f"（休市跳过的轮次不计），值得看一眼是不是闸门卡死或候选池出了问题"
+            )
 
         # 6) 台账对不上
         cash_row = _rows(conn, "SELECT sim_virtual_cash_hkd FROM user_settings WHERE sim_virtual_cash_hkd IS NOT NULL LIMIT 1")

@@ -142,6 +142,62 @@ def _get_lot_size(qot, code: str) -> int:
     return int(data.iloc[0]["lot_size"]) or 1
 
 
+_LOT_SIZE_CACHE: dict[str, int] = {}
+
+
+def get_lot_sizes(items: list[tuple]) -> dict:
+    """批量查每手股数，{(symbol, market): lot_size}。
+
+    2026-09-04新增，起因是一次真实故障：sim_agent 连续17轮跑完决策、一笔都没
+    成交，下单记录里全是"按每手200股取整后不足一手，金额太小（AI给的股数是50）"。
+    根子在于AI压根不知道港股要按整手买——喂给它的候选行情有现价/涨跌幅/量比/
+    换手率/52周位置/PE/PB，唯独没有每手股数。于是它按"能买几股"算，开出50股
+    金山软件（每手200）、40股快手（每手100），每一单都被取整成0手跳过。
+    更要命的是当时账上只有HK$2,965，而金山一手200股要八千多——它连一手都买不起，
+    却完全不知情，只能一轮一轮地重复同一个买不进去的动作。
+
+    这跟"预算文案跟实际闸门口径不一致"是同一类问题：告诉AI一个它实际做不到的
+    选项。修法也一样——把这个约束如实交给它，而不是让它撞完墙再被系统拦下。
+
+    实现上刻意做成批量+进程内缓存：每手股数几乎永远不变（真变了也是公司行动
+    级别的事），而 get_stock_basicinfo 是走 Futu 那条单worker串行队列的，
+    十几支候选逐个查会明显拖慢每一轮决策。美股不按手交易，直接记1不查。
+    """
+    out: dict[tuple, int] = {}
+    need_by_market: dict[str, list[str]] = {}
+    for symbol, market in items:
+        clean = _strip_market_prefix(symbol)
+        key = (clean, market)
+        if market == "US":
+            out[key] = 1
+            continue
+        code = _to_futu_code(clean, market)
+        if code in _LOT_SIZE_CACHE:
+            out[key] = _LOT_SIZE_CACHE[code]
+        else:
+            need_by_market.setdefault(market, []).append(code)
+
+    for market, codes in need_by_market.items():
+        ft_market = ft.Market.HK if market == "HK" else ft.Market.CN
+        ret, data = ds._futu_call(
+            lambda ctx, m=ft_market, cs=codes: ctx.get_stock_basicinfo(m, ft.SecurityType.STOCK, code_list=cs),
+            default=(None, None),
+        )
+        if ret != ft.RET_OK or data is None or data.empty:
+            continue
+        for _, row in data.iterrows():
+            code = row["code"]
+            lot = int(row.get("lot_size") or 0) or 1
+            _LOT_SIZE_CACHE[code] = lot
+            out[(_strip_market_prefix(code), market)] = lot
+
+    # 查不到的一律按1兜底——宁可让它按1股算（下单时还会再取整一次），
+    # 也不要因为查不到就把这支从候选里整个抹掉。
+    for symbol, market in items:
+        out.setdefault((_strip_market_prefix(symbol), market), 1)
+    return out
+
+
 def _execute_one(qot, trd, email: str, market: str, acc_id: str, signal: dict) -> dict:
     # 先在这里统一去掉symbol可能带的市场前缀，后面下单代码(code)和落库记录
     # 用的都是同一个干净symbol，不会再出现同一支票记录时而带前缀时而不带的情况。
