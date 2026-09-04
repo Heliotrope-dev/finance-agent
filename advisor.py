@@ -824,7 +824,14 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
     期限内的主线；技术面只决定"现在是不是好的进场时点"，不能反过来用技术面
     去支持一个中期结论，也不能因为技术面不好就把一个中期看多的结论改成看空。
 
-11. 目标价（必填或明确说明无法给出）。必须写清楚怎么算出来的：用哪个倍数
+11. 目标价（必填或明确说明无法给出）。如果下方"估值"里给了"分析师一致预期"，
+    你必须把自己的目标价跟它对照着说：跟共识接近，要说明你不是随大流、依据是
+    什么；比共识低或高出一截（比如差20%以上），更要说清楚凭什么——是你看到了
+    共识没反映的风险，还是共识用的盈利预测比你激进。卖方共识有系统性偏乐观的
+    倾向（评级分布里"卖出"常年接近0就是证据之一），所以不能拿它当结论直接用，
+    但它是唯一能校准"我是不是算得离谱了"的外部参照，有就必须用上。没给这项
+    数据时不要假装有。
+    必须写清楚怎么算出来的：用哪个倍数
     （PE/PB/PS/EV-EBITDA）、乘在哪个盈利或净资产基数上、为什么选这个倍数
     （对标自身历史分位、还是对标同业）。格式是"目标价X元/港元/美元（较现价
     +Y%）"。三条硬规矩：
@@ -1181,6 +1188,29 @@ def _valuation_text(symbol: str, market: str) -> str:
     return "，".join(parts) + "（无历史分位数据，百度估值接口对美股暂不可用，只有当前静态倍数，缺少相对自身历史贵贱的参照，判断时要如实体现这个局限）。"
 
 
+def _analyst_consensus_text(symbol: str, market: str) -> str:
+    """把分析师一致预期整理成一句话喂给判断。取不到就返回空串，不编。"""
+    try:
+        c = ds.get_analyst_consensus(symbol, market)
+    except Exception:
+        return ""
+    if not c or not c.get("average"):
+        return ""
+    bits = [
+        f"覆盖机构{int(c.get('total') or 0)}家",
+        f"目标价均值{c['average']:.2f}（最高{c.get('highest', 0):.2f}／最低{c.get('lowest', 0):.2f}）",
+    ]
+    rating_bits = []
+    for key, label in (("strong_buy", "强烈买入"), ("buy", "买入"), ("hold", "持有"),
+                       ("sell", "卖出"), ("underperform", "跑输大市")):
+        v = c.get(key)
+        if v:
+            rating_bits.append(f"{label}{v:.0f}%")
+    if rating_bits:
+        bits.append("评级分布：" + "、".join(rating_bits))
+    return "、".join(bits) + "。"
+
+
 def _technical_summary_text(symbol: str, market: str) -> str:
     try:
         end = ds.cn_now().strftime("%Y%m%d")
@@ -1324,6 +1354,12 @@ def _judge_one(item: dict, source: str) -> dict | None:
     tech = _technical_summary_text(symbol, market)
     news = _news_summary_text(symbol, market, name)
     position = _price_position_text(symbol, market)
+    # 分析师一致预期（2026-09-04新增）——此前判断链条里唯一真缺的一块。
+    # 拼在估值那段后面一起送进去，不新开一个参数：judge_stock /
+    # judge_stock_with_debate 两个入口的签名都不用动，改动面最小。
+    consensus = _analyst_consensus_text(symbol, market)
+    if consensus:
+        valuation = (valuation + "\n" if valuation else "") + "分析师一致预期：" + consensus
     try:
         # 持仓判断走多空辩论版本（更扎实但3倍AI调用），候选池初筛(source=
         # "screen")继续用单次判断——几十支候选一天判断一遍，辩论版本的

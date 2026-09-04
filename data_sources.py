@@ -1729,6 +1729,37 @@ def get_stock_realtime_futu_batch(items: list[tuple[str, str]]) -> dict[tuple[st
     return result
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_analyst_consensus(symbol: str, market: str) -> dict:
+    """分析师一致预期：目标价（最高/均值/最低）+ 评级分布 + 覆盖机构家数。
+
+    2026-09-04新增。此前判断链条里唯一真正缺失的一块就是"市场怎么看"——
+    AI能拿到财务、估值分位、52周位置、技术面、新闻，但拿不到卖方的目标价和
+    评级分布，于是它给出的目标价没有任何外部参照，也无法回答"我这个判断跟
+    市场共识差在哪"。而这恰恰是机构研报里最基本的一段：跟共识一致要说明为什么
+    不是随大流，跟共识背离更要说清楚凭什么。
+
+    走富途 get_research_analyst_consensus。实测港股可用（腾讯返回42家覆盖、
+    目标价均值663.69）。返回的是原始字典，字段含义：highest/average/lowest
+    是目标价，strong_buy/buy/hold/sell/underperform 是各评级占比(%)，
+    total 是覆盖机构家数。取不到返回空字典，调用方按"没有这块数据"处理，
+    不编。
+
+    缓存6小时：一致预期是低频数据（机构调评级不会一天几次），而判断链路一天
+    要对几十支票各查一次，没必要每次都打接口。
+    """
+    if market not in ("HK", "US"):
+        return {}
+    code = f"{market}.{symbol}"
+    ret, data = _futu_call(lambda ctx: ctx.get_research_analyst_consensus(code), timeout=10, default=(None, None))
+    if ret != ft.RET_OK or not data:
+        return {}
+    try:
+        return dict(data)
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_futu_news(keyword: str, max_count: int = 8) -> pd.DataFrame:
     """走 Futu OpenD 的资讯搜索（get_search_news）——这是目前找到的最好的新闻源：

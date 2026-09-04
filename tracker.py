@@ -369,6 +369,28 @@ def init_db():
             """
         )
 
+        # macro_briefs：宏观重大议题（美联储议息、CPI、非农这类）的AI解读。
+        # 2026-09-04新增。做成"离线生成、页面只读"是刻意的：这类分析要把
+        # 多条资讯汇总起来让AI通读一遍，一次要几十秒，如果放在页面渲染时现算，
+        # 每个访客每次打开首页都要等一次、烧一次AI调用，而这份内容一天之内
+        # 对所有人都是同一份。跟 advisor.py 那条"cron跑完写库、页面只读最近
+        # 一次结果"的链路是同一个模式。
+        # topic 是议题标识（如"fed"/"cpi"/"payrolls"），同一个议题保留多条
+        # 历史，页面只取最新一条。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS macro_briefs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT NOT NULL,
+                title TEXT NOT NULL,
+                brief_text TEXT NOT NULL,
+                sources_json TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_macro_topic ON macro_briefs (topic, created_at DESC)")
+
         # 从watchlist表一次性迁移进positions，shares/cost_total都是0(纯关注)。
         # UNIQUE(email,symbol)保证INSERT OR IGNORE天然幂等，每次启动跑一遍
         # 无副作用，不会覆盖已经有真实持仓数据的行。
@@ -1630,6 +1652,43 @@ def get_score_evidence_text(source: str = "watchlist") -> str:
         "成立）和当下的盘面证据，不能靠高分背书。尤其\"52周低位所以安全\"这句话，"
         "在短周期里没有数据支持——低位往往意味着还在下跌趋势里。"
     )
+
+
+def log_macro_brief(topic: str, title: str, brief_text: str, sources_json: str = "") -> int:
+    """写一条宏观议题解读，并只保留这个议题最近5条。
+
+    保留几条而不是只留一条：偶尔会想对照"上次美联储会议后是怎么说的、这次
+    变了什么"，但也没必要无限存下去——这类内容时效性强，一周前的解读已经
+    没有参考价值了。
+    """
+    init_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with closing(_conn()) as c:
+        cur = c.execute(
+            "INSERT INTO macro_briefs (topic, title, brief_text, sources_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (topic, title, brief_text, sources_json, now),
+        )
+        c.execute(
+            "DELETE FROM macro_briefs WHERE topic = ? AND id NOT IN "
+            "(SELECT id FROM macro_briefs WHERE topic = ? ORDER BY created_at DESC LIMIT 5)",
+            (topic, topic),
+        )
+        c.commit()
+        return cur.lastrowid
+
+
+def get_latest_macro_briefs() -> list[dict]:
+    """每个议题最新的一条，按生成时间倒序。页面只读这个，不触发任何AI调用。"""
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM macro_briefs WHERE id IN "
+            "(SELECT MAX(id) FROM macro_briefs GROUP BY topic) "
+            "ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_user_overview(email: str) -> dict:
