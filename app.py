@@ -344,12 +344,15 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 [class*="st-key-_sectors_more_btn"] button,
 [class*="st-key-_sectors_collapse_btn"] button,
 [class*="st-key-_movers_collapse_btn"] button,
+[class*="st-key-_home_news_more"] button,
+[class*="st-key-_home_news_collapse"] button,
 [class*="st-key-_movers_expand_btn"] button {
     background: transparent !important; border: none !important;
     border-top: 1px solid var(--fa-border) !important;
     border-radius: 0 !important; color: var(--fa-muted) !important;
     font-size: 0.82rem !important; font-weight: 500 !important;
     padding: 13px 8px 6px !important; letter-spacing: .02em;
+    width: 100% !important;          /* 撑满整行，文字才能真正居中 */
 }
 [class*="st-key-_detail_expand_btn"] button:hover,
 [class*="st-key-_idx_expand_btn"] button:hover,
@@ -359,6 +362,8 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 [class*="st-key-_sectors_more_btn"] button:hover,
 [class*="st-key-_sectors_collapse_btn"] button:hover,
 [class*="st-key-_movers_collapse_btn"] button:hover,
+[class*="st-key-_home_news_more"] button:hover,
+[class*="st-key-_home_news_collapse"] button:hover,
 [class*="st-key-_movers_expand_btn"] button:hover {
     background: transparent !important; color: var(--fa-text) !important;
 }
@@ -2298,7 +2303,15 @@ def _render_home_map():
 
 _ADVICE_EMAIL = os.environ.get("ADVISOR_EMAIL", "")  # advisor.py 私人脚本写advice表时用的固定账号，跟当前登录访客无关
 _ADVICE_ACTION_COLOR = {"买入": UP_COLOR, "卖出": DOWN_COLOR, "持有": NEUTRAL_COLOR, "观望": NEUTRAL_COLOR}
-_ADVICE_SECTIONS = ("结论", "置信度", "基本面", "技术面", "价格位置", "理由")
+# 2026-09-04把判断输出升级成机构研报格式后新增的几段（投资期限/目标价/
+# 估值方法/多头逻辑/空头逻辑/关键假设/催化剂/证伪条件）。解析器是按段名定位、
+# 位置排序切段的，新增段名向后兼容——2026-09-04之前的老记录没有这些段，
+# 解析出来就是没有，不会报错也不会串段。
+_ADVICE_SECTIONS = (
+    "结论", "投资期限", "目标价", "置信度",
+    "基本面", "技术面", "价格位置",
+    "多头逻辑", "空头逻辑", "关键假设与催化剂", "证伪条件", "理由",
+)
 
 _DISCLAIMER_SENTENCE = "仅供参考，不构成投资建议，请自行判断。"
 
@@ -2433,7 +2446,12 @@ def _render_advice_section():
                 f"color:{color};border-radius:5px;padding:2px 9px;"
                 f"font-size:0.74rem;font-weight:600;letter-spacing:.02em'>{_esc(action)}</span></span></div>"
                 f"<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:3px'>{_esc(row.get('symbol',''))} · 现价{price_text}"
-                f" · 置信度{_esc(parts.get('置信度','—'))}</div>"
+                f" · 置信度{_esc(parts.get('置信度','—'))}"
+                # 目标价和投资期限是研报格式里最该被一眼看到的两项——"买入"
+                # 如果不带目标价和时间尺度，就是一句没有可检验内容的话。
+                + (f" · 目标价{_esc(parts['目标价'])}" if parts.get("目标价") else "")
+                + (f" · {_esc(parts['投资期限'])}" if parts.get("投资期限") else "")
+                + "</div>"
                 # 每张卡末尾那句"仅供参考，不构成投资建议"是advisor的prompt里
                 # 硬性要求AI附上的，落在数据里。榜单一屏十几张卡，同一句重复
                 # 十几遍，占地方，而且重复到一定次数人眼就自动跳过了，反而不如
@@ -2442,10 +2460,17 @@ def _render_advice_section():
                 f"</a>",
                 unsafe_allow_html=True,
             )
-            with st.expander("基本面 / 技术面 / 价格位置"):
-                for sec in ("基本面", "技术面", "价格位置"):
-                    if parts.get(sec):
-                        st.markdown(f"**{sec}**：{_esc(parts[sec])}")
+            # 展开区按研报的读法排序：先多空两边的论点，再是三个基础面，
+            # 最后是假设/催化剂/证伪这三条"这个判断怎么才算错"的内容。
+            _detail_secs = [
+                "多头逻辑", "空头逻辑", "基本面", "技术面", "价格位置",
+                "关键假设与催化剂", "证伪条件",
+            ]
+            if any(parts.get(sec) for sec in _detail_secs):
+                with st.expander("多空逻辑 / 基本面 / 催化剂与证伪"):
+                    for sec in _detail_secs:
+                        if parts.get(sec):
+                            st.markdown(f"**{sec}**：{_esc(parts[sec])}")
 
     # 免责声明统一放在榜单末尾说一次——上面每张卡里的那句已经剥掉了。
     st.markdown(
