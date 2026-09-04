@@ -253,12 +253,28 @@ def _check_qwen_balance():
         )
     except Exception as e:
         if _is_insufficient_balance_error(e):
-            raise RuntimeError(
-                f"紧急：QWEN_API_KEY 账号余额不足/欠费，投研顾问本次运行直接终止，"
-                f"不再浪费后面的Futu/AkShare/AI调用。请立即到阿里云百炼控制台"
-                f"（https://bailian.console.aliyun.com/?tab=model#/costing-balance）充值。"
-                f"原始错误：{e}"
-            ) from e
+            # 千问不可用不再等于整轮终止——2026-09-04接上智谱故障转移之后，
+            # 所有AI调用点都会自动换家。这个前置检查如果还按老逻辑直接抛，
+            # 就会把一次本来能靠兜底跑完的运行当场掐死：今天排行榜没更新就是
+            # 这么来的，日志里只有一句"账号欠费直接终止"，而那时候智谱已经
+            # 在正常工作了。改成"再探一次备用供应商"：备用也不行才是真的没
+            # 路可走，值得终止；备用能用就只打一行提示继续跑。
+            try:
+                _zc = _zhipu_client()
+                if _zc is None:
+                    raise RuntimeError("没有配置智谱备用供应商")
+                _zc.with_options(max_retries=0, timeout=30).chat.completions.create(
+                    model=_ZHIPU_MODEL, messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=5, stream=False,
+                )
+            except Exception as e2:
+                raise RuntimeError(
+                    f"紧急：千问和智谱两家AI供应商都不可用，投研顾问本次运行直接终止，"
+                    f"不再浪费后面的Futu/AkShare/AI调用。"
+                    f"千问原始错误：{e}；智谱原始错误：{e2}"
+                ) from e
+            print(f"[preflight] 千问不可用（{type(e).__name__}），智谱备用可用，本次运行改走备用继续。")
+            return
         # 其它失败（网络抖动等）不阻断——真正的调用失败会在后面各环节暴露。
 
 
