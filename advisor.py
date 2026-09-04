@@ -321,6 +321,25 @@ def _is_failover_worthy(err: Exception) -> bool:
     return False
 
 
+# 供应商冷却表：{供应商名: 冷却截止的时间戳}。进程级，不跨进程共享——
+# 每个cron触发都是全新进程，这正是想要的粒度：一轮运行内不重复撞同一堵墙，
+# 但下一轮会重新试一次（额度可能已经重置了，不该被上一轮的结论长期锁死）。
+_PROVIDER_COOLDOWN: dict[str, float] = {}
+_COOLDOWN_SEC = 900
+
+
+def _is_quota_or_ratelimit_error(err: Exception) -> bool:
+    """是不是"配额耗尽/限流"这类会持续一段时间的错误。
+
+    跟 _is_failover_worthy 的区别：那个管"要不要换一家"，范围更宽（超时、
+    5xx、连接失败都算）；这个只管"要不要把这家熔断一段时间"，所以只认
+    配额和限流——超时和5xx多半是一次性抖动，熔断掉是误伤。
+    """
+    txt = f"{type(err).__name__} {err}".lower()
+    return ("429" in txt or "quota" in txt or "rate limit" in txt
+            or "ratelimit" in txt or "insufficient_quota" in txt or "arrearage" in txt)
+
+
 def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: float = 0.3,
                        timeout: float = 120, tag: str = "") -> str:
     """所有非流式AI调用的统一入口：千问顶不住就自动换智谱。
@@ -339,6 +358,7 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
     返回纯文本。流式场景不走这里（见 assistant.py 自己的处理）。
     """
     primary_err = None
+    skipped_cooling = False
     # 第四个字段是max_tokens倍数。glm-4.5-air是推理模型，隐藏的
     # reasoning_content跟正文共用同一个max_tokens预算（实测一句话的问题
     # 正文60字、思考448字，completion_tokens=300全算在一起），这跟千问那边
@@ -349,6 +369,17 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
         (_client, _MODEL, "千问", 1.0),
         (_zhipu_client, _ZHIPU_MODEL, "智谱", 2.0),
     ):
+        # 熔断：这家刚刚才因为配额耗尽/限流失败过，冷却期内直接跳过，不再
+        # 白撞一次。投研顾问一轮要judge一百多支股票，千问额度耗尽的那几天
+        # 每一支都要先撞一次千问拿个429再转智谱——一百多次无谓往返，既拖慢
+        # 整批（外层有统一deadline，慢就意味着判断得更少），又把日志刷满
+        # 同一句转移提示，真出别的问题反而看不见。
+        # 只对"配额/限流"这类明确会持续一段时间的错误熔断，超时和5xx不熔断
+        # ——那两类往往是一次性抖动，下一支可能就好了，冷却掉反而是误伤。
+        cooled_until = _PROVIDER_COOLDOWN.get(who, 0)
+        if cooled_until > time.time():
+            skipped_cooling = True
+            continue
         try:
             client = client_fn()
         except Exception as e:
@@ -373,9 +404,19 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
                 primary_err = e
             if not _is_failover_worthy(e):
                 raise
-            print(f"[failover{('/' + tag) if tag else ''}] {who}失败({type(e).__name__})，尝试下一家")
+            if _is_quota_or_ratelimit_error(e):
+                _PROVIDER_COOLDOWN[who] = time.time() + _COOLDOWN_SEC
+                print(f"[failover{('/' + tag) if tag else ''}] {who}配额/限流失败，"
+                      f"本进程内{_COOLDOWN_SEC // 60}分钟不再尝试")
+            else:
+                print(f"[failover{('/' + tag) if tag else ''}] {who}失败({type(e).__name__})，尝试下一家")
             continue
-    raise primary_err if primary_err else RuntimeError("没有任何可用的AI供应商")
+    if primary_err:
+        raise primary_err
+    raise RuntimeError(
+        "所有AI供应商都在冷却期内，本次调用没有实际尝试任何一家"
+        if skipped_cooling else "没有任何可用的AI供应商"
+    )
 
 
 def _run_concurrent_with_deadline(
