@@ -499,6 +499,25 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
    发丝线。单独写一条而不是并进上面那个选择器组，是因为指数行没有展开区，
    下面那些针对 stExpander 的规则对它没有意义，混在一起反而看不出哪条是
    给谁的。 */
+/* 涨跌停池 / 港美股核心股 / 指数成分股的行，跟 pos_row_、idx_row_ 同一套扁平样式。 */
+[class*="st-key-mv_row_"] {
+    border: none !important; background: transparent !important;
+    border-bottom: 1px solid var(--fa-border) !important;
+    border-radius: 0 !important; padding: 10px 2px !important;
+    gap: 0 !important;
+}
+[class*="st-key-mv_row_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
+[class*="st-key-mv_row_"]:hover { background: rgba(23,24,28,0.015) !important; }
+
+/* 热门板块卡片：保留边框（网格需要它划分组），只把白底换成透明。 */
+[class*="st-key-sector_card_"] {
+    background: transparent !important;
+    border: 1px solid var(--fa-border) !important;
+    border-radius: var(--fa-radius-sm) !important;
+    padding: 12px 14px !important;
+}
+[class*="st-key-sector_card_"]:hover { background: rgba(23,24,28,0.015) !important; }
+
 [class*="st-key-idx_row_"] {
     border: none !important; background: transparent !important;
     border-bottom: 1px solid var(--fa-border) !important;
@@ -1693,7 +1712,11 @@ def _render_stock_movers_cards(df, market: str):
         flash_class = ""
         if prev is not None and prev != row["最新价"]:
             flash_class = "price-flash-up" if row["最新价"] > prev else "price-flash-down"
-        with st.container(border=True):
+        # 跟指数行同一次改动（2026-09-04）：这批行（涨跌停池、港美股核心股、
+        # 指数成分股共用这一段）原来也是 st.container(border=True) 的白底卡片，
+        # 跟持仓、排行榜那套"透明底加一条底部发丝线"的扁平行不是一个长相。
+        # 用户要求"改到位啊，下面热门股票和板块也一起改掉"。
+        with st.container(key=f"mv_row_{market}_{mv_symbol}"):
             st.markdown(
                 f"<a class='pos-card-link' href='{href}' target='_self'>"
                 f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:4px'>"
@@ -2002,7 +2025,12 @@ def _render_hot_sectors(market: str):
                 f"<div style='color:var(--fa-muted);font-size:0.78rem'>热度第{idx + 1}名</div>"
             )
             with col:
-                with st.container(border=True):
+                # 板块是网格布局，不能像列表行那样只留一条底部发丝线（网格里
+                # 一条下划线会变成断断续续的横杠）。这里保留边框做分隔，只把
+                # 白色底填掉换成透明——页面底色是 #FAFAFB，白卡片比底色更亮，
+                # 九个白块排成三行在这套灰白基调里就是九个亮斑。透明之后卡片
+                # 只剩一圈发丝边界，分组关系还在，但不再抢注意力。
+                with st.container(key=f"sector_card_{market}_{idx}"):
                     if market == "A":
                         # A股板块成分股走东财接口，实测连接经常失败（东财板块类
                         # 接口的老问题），点进去大概率只看到"获取不到"，体验比
