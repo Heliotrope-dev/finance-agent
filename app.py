@@ -72,6 +72,7 @@ from tracker import (
 import sim_trader
 import sim_agent
 from charts import (
+    build_fed_rate_path_chart,
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
     build_benchmark_comparison, build_return_histogram, build_multi_comparison, build_position_donut,
     build_fed_watch_chart, build_macro_series_chart,
@@ -3115,12 +3116,28 @@ def _render_macro_briefs():
                     _cj = json.loads(b.get("chart_json") or "null")
                 except Exception:
                     _cj = None
-                _fed_rows, _series = [], []
+                _fed_rows, _series, _rate_path = [], [], {}
                 if isinstance(_cj, list):
                     _fed_rows = _cj
                 elif isinstance(_cj, dict):
                     _fed_rows = _cj.get("fed_watch") or []
                     _series = _cj.get("series") or []
+                    _rate_path = _cj.get("rate_path") or {}
+
+                # 政策利率路径放在FedWatch概率之前：先看"已经走到哪了"，再看
+                # "市场认为下一步走去哪"，这个顺序读起来才顺。
+                if _rate_path.get("points"):
+                    st.markdown(
+                        "<div style='font-size:0.76rem;color:var(--fa-faint);margin-bottom:4px'>"
+                        "美联储历次利率决议　"
+                        "<span style='color:var(--fa-faint)'>阶梯线，每个拐点是一次会议的调整</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.plotly_chart(
+                        build_fed_rate_path_chart(_rate_path),
+                        use_container_width=True, config=_PLOTLY_CONFIG,
+                        key=f"_fed_path_{b.get('id')}",
+                    )
 
                 if _fed_rows:
                     st.markdown(
@@ -3151,9 +3168,9 @@ def _render_macro_briefs():
                     _vv = [p["value"] for p in _pts if p.get("value") is not None]
                     _is_flat = bool(_vv) and min(_vv) >= 0 and max(_vv) > 0 and (max(_vv) - min(_vv)) / max(_vv) < 0.25
                     if _has_pred and not _is_flat:
-                        _legend = "柱=实际值，悬停可看当时的市场预期"
+                        _legend = "深色柱=实际值，浅色柱=当时的市场预期"
                     elif _has_pred:
-                        _legend = "近期走势，悬停可看当时的市场预期"
+                        _legend = "实线=实际值，虚线=当时的市场预期"
                     else:
                         _legend = "近期走势"
                     st.markdown(

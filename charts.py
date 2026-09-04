@@ -525,38 +525,95 @@ def build_multi_comparison(hist_by_name: dict) -> go.Figure:
 _DONUT_MAX_SLICES = 8
 
 
+def _fill_month_gaps(pts: list[dict]) -> list[dict]:
+    """月频序列补齐缺失的月份，缺的那期用 value=None 占位。
+
+    2026-09-04用户发现"美国失业率在今年一月到六月期间缺了数据"。核对下来
+    确实是数据源本身的缺口：富途返回的失业率序列从 2026-01-31 直接跳到
+    2026-06-30，中间四个月没有（2025-09 也缺），而同期的非农序列是完整的。
+
+    这件事必须显式处理，不能靠画法糊过去。横轴改成分类轴之后，缺失的月份
+    如果不占位，图上就是 1月紧挨着 6月——比之前时间轴留一个空档更糟：那个
+    空档至少还能看出"这里有问题"，而等距排列会让人以为这两期本来就相邻，
+    等于用图表撒了个谎。补上 None 占位之后，折线在缺口处会断开、柱状图会
+    空一格，读者一眼就知道这段没有数据，而不是数值真的连续。
+
+    只对判定为月频的序列生效（相邻两期间隔在26到35天之间的占多数）——日频
+    和不规则序列原样返回，不去猜它该有哪些期。
+    """
+    if len(pts) < 3:
+        return pts
+    try:
+        from datetime import date as _date
+
+        def _d(p):
+            y, m, dd = p["date"][:10].split("-")
+            return _date(int(y), int(m), int(dd))
+
+        parsed = [(_d(p), p) for p in pts if p.get("date")]
+    except Exception:
+        return pts
+    if len(parsed) < 3:
+        return pts
+    parsed.sort(key=lambda t: t[0])
+    gaps = [(parsed[i + 1][0] - parsed[i][0]).days for i in range(len(parsed) - 1)]
+    monthly = sum(1 for g in gaps if 26 <= g <= 35)
+    if monthly < len(gaps) * 0.6:
+        return pts
+
+    out = []
+    for i, (d, p) in enumerate(parsed):
+        out.append(p)
+        if i + 1 >= len(parsed):
+            break
+        nxt = parsed[i + 1][0]
+        y, m = d.year, d.month
+        while True:
+            m += 1
+            if m > 12:
+                m, y = 1, y + 1
+            # 用每月1号只是为了排序和生成标签，这一期本来就没有数据
+            if _date(y, m, 1) >= _date(nxt.year, nxt.month, 1):
+                break
+            out.append({"date": f"{y:04d}-{m:02d}-01", "value": None,
+                        "predict": None, "previous": None})
+    return out
+
+
 def build_macro_series_chart(series: dict) -> go.Figure:
     """宏观指标图。series 是 data_sources.get_macro_series 的返回：
     {"name","unit","points":[{date,value,predict,previous}]}。
 
-    2026-09-04用户反馈"图上咋没标注我看不懂，得让我看懂"，整个重做了一遍。
-    原来那版有三个让人读不懂的地方，逐条改掉：
+    实际值和市场预期并排画，不靠悬停。用户明确要求"这个预期的真实的最好分开来
+    表示，不是刚刚悬停的那个"——之前把预期收进 tooltip，是为了躲开"柱顶一道
+    黑横杠"那个问题（横杠压在柱子上既看不出偏离又划穿数值标签），但那等于把
+    这张图一半的信息藏了起来：宏观数据真正被交易的维度就是"实际有没有打到
+    预期"，要悬停才看得到，等于没有。并排双柱两个都看得见，高低直接比，
+    既不遮挡也不需要交互。
 
-    1. 柱子上没有数值，想知道这期CPI到底多少必须去悬停。宏观数据的读者要的
-       就是具体数字（"3.4%"本身就是信息），不是趋势形状。现在每根柱子/每个
-       点上直接标数值。
+    横轴用分类轴而不是时间轴。这些是逐月的离散读数，本来就该等距排列；用
+    时间轴的话，数据源缺哪一期就会在图上留一个没有解释的空档（实测美国CPI
+    同比缺 2025-09 那一期，画出来 Sep 和 Nov 之间凭空空一格，用户直接问
+    "中间有个空格咋回事"）。缺失的期数不占位置，是这类周期性柱状图的常规
+    画法，也不会暗示错误的时间跨度。
 
-    2. 原来柱子按"是否超预期"上红绿。这个配色有两重问题：一是跟行情的红涨
-       绿跌撞车，同一个页面上红色一会儿是"涨"一会儿是"超预期"；二是"超预期"
-       在不同指标里含义完全相反——非农超预期是经济强劲，CPI超预期是通胀失控，
-       同一个颜色表达两个方向相反的意思，越看越糊涂。现在柱子统一用中性墨色，
-       是超还是不及由"柱子高过还是低于预期横线"来表达，位置关系不会有歧义。
-
-    3. 失业率、联邦基金利率这类"水平值"指标画成柱状图，从0%起画，4.1%和4.5%
-       的柱子看上去几乎一样高，等于什么都没表达。现在按数据形态自动分流：
-       带市场预期的指标（CPI、非农这种"事件型"，看点是有没有打到预期）继续
-       用柱+预期横线；纯水平值序列（没有任何预期数据）改画折线，纵轴按数据
-       范围自适应，不强行归零，这样几个基点的变化才看得出来。
+    水平值序列（利率、失业率这种在某个水平附近小幅波动的）仍然走折线：
+    柱状图从0起画，4.1%和4.5%的柱子几乎一样高，等于什么都没表达。
     """
-    pts = (series or {}).get("points") or []
+    pts = _fill_month_gaps((series or {}).get("points") or [])
     if not pts:
         return go.Figure()
     is_pct = series.get("unit") == "PERCENT"
     mul = 100 if is_pct else 1
-    x = [p["date"] for p in pts]
     actual = [None if p["value"] is None else p["value"] * mul for p in pts]
     predict = [None if p["predict"] is None else p["predict"] * mul for p in pts]
     has_predict = any(v is not None for v in predict)
+
+    def _label(d: str) -> str:
+        # "2025-04-30" -> "25-04"：分类轴上每个刻度都要画，完整日期太长会挤成一团
+        return f"{d[2:4]}-{d[5:7]}" if len(d) >= 7 else d
+
+    x = [_label(p["date"]) for p in pts]
 
     def _fmt(v):
         if v is None:
@@ -568,18 +625,6 @@ def build_macro_series_chart(series: dict) -> go.Figure:
             return f"{v/1000:.0f}k"
         return f"{v:.0f}" if float(v).is_integer() else f"{v:.1f}"
 
-    # 选柱还是选折线，看的不是"有没有市场预期"，而是这条序列本身是"水平值"
-    # 还是"增量值"。
-    #
-    # 失业率在4.1%~4.5%之间摆动，柱状图从0起画出来十几根几乎一样高的柱子，
-    # 高低差完全看不出来——图本身没起作用，读者只能去读数字，那还不如列个
-    # 表格。非农就业人数在-15.6万到+21.4万之间，有正有负、量级差好几倍，
-    # 零轴是有真实含义的分界（增员还是裁员），柱状图才对。
-    #
-    # 判据用"极差占最大值的比例"：低于25%说明这是一条在某个水平附近小幅
-    # 波动的序列（利率、失业率、通胀率这类"水位"指标），画折线并让纵轴按
-    # 数据范围自适应；超过25%说明波动本身就是主要信息（CPI同比、非农增量），
-    # 柱状图的长度对比才有意义。含负值的一律用柱——零轴的方向性不能丢。
     _vals_all = [v for v in actual if v is not None]
     _flat = False
     if _vals_all:
@@ -588,14 +633,20 @@ def build_macro_series_chart(series: dict) -> go.Figure:
 
     fig = go.Figure()
 
-    if not has_predict or _flat:
-        # 纯水平值序列：折线 + 自适应纵轴。只在首尾和极值处标数字，
-        # 每个点都标会糊成一片。
-        vals = [v for v in actual if v is not None]
+    if _flat:
+        # 水平值：实际画实线，预期画浅色虚线，同样是两条分开的东西，不叠在一起
         label_idx = set()
-        if vals:
+        if _vals_all:
             label_idx = {0, len(actual) - 1,
-                         actual.index(max(vals)), actual.index(min(vals))}
+                         actual.index(max(_vals_all)), actual.index(min(_vals_all))}
+        if has_predict:
+            fig.add_trace(
+                go.Scatter(
+                    x=x, y=predict, name="市场预期", mode="lines",
+                    line=dict(color=_AUX_SOFT, width=1.4, dash="dot"),
+                    hovertemplate="%{x}　预期 %{y:,.2f}<extra></extra>",
+                )
+            )
         fig.add_trace(
             go.Scatter(
                 x=x, y=actual, name="实际值", mode="lines+markers+text",
@@ -604,52 +655,55 @@ def build_macro_series_chart(series: dict) -> go.Figure:
                 text=[_fmt(v) if i in label_idx else "" for i, v in enumerate(actual)],
                 textposition="top center",
                 textfont=dict(size=10, color=_AUX_STRONG),
-                customdata=[("无" if pv is None else _fmt(pv)) for pv in predict],
-                hovertemplate="%{x}　实际 %{y:,.2f}　预期 %{customdata}<extra></extra>",
+                hovertemplate="%{x}　实际 %{y:,.2f}<extra></extra>",
             )
         )
-        _apply_chart_theme(fig, height=230, legend=False, margin=dict(l=6, r=16, t=26, b=6))
-        # 折线不需要从0起——这类指标的看点就是那几个基点的变化
+        _apply_chart_theme(fig, height=240, legend=has_predict,
+                           margin=dict(l=6, r=16, t=26, b=6))
+        fig.update_xaxes(type="category")
         fig.update_yaxes(autorange=True, rangemode="normal")
         if is_pct:
             fig.update_yaxes(ticksuffix="%")
         return fig
 
-    # 市场预期不再画成柱顶那道横杠。用户反馈"为啥每个柱体上面都有一个黑黑
-    # 的一条线啊去掉"——问题是CPI这类指标的预期和实际几乎总是贴在一起，那道
-    # 横杠就正好压在柱子顶端，既看不出偏离（差值太小，肉眼分不出高低），
-    # 又把数值标签划穿了（实测 Mar 2026 的"3.5%"被横杠拦腰划掉）。一个既不
-    # 提供信息又破坏可读性的图元，不如去掉。
-    # 预期值改成两种方式呈现：偏离明显时直接写进柱子上方的标签（"3.4% 预期3.1%"），
-    # 偏离可以忽略时只显示实际值；完整数字始终在悬停里。这样"超没超预期"这个
-    # 信息只在真正有偏离的那几期出现，反而更容易被注意到。
-    # 标签只写实际值，预期放进悬停。中间试过"3.4% 预期3.1%"这种把偏离直接
-    # 写进标签的做法，实际效果更糟：一屏十四根柱子，柱身本来就窄，Plotly为了
-    # 把长标签塞进柱宽会自动缩字号，缩完小到看不清，而且有偏离的和没偏离的
-    # 标签长短不一，整排看过去参差不齐。宁可标签短而统一、每个都看得清，
-    # 也不要为了多塞一个数字把所有数字都变得读不了。
     fig.add_trace(
         go.Bar(
             x=x, y=actual, name="实际值",
-            marker_color=_AUX_STRONG, marker_line_width=0, opacity=0.85,
+            marker_color=_AUX_STRONG, marker_line_width=0,
             text=[_fmt(v) for v in actual], textposition="outside",
-            textfont=dict(size=11, color=_AUX_STRONG), cliponaxis=False,
-            customdata=[("无" if pv is None else _fmt(pv)) for pv in predict],
-            hovertemplate="%{x}　实际 %{y:,.2f}　预期 %{customdata}<extra></extra>",
+            textfont=dict(size=10, color=_AUX_STRONG), cliponaxis=False,
+            hovertemplate="%{x}　实际 %{y:,.2f}<extra></extra>",
         )
     )
-    # 禁止Plotly按柱宽自动缩放标签字号——柱子窄的时候它会一路缩到看不清，
-    # 而这些数字正是这张图要传达的主要内容。宁可让它挤一点也要保持可读。
-    fig.update_layout(uniformtext=dict(minsize=10, mode="show"))
-    fig.update_layout(bargap=0.45)
+    if has_predict:
+        # 预期用同色系的浅色实心块，不用描边空心块：空心块在浅色背景上
+        # 只剩一圈细线，视觉重量比实际值轻太多，一眼扫过去会看漏。
+        fig.add_trace(
+            go.Bar(
+                x=x, y=predict, name="市场预期",
+                marker_color=_AUX_SOFT, marker_line_width=0,
+                hovertemplate="%{x}　预期 %{y:,.2f}<extra></extra>",
+            )
+        )
+    fig.update_layout(barmode="group", bargap=0.32, bargroupgap=0.06)
+    # 只给实际值标数字。两组柱子都标的话28个数字挤在一起反而都读不清，
+    # 而预期的具体数值不是重点——重点是它比实际高还是低，那个用柱高比就够了。
+    fig.update_layout(uniformtext=dict(minsize=9, mode="show"))
+    fig.update_xaxes(type="category")
     if is_pct:
         fig.update_yaxes(ticksuffix="%")
-    # 标签写在柱子外侧，纵轴顶部留出空间，否则最高那根的标签会被裁掉
-    _vals = [v for v in actual if v is not None]
-    if _vals:
-        _lo, _hi = min(0, min(_vals)), max(_vals)
-        fig.update_yaxes(range=[_lo, _hi * 1.18 if _hi > 0 else _hi * 0.82])
-    _apply_chart_theme(fig, height=250, legend=False, margin=dict(l=6, r=16, t=26, b=6))
+    # 纵轴上下都要留出标签的位置。标签画在柱子外侧：正值在柱顶之上、负值在
+    # 柱底之下，如果范围刚好卡在最大最小值上，负值那一侧的标签会直接压到x轴
+    # 的月份刻度上（实测非农 26-01 的"-156k"和刻度文字叠在一起）。按整个数值
+    # 跨度的12%上下各留一档，比按最大值乘系数更稳——含负值的序列用乘系数会
+    # 把零轴附近的留白算错。
+    _both = [v for v in (actual + predict) if v is not None]
+    if _both:
+        _hi, _lo = max(_both), min(0, min(_both))
+        _pad = (_hi - _lo) * 0.12 or 1
+        fig.update_yaxes(range=[_lo - (_pad if _lo < 0 else 0), _hi + _pad])
+    _apply_chart_theme(fig, height=260, legend=has_predict,
+                       margin=dict(l=6, r=16, t=26, b=6))
     return fig
 
 
@@ -913,4 +967,53 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
         font=dict(family=_CHART_FONT, size=10, color=_CHART_FAINT),
     )
     _apply_chart_theme(fig, height=300, margin=dict(l=6, r=76, t=22, b=6))
+    return fig
+
+def build_fed_rate_path_chart(series: dict) -> go.Figure:
+    """美联储政策利率的历次调整路径。series 来自 data_sources.get_fed_rate_path。
+
+    2026-09-04新增，替掉原来那张两周日频的联邦基金利率图（利率两周内根本不动，
+    画出来是一条平线）。
+
+    画成阶梯线而不是普通折线：政策利率不是连续变量，它在两次会议之间是一个
+    水平不动的常数，开会那天一次性跳到新水平。普通折线会把两个点之间画成
+    斜线，暗示"这段时间利率在缓慢下降"，那是错的——利率在那段时间一动没动。
+    阶梯线如实表达"维持一段、然后跳一下"这个真实形态。
+
+    每个拐点标出变动后的水平和变动幅度（-25bp这样），因为"降了多少"跟"降到
+    多少"是两个不同的信息，机构看利率路径两个都要看。
+    """
+    pts = (series or {}).get("points") or []
+    if len(pts) < 2:
+        return go.Figure()
+    mul = 100 if series.get("unit") == "PERCENT" else 1
+    x = [p["date"] for p in pts]
+    y = [p["value"] * mul for p in pts]
+
+    labels = []
+    for i, v in enumerate(y):
+        if i == 0:
+            labels.append(f"{v:.2f}%")
+            continue
+        delta_bp = round((v - y[i - 1]) * 100)
+        if delta_bp == 0:
+            # 收尾那个"维持至今"的点不重复标水平，标了跟前一个一模一样
+            labels.append("")
+        else:
+            labels.append(f"{v:.2f}%　{delta_bp:+d}bp")
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=x, y=y, mode="lines+markers+text",
+            line=dict(color=_CHART_INK, width=1.8, shape="hv"),
+            marker=dict(size=5, color=_CHART_INK),
+            text=labels, textposition="top right",
+            textfont=dict(size=10, color=_AUX_STRONG),
+            hovertemplate="%{x}　目标利率上限 %{y:.2f}%<extra></extra>",
+            cliponaxis=False,
+        )
+    )
+    _apply_chart_theme(fig, height=250, legend=False, margin=dict(l=6, r=48, t=26, b=6))
+    fig.update_yaxes(ticksuffix="%", autorange=True, rangemode="normal")
     return fig

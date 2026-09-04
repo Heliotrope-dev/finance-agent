@@ -2784,3 +2784,39 @@ def get_owner_industries(items: list[tuple[str, str]]) -> dict[tuple[str, str], 
     # 调用方按"未知行业"如实处理，不拿概念板块凑数——概念板块一支股票能挂
     # 七八个，用来算集中度会把权重重复计算，得出的分散度是假的。
     return {k: v for k, v in out.items() if v}
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def get_fed_rate_path(lookback_days: int = 800) -> dict:
+    """美联储政策利率的历次调整路径。返回 {"name","unit","points":[{date,value}]}，
+    每个点是一次利率变动生效日和变动后的水平。
+
+    2026-09-04用户反馈首页那张联邦基金利率图"不要这几天的，最好改成前几次
+    美联储会议的利率折线变化图"。原来画的是过去两周的日频有效联邦基金利率
+    ——利率只在议息会议上才动，两周之内当然天天都是3.63%，画出来就是一条
+    平线，占了半屏什么都没说。
+
+    实现上有个关键选择：用"美联储目标利率上限"这个指标，不用"美国联邦基金
+    利率"。后者是市场上真实成交的有效利率，会在目标区间内小幅漂移（实测
+    3.86/3.87/3.88/3.89这样一个基点一个基点地动），直接取变化点会把这些
+    市场噪动当成议息决议，画出来一堆假拐点。前者是美联储自己公布的政策
+    目标上限，只有开会决定了才会变，变化点跟FOMC决议一一对应，不需要另外
+    去维护一张会议日历。
+
+    数据源给的是日频重复值（每天都重复当前的目标利率），这里压缩成变化点：
+    连续相同的值只保留第一天。两年窗口实测压出7个点，正好是完整的降息路径。
+    """
+    sr = get_macro_series("US", "美联储目标利率上限", max_count=lookback_days)
+    pts = [p for p in (sr.get("points") or []) if p.get("value") is not None]
+    if not pts:
+        return {}
+    out, prev = [], None
+    for p in pts:
+        v = p["value"]
+        if prev is None or abs(v - prev) > 1e-9:
+            out.append({"date": p["date"], "value": v})
+            prev = v
+    # 补一个"截至今天仍是这个水平"的收尾点，否则折线会停在最后一次调整那天，
+    # 看不出这个利率已经维持了多久。
+    if out and pts[-1]["date"] != out[-1]["date"]:
+        out.append({"date": pts[-1]["date"], "value": out[-1]["value"]})
+    return {"name": "美联储目标利率上限", "unit": sr.get("unit") or "PERCENT", "points": out}

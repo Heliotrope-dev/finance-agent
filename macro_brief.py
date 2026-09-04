@@ -44,7 +44,9 @@ _TOPICS = [
 _TOPIC_SERIES = {
     "cpi": [("US", "美国CPI同比"), ("US", "美国核心CPI同比"), ("US", "美国PCE同比")],
     "payrolls": [("US", "美国非农就业人数"), ("US", "美国失业率")],
-    "fed": [("US", "美国联邦基金利率")],
+    # fed 不在这里取序列：日频的"美国联邦基金利率"两周之内根本不动，画出来
+    # 是一条平线。改成单独取政策利率的历次调整路径（见 _rate_path）。
+    "fed": [],
     "china": [("CN", "CPI同比"), ("CN", "制造业PMI")],
 }
 
@@ -122,6 +124,16 @@ def _fed_watch_text() -> str:
     )
 
 
+def _rate_path() -> dict:
+    """美联储政策利率的历次调整路径，只有 fed 议题用。取不到就返回空字典，
+    不让它拖垮整篇简报的生成。"""
+    try:
+        return ds.get_fed_rate_path() or {}
+    except Exception as e:
+        print(f"[fed] 利率路径取失败（跳过，不影响其余材料）: {e}")
+        return {}
+
+
 def _series_for(topic: str) -> list[dict]:
     """把这个议题配套的宏观序列都取回来。取不到的静默跳过，不影响其它。"""
     out = []
@@ -188,6 +200,7 @@ def build_one(topic: str, title: str, keywords: list[str]) -> bool:
     news_text, items = _news_text(keywords)
     extra = _fed_watch_text() if topic == "fed" else ""
     chart_rows = _fed_watch_rows() if topic == "fed" else []
+    rate_path = _rate_path() if topic == "fed" else {}
     series = _series_for(topic)
     series_text = _series_text(series)
     if not news_text and not extra and not series_text:
@@ -195,6 +208,11 @@ def build_one(topic: str, title: str, keywords: list[str]) -> bool:
         return False
 
     user = f"议题：{title}\n\n"
+    if rate_path.get("points"):
+        _rp = rate_path["points"]
+        _lines = [f"- {p['date']} 调整至 {p['value'] * 100:.2f}%" for p in _rp]
+        user += ("美联储政策利率（目标利率上限）的历次调整：\n" + "\n".join(_lines)
+                 + f"\n当前维持在 {_rp[-1]['value'] * 100:.2f}%\n\n")
     if series_text:
         # 真实数据放在最前面——AI读材料是有顺序效应的，先给硬数据再给评论文章，
         # 结论更容易落在数字上而不是跟着标题的情绪走。
@@ -217,8 +235,9 @@ def build_one(topic: str, title: str, keywords: list[str]) -> bool:
         topic, title, text,
         json.dumps(items, ensure_ascii=False),
         json.dumps(
-            {"fed_watch": chart_rows, "series": series}, ensure_ascii=False
-        ) if (chart_rows or series) else "",
+            {"fed_watch": chart_rows, "series": series, "rate_path": rate_path},
+            ensure_ascii=False,
+        ) if (chart_rows or series or rate_path) else "",
     )
     print(f"[{topic}] 已写入，{len(text)}字，材料{len(items)}条")
     return True
