@@ -14,6 +14,62 @@ from plotly.subplots import make_subplots
 
 from theme import UP_COLOR, DOWN_COLOR, NEUTRAL_COLOR
 
+# ── 图表统一视觉 ──────────────────────────────────────────────────────────
+# 2026-09-04：这些图之前全部吃 Plotly 的默认样式——默认字体、默认网格（横竖
+# 都画）、默认深色轴线、默认 hover 气泡。默认样式的问题不是丑，是"没有观点"：
+# 它对所有图一视同仁，于是每张图都长得像随手生成的示意图。真正的财经图表是
+# 减法做出来的：轴线去掉、竖网格去掉、刻度短线去掉、横网格淡到几乎看不见，
+# 让读者的注意力只落在数据本身的形状上。这里把这套减法收成一个函数，所有图
+# 统一走它，而不是每个函数各自写一份 update_layout。
+_CHART_FONT = "Inter, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif"
+_CHART_INK = "#17181C"
+_CHART_MUTED = "#82858E"
+_CHART_FAINT = "#A8ABB3"
+_CHART_GRID = "rgba(23,24,28,0.055)"
+# 图上的"辅助线"（均价/MA/MACD的DIF与DEA/基准线）统一走灰阶，靠深浅区分，
+# 不再各挑一个彩色。理由同 _MULTI_COLORS 那段：饱和色是留给涨跌的，一条橙色
+# 均线压在红绿K线上，读者要分神判断"这个橙色是什么意思"。
+_AUX_STRONG = "#5B6470"
+_AUX_SOFT = "#A6ADB6"
+
+
+def _apply_chart_theme(fig, height=None, *, legend=False, grid="y", margin=None, hovermode=None):
+    """给一张图套上全站统一的图表视觉。
+
+    grid 控制画哪个方向的网格线："y" 只画横线（绝大多数时序图该用这个——
+    竖网格对"看走势"没有帮助，只是噪声），"xy" 两向都画，"none" 都不画。
+    """
+    fig.update_layout(
+        font=dict(family=_CHART_FONT, size=11, color=_CHART_MUTED),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=margin or dict(l=6, r=16, t=18, b=6),
+        # 默认的 hover 气泡是跟着线的颜色走的深色块，一条红线配一个红气泡，
+        # 花且抢眼。统一成白底+发丝边框+墨色字，跟页面上的卡片是同一套语言。
+        hoverlabel=dict(
+            bgcolor="#FFFFFF", bordercolor="rgba(23,24,28,0.12)",
+            font=dict(family=_CHART_FONT, size=11, color=_CHART_INK),
+        ),
+        showlegend=legend,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, x=0, xanchor="left",
+            bgcolor="rgba(0,0,0,0)", borderwidth=0,
+            font=dict(family=_CHART_FONT, size=11, color=_CHART_MUTED),
+        ),
+    )
+    if height is not None:
+        fig.update_layout(height=height)
+    if hovermode is not None:
+        fig.update_layout(hovermode=hovermode)
+    axis_common = dict(
+        showline=False, zeroline=False, ticks="",
+        tickfont=dict(family=_CHART_FONT, size=10, color=_CHART_FAINT),
+        title_font=dict(family=_CHART_FONT, size=10, color=_CHART_MUTED),
+    )
+    fig.update_xaxes(showgrid=(grid == "xy"), gridcolor=_CHART_GRID, gridwidth=1, **axis_common)
+    fig.update_yaxes(showgrid=(grid in ("y", "xy")), gridcolor=_CHART_GRID, gridwidth=1, **axis_common)
+    return fig
+
 
 def _compute_macd(close: pd.Series) -> pd.DataFrame:
     """标准MACD：EMA12/EMA26算DIF，DIF的9日EMA是DEA，柱状图=2*(DIF-DEA)。"""
@@ -110,12 +166,12 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
     fig.add_trace(
         go.Scatter(
             x=merged["hm"], y=merged["均价"], mode="lines", connectgaps=True,
-            line=dict(width=1, color="#f59e0b"), name="均价",
+            line=dict(width=1, color=_AUX_STRONG), name="均价",
         ),
         row=1, col=1,
     )
     if prev_close:
-        fig.add_hline(y=prev_close, line=dict(width=1, color="#999", dash="dash"), row=1, col=1)
+        fig.add_hline(y=prev_close, line=dict(width=1, color="rgba(23,24,28,0.18)"), row=1, col=1)
 
     price_min = min(df["价格"].min(), prev_close or df["价格"].min())
     price_max = max(df["价格"].max(), prev_close or df["价格"].max())
@@ -137,12 +193,8 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
         fig.update_yaxes(side="right", ticksuffix="万", row=2, col=1)
         fig.update_xaxes(type="category", nticks=8, row=2, col=1)
 
-    fig.update_layout(
-        height=480 if has_volume else 340,
-        margin=dict(l=10, r=10, t=20, b=10),
-        showlegend=False,
-        bargap=0.15,
-    )
+    fig.update_layout(bargap=0.15)
+    _apply_chart_theme(fig, height=480 if has_volume else 340, hovermode="x unified")
     return fig
 
 
@@ -174,12 +226,12 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
         col=1,
     )
     fig.add_trace(
-        go.Scatter(x=df["日期"], y=df["MA5"], line=dict(width=1, color="#f59e0b"), name="MA5"),
+        go.Scatter(x=df["日期"], y=df["MA5"], line=dict(width=1, color=_AUX_STRONG), name="MA5"),
         row=1,
         col=1,
     )
     fig.add_trace(
-        go.Scatter(x=df["日期"], y=df["MA20"], line=dict(width=1, color="#3b82f6"), name="MA20"),
+        go.Scatter(x=df["日期"], y=df["MA20"], line=dict(width=1, color=_AUX_SOFT), name="MA20"),
         row=1,
         col=1,
     )
@@ -200,22 +252,18 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
         col=1,
     )
     fig.add_trace(
-        go.Scatter(x=df["日期"], y=macd["DIF"], line=dict(width=1, color="#f59e0b"), name="DIF"),
+        go.Scatter(x=df["日期"], y=macd["DIF"], line=dict(width=1, color=_AUX_STRONG), name="DIF"),
         row=3,
         col=1,
     )
     fig.add_trace(
-        go.Scatter(x=df["日期"], y=macd["DEA"], line=dict(width=1, color="#3b82f6"), name="DEA"),
+        go.Scatter(x=df["日期"], y=macd["DEA"], line=dict(width=1, color=_AUX_SOFT), name="DEA"),
         row=3,
         col=1,
     )
 
-    fig.update_layout(
-        height=820,
-        margin=dict(l=10, r=10, t=30, b=10),
-        xaxis_rangeslider_visible=False,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    )
+    fig.update_layout(xaxis_rangeslider_visible=False)
+    _apply_chart_theme(fig, height=820, legend=True, margin=dict(l=6, r=16, t=26, b=6))
     fig.update_yaxes(title_standoff=8)
     return fig
 
@@ -347,18 +395,13 @@ def build_return_histogram(hist: pd.DataFrame) -> go.Figure:
         go.Histogram(
             x=daily_ret,
             nbinsx=25,
-            marker_color="#3b82f6",
-            marker_line=dict(color="#1e293b", width=0.5),
+            marker_color=_AUX_SOFT,
+            marker_line=dict(color="rgba(23,24,28,0.25)", width=0.5),
         )
     )
-    fig.add_vline(x=0, line_dash="dash", line_color="#94a3b8", line_width=1)
-    fig.update_layout(
-        height=320,
-        margin=dict(l=10, r=10, t=10, b=10),
-        xaxis_title="单日涨跌幅 (%)",
-        yaxis_title="出现天数",
-        bargap=0.05,
-    )
+    fig.add_vline(x=0, line_color="rgba(23,24,28,0.22)", line_width=1)
+    fig.update_layout(xaxis_title="单日涨跌幅 (%)", yaxis_title="出现天数", bargap=0.05)
+    _apply_chart_theme(fig, height=320)
     return fig
 
 
@@ -379,15 +422,11 @@ def build_benchmark_comparison(hist: pd.DataFrame, benchmark: pd.DataFrame, benc
     )
     fig.add_trace(
         go.Scatter(
-            x=bm["日期"], y=bm["归一化"], name=benchmark_name, line=dict(color="#94a3b8", width=2, dash="dot")
+            x=bm["日期"], y=bm["归一化"], name=benchmark_name, line=dict(color=_AUX_SOFT, width=1.5, dash="dot")
         )
     )
-    fig.update_layout(
-        height=320,
-        margin=dict(l=10, r=10, t=10, b=10),
-        yaxis_title="走势（起点=100）",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    )
+    fig.update_layout(yaxis_title="走势（起点=100）")
+    _apply_chart_theme(fig, height=320, legend=True, hovermode="x unified")
     return fig
 
 
@@ -401,9 +440,25 @@ def build_benchmark_comparison(hist: pd.DataFrame, benchmark: pd.DataFrame, benc
 # 完全一样分不清。补到9个颜色，覆盖满_DONUT_MAX_SLICES=8还留一个余量，新增
 # 的三个颜色（黄/粉/靛蓝）特意选在色相环上跟原有6个颜色（红/蓝/绿/橙/紫/青）
 # 拉开距离，不是随手加深浅相近的颜色凑数。
+# 2026-09-04整套换掉。原来是 红/蓝/绿/橙/紫/青/黄/粉/靛 的彩虹分类色，跟
+# 现在这套界面有两处硬冲突：
+#   一是全站只有一条配色规矩——饱和色只留给涨跌。饼图里一块饱和蓝、一块饱和
+#     紫，页面上最跳的东西就不再是涨跌数字了。
+#   二是这套色板的第1个和第3个直接用了 UP_COLOR/DOWN_COLOR，于是饼图里会出现
+#     一块正红和一块正绿，但它们在这里只表示"第1支"和"第3支"，不表示涨跌——
+#     同一个颜色在同一个页面上表示两件事，是最容易读错的那种冲突。
+# 换成一组去饱和的编辑型色板：彼此在色相和明度上都拉得开、认得出是不同的类别，
+# 但没有一个会被误读成"涨"或"跌"，也不会跟界面的墨色灰阶打架。
 _MULTI_COLORS = [
-    UP_COLOR, "#3b82f6", DOWN_COLOR, "#f59e0b", "#a855f7", "#0891b2",
-    "#eab308", "#ec4899", "#6366f1",
+    "#2F3A45",  # 深石板
+    "#7C8B9A",  # 钢灰
+    "#8C6A4F",  # 陶土
+    "#5A7480",  # 蓝灰
+    "#B9A17B",  # 沙
+    "#7E8C6E",  # 橄榄
+    "#9A8AA3",  # 灰紫
+    "#AF8578",  # 赤陶
+    "#B4BCC4",  # 浅钢灰
 ]
 
 
@@ -420,12 +475,8 @@ def build_multi_comparison(hist_by_name: dict) -> go.Figure:
                 line=dict(color=_MULTI_COLORS[i % len(_MULTI_COLORS)], width=2),
             )
         )
-    fig.update_layout(
-        height=380,
-        margin=dict(l=10, r=10, t=10, b=10),
-        yaxis_title="走势（起点=100）",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    )
+    fig.update_layout(yaxis_title="走势（起点=100）")
+    _apply_chart_theme(fig, height=380, legend=True, hovermode="x unified")
     return fig
 
 
@@ -519,11 +570,10 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
 
     fig = go.Figure()
 
-    fig.add_hline(
-        y=baseline, line=dict(color=NEUTRAL_COLOR, width=1, dash="dot"),
-        annotation_text=f"起始 ${baseline:,.0f}", annotation_position="top left",
-        annotation_font=dict(size=10, color=NEUTRAL_COLOR),
-    )
+    # 起始本金参考线。原来是点线+左上角一块带框注释，注释框压在曲线上方很占
+    # 地方。改成一条极淡的实线，标签挪到右端轴外——参考线的作用是"让人一眼
+    # 看出现在在它上面还是下面"，它自己不该抢戏。
+    fig.add_hline(y=baseline, line=dict(color="rgba(23,24,28,0.18)", width=1))
 
     # 用户明确要求"港美股都不能交易的时间段不用显示收益，因为一直不变一直是
     # 直线"——快照本身只在开盘时段记录(sim_snapshot.py没开盘直接跳过不落库)，
@@ -544,13 +594,20 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
         rows.append(df.iloc[i].to_dict())
     df_plot = pd.DataFrame(rows)
 
+    # 曲线本身。这里改了三处，都是"看着像AI生成的示意图"的直接来源：
+    #
+    # 1. 去掉 shape="spline"/smoothing。给金融时序做平滑曲线是硬伤——两个真实
+    #    快照点之间被插出一段并不存在的圆润走势，图上那个"最高点"可能根本没
+    #    发生过。净值曲线必须是直线段连点，数据是什么形状就画什么形状。
+    # 2. 去掉 fill="tozeroy"。净值从来不是从0起算的，填充到0意味着那一大片
+    #    色块下沿是个假的基准，视觉上还会把曲线本身的波动压扁看不出来。
+    # 3. 去掉每个点的 marker。5分钟一个点，一天几十上百个圆点连成一串珠子，
+    #    信息量为零。只在最后一个点保留一个实心圆当"当前位置"的锚。
     fig.add_trace(
         go.Scatter(
-            x=df_plot["run_at"], y=df_plot["assets_hkd"], mode="lines+markers", connectgaps=False,
-            line=dict(color=line_color, width=2.5, shape="spline", smoothing=0.35),
-            marker=dict(size=5, color=line_color, line=dict(color="#fff", width=1)),
-            fill="tozeroy", fillcolor=_hex_to_rgba(line_color, 0.08),
-            hovertemplate="%{x|%m-%d %H:%M}<br>$%{y:,.0f}<extra></extra>",
+            x=df_plot["run_at"], y=df_plot["assets_hkd"], mode="lines", connectgaps=False,
+            line=dict(color=line_color, width=1.75, shape="linear"),
+            hovertemplate="%{x|%m-%d %H:%M}　$%{y:,.0f}<extra></extra>",
         )
     )
 
@@ -581,25 +638,32 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
                     boundary = datetime.combine(d, t, tzinfo=ZoneInfo(tz_name)).astimezone(_cn)
                     if not (data_min <= boundary <= data_max):
                         continue
-                    fig.add_vline(
-                        x=boundary, line=dict(color=UP_COLOR, width=1, dash="dash"),
-                        opacity=0.5,
-                        annotation_text=(f"{label_prefix}{suffix}" if granularity == "day" else None),
-                        annotation_font=dict(size=9, color=UP_COLOR),
-                        annotation_position="top",
-                    )
+                    # 原来是红色虚线+"港股开盘"这类文字标注。一天四条红虚线
+                    # 加四段文字压在曲线上，是这张图上最吵的一层；而且红色在
+                    # 全站只表示"涨"，用它画时间分隔线属于语义挪用。改成极淡的
+                    # 中性竖线、不带文字：分隔信息保留（配合下面的rangebreaks，
+                    # 断点位置本来就一眼可见），噪声去掉。
+                    fig.add_vline(x=boundary, line=dict(color="rgba(23,24,28,0.10)", width=1))
 
+    # 当前净值。原来是"带白底、带边框、带箭头"的注释框，三层装饰只为显示一个
+    # 数字。改成曲线末端一个实心圆点 + 紧挨着的纯色文字，不带框不带箭头——
+    # 让数字直接长在线的末端，是财经图表里最省事也最好看的一种收尾。
     last = df.iloc[-1]
+    fig.add_trace(
+        go.Scatter(
+            x=[last["run_at"]], y=[last["assets_hkd"]], mode="markers",
+            marker=dict(size=6, color=line_color), hoverinfo="skip", showlegend=False,
+        )
+    )
     fig.add_annotation(
-        x=last["run_at"], y=last["assets_hkd"], text=f"${last['assets_hkd']:,.0f}",
-        showarrow=True, arrowhead=0, arrowcolor=line_color, ax=0, ay=-28,
-        font=dict(size=12, color=line_color, weight="bold"),
-        bgcolor="rgba(255,255,255,0.92)", bordercolor=line_color, borderwidth=1, borderpad=3,
+        x=last["run_at"], y=last["assets_hkd"], text=f"  ${last['assets_hkd']:,.0f}",
+        showarrow=False, xanchor="left", yanchor="middle",
+        font=dict(family=_CHART_FONT, size=12, color=line_color),
     )
 
     y_min = min(baseline, df["assets_hkd"].min())
     y_max = max(baseline, df["assets_hkd"].max())
-    y_pad = max((y_max - y_min) * 0.25, baseline * 0.002)
+    y_pad = max((y_max - y_min) * 0.12, baseline * 0.002)
 
     # X轴范围显式锁定在数据实际的[min,max]（右边留一点padding避免最后一个
     # 端点标注被裁掉）——不再靠autorange自己算，理由见上面vline那段注释。
@@ -608,10 +672,13 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
 
     fig.update_layout(
         height=300,
-        margin=dict(l=10, r=10, t=36, b=10),
+        # 右边多留一截：末值数字是贴着曲线末端往右画的，留窄了会被裁掉。
+        margin=dict(l=6, r=76, t=22, b=6),
         yaxis=dict(
-            title="总资产（美元）", range=[y_min - y_pad, y_max + y_pad],
-            gridcolor="rgba(0,0,0,0.06)", zeroline=False,
+            # 去掉"总资产（美元）"这个轴标题——刻度本身已经是 $ 开头，再写一遍
+            # 是冗余，而且竖排的轴标题会把整张图往右挤。
+            range=[y_min - y_pad, y_max + y_pad], zeroline=False,
+            tickprefix="$", tickformat=",.0f",
         ),
         xaxis=dict(
             # 用户明确要求"港股收盘到美股开盘那段空白砍掉"——休市空档不但
@@ -631,9 +698,13 @@ def build_sim_equity_curve(points: list[dict], baseline: float = 100_000.0, gran
             # 视图数据跨度更大，密刻度会挤爆，继续用nticks让Plotly自己按
             # 当前range挑合适间隔。
             **(dict(dtick=30 * 60 * 1000) if granularity == "day" else dict(nticks=8)),
-            gridcolor="rgba(0,0,0,0.04)",
         ),
-        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        showlegend=False,
     )
+    # 起始本金那条线的标签放在轴外右侧，跟末值数字上下错开，互不遮挡。
+    fig.add_annotation(
+        xref="paper", x=1.0, y=baseline, text=f"  起始 ${baseline:,.0f}",
+        showarrow=False, xanchor="left", yanchor="middle",
+        font=dict(family=_CHART_FONT, size=10, color=_CHART_FAINT),
+    )
+    _apply_chart_theme(fig, height=300, margin=dict(l=6, r=76, t=22, b=6))
     return fig

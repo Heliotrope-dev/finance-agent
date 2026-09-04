@@ -360,6 +360,14 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 # 直接注入即可，少一层看不见的字符串替换。
 st.markdown(_FA_BASE_CSS, unsafe_allow_html=True)
 
+# Plotly 图表的统一显示配置。默认会在图右上角浮出一条自带的工具条（相机/缩放/
+# 十字光标/自动缩放/全屏那一排图标），它是 Plotly 的品牌痕迹——一眼就能看出
+# "这张图是拿现成库画的"，而且那排图标的视觉语言（灰色线框小图标）跟这个项目
+# 的其它部分完全不搭。这些功能对"看一眼走势"这个场景也几乎没用。统一关掉，
+# 同时关掉双击缩放这类容易误触的交互，让图表回到"一张安静的图"。
+_PLOTLY_CONFIG = {"displayModeBar": False, "scrollZoom": False, "doubleClick": False}
+
+
 # ── 加载中遮罩 ────────────────────────────────────────────────────────────────
 # 这个app所有页面跳转（列表点进详情页、返回列表、切换市场等）走的都是真实的
 # <a href="?...">整页导航，浏览器会先展示上一个页面最后一帧，再等Streamlit
@@ -1156,7 +1164,8 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
         bm_name = _BENCHMARK_NAMES[market]
         if benchmark is not None and not benchmark.empty:
             st.plotly_chart(
-                build_benchmark_comparison(hist, benchmark, benchmark_name=bm_name), use_container_width=True,
+                build_benchmark_comparison(hist, benchmark, benchmark_name=bm_name),
+                use_container_width=True, config=_PLOTLY_CONFIG,
             )
             if is_fresh:
                 stock_pct = (float(hist.iloc[-1]["收盘"]) / float(hist.iloc[0]["收盘"]) - 1) * 100
@@ -1194,7 +1203,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
         st.markdown(f"**技术面信号**：{technical_summary}")
 
         if hist is not None and not hist.empty:
-            st.plotly_chart(build_return_histogram(hist), use_container_width=True)
+            st.plotly_chart(build_return_histogram(hist), use_container_width=True, config=_PLOTLY_CONFIG)
 
         st.caption("AI 解读（交叉验证消息面、财务、技术面是否一致）")
         if is_fresh:
@@ -2453,10 +2462,11 @@ def _render_stock_detail(symbol: str, market: str, name: str):
         if intraday.empty:
             st.caption("今天的分时数据暂时取不到，展示日K替代。")
             if hist is not None and not hist.empty:
-                st.plotly_chart(build_candlestick(hist), use_container_width=True)
+                st.plotly_chart(build_candlestick(hist), use_container_width=True, config=_PLOTLY_CONFIG)
         else:
             st.plotly_chart(
-                build_intraday_line(intraday, spot.get("昨收") if spot else None, market), use_container_width=True,
+                build_intraday_line(intraday, spot.get("昨收") if spot else None, market),
+                use_container_width=True, config=_PLOTLY_CONFIG,
             )
     elif market == "A":
         period_options = {"日K": ("d", 90), "周K": ("w", 730), "月K": ("m", 1825)}
@@ -2468,16 +2478,17 @@ def _render_stock_detail(symbol: str, market: str, name: str):
         except Exception:
             chart_hist = hist
         if chart_hist is not None and not chart_hist.empty:
-            st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+            st.plotly_chart(build_candlestick(chart_hist), use_container_width=True, config=_PLOTLY_CONFIG)
     elif period_label == "分时K（今日）":
         intraday = get_stock_intraday_futu(symbol, market)
         if intraday.empty:
             st.caption("分时数据需要本地 Futu OpenD 连接、且当前有实时推送，暂时展示日K替代。")
             if hist is not None and not hist.empty:
-                st.plotly_chart(build_candlestick(hist), use_container_width=True)
+                st.plotly_chart(build_candlestick(hist), use_container_width=True, config=_PLOTLY_CONFIG)
         else:
             st.plotly_chart(
-                build_intraday_line(intraday, spot.get("昨收") if spot else None, market), use_container_width=True,
+                build_intraday_line(intraday, spot.get("昨收") if spot else None, market),
+                use_container_width=True, config=_PLOTLY_CONFIG,
             )
     else:
         chart_hist = get_stock_kline_futu(symbol, market, period_label)
@@ -2485,7 +2496,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
             chart_hist = hist
             st.caption("该周期需要本地 Futu OpenD 连接，当前展示日K替代。")
         if chart_hist is not None and not chart_hist.empty:
-            st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+            st.plotly_chart(build_candlestick(chart_hist), use_container_width=True, config=_PLOTLY_CONFIG)
 
     # 手机上进详情页第一屏默认只有图表这一块——之前新闻/AI分析这些小组件
     # 全部一起加载，手机上往下滑浏览的时候很容易手滑碰到中间那些按钮
@@ -2598,10 +2609,11 @@ def _render_index_detail(name: str, code: str, market: str):
             except Exception:
                 chart_hist = None
             if chart_hist is not None and not chart_hist.empty:
-                st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+                st.plotly_chart(build_candlestick(chart_hist), use_container_width=True, config=_PLOTLY_CONFIG)
         else:
             st.plotly_chart(
-                build_intraday_line(intraday, base_price, market), use_container_width=True,
+                build_intraday_line(intraday, base_price, market),
+                use_container_width=True, config=_PLOTLY_CONFIG,
             )
     else:
         try:
@@ -2610,7 +2622,7 @@ def _render_index_detail(name: str, code: str, market: str):
             chart_hist = None
             st.error(f"K线加载失败：{e}")
         if chart_hist is not None and not chart_hist.empty:
-            st.plotly_chart(build_candlestick(chart_hist), use_container_width=True)
+            st.plotly_chart(build_candlestick(chart_hist), use_container_width=True, config=_PLOTLY_CONFIG)
 
     idx_expand_key = f"_idx_expand_{code}_{market}"
     st.divider()
@@ -2686,7 +2698,7 @@ def _render_index_detail(name: str, code: str, market: str):
             scol4.metric("夏普比率(简化)", stats.get("夏普比率(简化)", "—"))
         st.markdown(f"**技术面信号**：{technical_summary}")
         if has_hist:
-            st.plotly_chart(build_return_histogram(daily_hist), use_container_width=True)
+            st.plotly_chart(build_return_histogram(daily_hist), use_container_width=True, config=_PLOTLY_CONFIG)
 
         st.caption("AI 解读")
         if _idx_cross_fresh:
@@ -3011,7 +3023,7 @@ def _render_ai_sim_dashboard():
                 build_sim_equity_curve(
                     windowed, baseline=sim_agent._VIRTUAL_BUDGET_HKD / sim_trader.USD_HKD_RATE, granularity=granularity,
                 ),
-                use_container_width=True,
+                use_container_width=True, config=_PLOTLY_CONFIG,
             )
         else:
             st.caption(f"「{view}」这个范围内数据点还不够画线——换个更大的范围看看，或者等AI多跑几轮。")
@@ -3055,7 +3067,7 @@ def _render_ai_sim_dashboard():
             if allocation_rows and _total_usd > 0:
                 st.plotly_chart(
                     build_position_donut(allocation_rows, _total_usd, currency_symbol="$", show_legend=True),
-                    use_container_width=True, key="_ai_sim_allocation_donut",
+                    use_container_width=True, config=_PLOTLY_CONFIG, key="_ai_sim_allocation_donut",
                 )
             else:
                 st.caption("暂无数据。")
@@ -3073,7 +3085,7 @@ def _render_ai_sim_dashboard():
             if position_rows:
                 st.plotly_chart(
                     build_position_donut(position_rows, holdings_total_usd, currency_symbol="$", show_legend=True),
-                    use_container_width=True, key="_ai_sim_positions_donut",
+                    use_container_width=True, config=_PLOTLY_CONFIG, key="_ai_sim_positions_donut",
                 )
             else:
                 st.caption("当前空仓。")
@@ -3189,7 +3201,7 @@ def _render_positions_donut(positions: list):
 
     holdings.sort(key=lambda h: h["value_cny"], reverse=True)
     total_value_cny = sum(h["value_cny"] for h in holdings)
-    st.plotly_chart(build_position_donut(holdings, total_value_cny), use_container_width=True, key="_positions_donut")
+    st.plotly_chart(build_position_donut(holdings, total_value_cny), use_container_width=True, config=_PLOTLY_CONFIG, key="_positions_donut")
     if skipped:
         st.caption(f"有 {skipped} 支持仓因行情/汇率暂时获取不到，未计入本图。")
 
@@ -3809,7 +3821,7 @@ def _render_accuracy_dashboard(email: str):
             xaxis=dict(showgrid=False, showticklabels=False),
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         )
-        st.plotly_chart(_fig, use_container_width=True, key="_accuracy_calendar_heatmap")
+        st.plotly_chart(_fig, use_container_width=True, config=_PLOTLY_CONFIG, key="_accuracy_calendar_heatmap")
 
     st.divider()
     st.markdown("**最近这些判断，一条条看**")
@@ -3984,7 +3996,7 @@ def _show_stock_search_dialog(email: str):
         for ccol, c in zip(cand_cols, candidates):
             if ccol.button(
                 f"{c['market_label']}（{c['symbol']}）", key=f"_pos_search_cand_{c['market']}_{c['symbol']}",
-                use_container_width=True,
+                use_container_width=True, config=_PLOTLY_CONFIG,
             ):
                 sym = _resolve_add_symbol(cq, c["market"])
                 if sym:
@@ -4109,7 +4121,7 @@ def _show_add_position_dialog(email: str):
         for ccol, c in zip(cand_cols, cands):
             if ccol.button(
                 f"{c['market_label']}（{c['symbol']}）", key=f"_pos_cand_{c['market']}_{c['symbol']}",
-                use_container_width=True,
+                use_container_width=True, config=_PLOTLY_CONFIG,
             ):
                 confirmed = _resolve_confirmed_symbol(email, cq, c["market"])
                 if confirmed:
@@ -4207,7 +4219,7 @@ def _show_compare_dialog(positions: list):
 
     cached = st.session_state.get("_pos_compare_result")
     if cached and cached["params"] == (tuple(picked_labels), period_label):
-        st.plotly_chart(build_multi_comparison(cached["hist_by_name"]), use_container_width=True)
+        st.plotly_chart(build_multi_comparison(cached["hist_by_name"]), use_container_width=True, config=_PLOTLY_CONFIG)
 
 
 _page_slot = st.empty()
