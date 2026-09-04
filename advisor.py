@@ -239,47 +239,39 @@ def _is_insufficient_balance_error(exc: Exception) -> bool:
 
 
 def _check_qwen_balance():
-    """main()一开始就先探测一次千问账号是否欠费——这个脚本几乎所有AI调用
-    (screen候选判断/持仓判断/组合分析)都走千问，一旦欠费，与其让整个流程
-    一步步跑到底、每一步AI调用各自失败又各自被局部try/except吞掉、最后
-    只留下一句含糊的"这次没有从候选池里判断出任何有效结果"（跟Futu筛选
-    失败/AkShare故障长得一模一样，没法区分），不如一开始花一次几乎零成本
-    的探测调用(max_tokens=5)提前问清楚，欠费就直接终止、打印一条不会被
-    误认成别的问题的明确消息，省下后面整趟徒劳的Futu/AkShare/AI调用。
+    """开跑前确认"至少还有一家AI供应商能用"，一家都没有就早停。
 
-    只拦截"确认是欠费"这一种情况——探测调用本身如果因为网络抖动等其它
-    原因失败，不能因此判定"欠费"进而阻断整次正常运行，静默放行即可，
-    真正的AI调用失败自然会在后面各自的环节暴露。
+    这个脚本几乎每一步都要调AI（候选初筛、逐支判断、组合分析）。一家都不通
+    的时候与其让流程一路跑到底、每步各自失败又各自被局部try/except吞掉、
+    最后只留下一句含糊的"没判断出任何有效结果"（跟Futu筛选失败长得一模一样，
+    没法区分），不如开头花一次几乎零成本的探测问清楚，然后打印一条不会被
+    误认成别的问题的明确消息，省下后面整趟徒劳的Futu/AkShare调用。
+
+    实现上直接复用 chat_with_failover，而不是自己再写一遍"探完千问探智谱"。
+    这一点是被同一个bug连着咬两次之后才改的：
+
+    第一版只探千问，千问周额度耗尽那天就把整轮掐死了，而当时智谱正常工作——
+    日志里只有"账号欠费直接终止"，看的人会以为该去充值，其实是这个检查本身
+    的问题。改成"千问不行再探智谱"之后，2026-09-05加第三家 SiliconFlow 时
+    又中了一次：两家都空了，检查照样终止，尽管 SiliconFlow 好好的。
+
+    根因是这个函数维护了一份"供应商清单"的副本，每加一家都要记得同步，而
+    这种"记得同步"的约定迟早会忘。改成调用真正的转移链，它能通就是能通，
+    结构上不可能再失配。
     """
     try:
-        _client().chat.completions.create(
-            model=_MODEL, messages=[{"role": "user", "content": "ping"}], max_tokens=5, stream=False,
+        chat_with_failover(
+            [{"role": "user", "content": "ping"}],
+            max_tokens=16, timeout=30, tag="preflight",
         )
     except Exception as e:
-        if _is_insufficient_balance_error(e):
-            # 千问不可用不再等于整轮终止——2026-09-04接上智谱故障转移之后，
-            # 所有AI调用点都会自动换家。这个前置检查如果还按老逻辑直接抛，
-            # 就会把一次本来能靠兜底跑完的运行当场掐死：今天排行榜没更新就是
-            # 这么来的，日志里只有一句"账号欠费直接终止"，而那时候智谱已经
-            # 在正常工作了。改成"再探一次备用供应商"：备用也不行才是真的没
-            # 路可走，值得终止；备用能用就只打一行提示继续跑。
-            try:
-                _zc = _zhipu_client()
-                if _zc is None:
-                    raise RuntimeError("没有配置智谱备用供应商")
-                _zc.with_options(max_retries=0, timeout=30).chat.completions.create(
-                    model=_ZHIPU_MODEL, messages=[{"role": "user", "content": "ping"}],
-                    max_tokens=5, stream=False,
-                )
-            except Exception as e2:
-                raise RuntimeError(
-                    f"紧急：千问和智谱两家AI供应商都不可用，投研顾问本次运行直接终止，"
-                    f"不再浪费后面的Futu/AkShare/AI调用。"
-                    f"千问原始错误：{e}；智谱原始错误：{e2}"
-                ) from e
-            print(f"[preflight] 千问不可用（{type(e).__name__}），智谱备用可用，本次运行改走备用继续。")
-            return
-        # 其它失败（网络抖动等）不阻断——真正的调用失败会在后面各环节暴露。
+        # 只在"确实一家都不通"时终止。探测本身因为网络抖动失败不该阻断整轮——
+        # 真正的调用失败会在后面各环节自己暴露。
+        if _is_insufficient_balance_error(e) or "所有AI供应商都失败了" in str(e):
+            raise RuntimeError(
+                f"紧急：所有已配置的AI供应商都不可用，投研顾问本次运行直接终止，"
+                f"不再浪费后面的Futu/AkShare/AI调用。原始错误：{e}"
+            ) from e
 
 
 def _client() -> OpenAI:
@@ -993,32 +985,32 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
    纪律，不是买了就不管。
 8. 除了四选一的结论，还要给一个0-100的综合得分，用来跨市场、跨股票统一
    排名。为了让不同评分人给出的分数真的能放在一起比较，不是各凭印象打分，
-   综合得分必须由下面五个维度分别打分后加总得到，不能跳过拆解直接给一个
+   综合得分必须由下面六个维度分别打分后加总得到，不能跳过拆解直接给一个
    总分：
 
-   （2026-09-05调整：原本是四个维度40/30/15/15。接入资金流向、机构持股、
+   （2026-09-05两次调整：原本四维40/30/15/15，先加筹码面成五维，再加分析师预期成六维，现为 30/24/11/14/10/11。接入资金流向、机构持股、
    内部人交易、空头数据之后，"谁在买谁在卖"成了一个有真实数据支撑的独立
    维度，单独列出来比塞进理由里更能进入排名。新增的15分是把原四项按比例
    压缩腾出来的——34/27/13/13 相对原来的 40/30/15/15 基本等比，不改变对
    原四项相对重要性的判断，只是让出位置给新信息。**这次改动之后的分数跟
    之前的历史分数不能直接横向比较**，跨改动的一致率统计要注意这个断点。）
-   - 基本面质量（0-34分）：盈利能力、增长的真实性（结构性改善还是一次性
-     因素驱动）、负债水平、所处行业周期位置。40分附近=数据扎实、增长可
-     持续、负债健康；20分附近=有明显硬伤或数据不足以下判断；0分附近=基本面
+   - 基本面质量（0-30分）：盈利能力、增长的真实性（结构性改善还是一次性
+     因素驱动）、负债水平、所处行业周期位置。30分附近=数据扎实、增长可
+     持续、负债健康；15分附近=有明显硬伤或数据不足以下判断；0分附近=基本面
      正在恶化。
-   - 价格位置安全边际（0-27分）：现价相对52周高低点的位置，结合估值历史
+   - 价格位置安全边际（0-24分）：现价相对52周高低点的位置，结合估值历史
      分位——有分位数据时必须按分位打分，只有静态倍数（没有历史分位）时最高
-     不超过20分，因为缺了"相对自己历史贵不贵"这个参照，打不出高确定性的分。
-     27分附近=明确低位+估值处于历史低分位；13分附近=位置中性；0分附近=接近
+     不超过18分，因为缺了"相对自己历史贵不贵"这个参照，打不出高确定性的分。
+     24分附近=明确低位+估值处于历史低分位；12分附近=位置中性；0分附近=接近
      52周高点或估值明显偏贵。
-   - 技术面确认（0-13分）：技术面信号是否支持基本面结论、有没有背离。
-     13分=技术面与基本面同向确认；6分附近=信号中性或数据不足；0分=技术面
+   - 技术面确认（0-11分）：技术面信号是否支持基本面结论、有没有背离。
+     11分=技术面与基本面同向确认；5分附近=信号中性或数据不足；0分=技术面
      跟基本面结论明显背离，应该在理由里明确写出背离在哪。
-   - 筹码面（0-15分）：持有这只股票的人在做什么。看四样东西——当日主力资金
+   - 筹码面（0-14分）：持有这只股票的人在做什么。看四样东西——当日主力资金
      （超大单+大单）是净流入还是净流出、机构持股比例的环比变化、内部人
      （高管/董事）近期是买还是卖、空头持仓和回补天数。
-     15分附近=主力持续净流入且机构在加仓，或者有内部人买入这种强信号；
-     7分附近=资金面中性，或者这类数据拿不到（港股没有空头数据、A股没有
+     14分附近=主力持续净流入且机构在加仓，或者有内部人买入这种强信号；
+     6分附近=资金面中性，或者这类数据拿不到（港股没有空头数据、A股没有
      机构持股披露，属于结构性缺失，不该按"坏"来罚分）；
      0分附近=主力大幅净流出、机构连续减持、内部人集中卖出。
      这一项有一个别的维度替代不了的作用：给其它维度做交叉验证。技术面转强
@@ -1028,17 +1020,29 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
      容易踩踏"，那是上行风险不是利空，不要按利空扣分；内部人买入和卖出不
      对称，买入是拿自己的钱押注的强信号，卖出可能只是行权套现或个人资金
      安排，不能对称解读。
-   - 数据确定性（0-13分）：财务/新闻/技术面/筹码面这几类数据是不是都拿到
-     了、互相是否印证——缺一类就要扣分，不能假装齐全。13分=数据齐全且互相
+   - 分析师预期与催化剂（0-10分）：这是判断链条里唯一"完全外部、且带方向和
+     时间"的信息——基本面技术面筹码面都是你自己从数据里读出来的，分析师的
+     一致预期和评级变动是别人做完功课之后的结论。看三样：目标价均值相对
+     现价的隐含空间、近期有没有机构上调或下调评级（含目标价调整幅度）、
+     下次财报日是不是临近。
+     10分附近=一致预期给出明显上行空间，且近期有机构上调；
+     5分附近=预期中性，或者这支没有分析师覆盖（大量中小市值股票本来就没有
+     覆盖，属于结构性缺失，不该按"坏"来罚分）；
+     0分附近=一致预期已经低于现价，或近期有机构下调。
+     两点提醒：卖方一致预期系统性偏乐观，目标价隐含空间要打折看，不能当成
+     兑现概率；财报日临近本身不是好也不是坏，它是"不确定性即将释放"，
+     在这个位置重仓要意识到自己在赌一个短期二元结果，这一点要写进理由里。
+   - 数据确定性（0-11分）：财务/新闻/技术面/筹码面这几类数据是不是都拿到
+     了、互相是否印证——缺一类就要扣分，不能假装齐全。11分=数据齐全且互相
      印证；0分=数据严重缺失，判断基本靠猜。**"没有估值历史分位数据"这一点
      不算在这个维度里**——美股这类结构性缺分位数据的市场，"价格位置"那一项
-     已经因为这个原因把上限压到了20/27分，这里不能因为同一个缺口再扣一次，
+     已经因为这个原因把上限压到了18/24分，这里不能因为同一个缺口再扣一次，
      不然同一件事被罚了两次分，跨市场比较会失真。同理，港股拿不到空头数据、
      A股拿不到机构持股，也属于结构性缺失，不在这里重复扣分。
-   五项分数必须在"维度打分"里逐项列出来，综合得分原则上等于五项之和；如果
-   五项加总跟你的整体判断有出入，允许再做不超过±5分的微调，但必须在"理由"
-   里说明为什么调（比如"五项之和72，但新闻里有一条未被上面数据覆盖的重大
-   负面消息，下调5分"），不能五项加完之后随意大改，那样拆解打分就失去意义。
+   六项分数必须在"维度打分"里逐项列出来，综合得分原则上等于六项之和；如果
+   六项加总跟你的整体判断有出入，允许再做不超过±5分的微调，但必须在"理由"
+   里说明为什么调（比如"六项之和72，但新闻里有一条未被上面数据覆盖的重大
+   负面消息，下调5分"），不能六项加完之后随意大改，那样拆解打分就失去意义。
    分数要跟结论逻辑自洽（比如给"卖出"却打70分以上是不合理的）。
 9. 最后必须附一句："仅供参考，不构成投资建议，请自行判断。"
 
@@ -1093,7 +1097,7 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
 结论：[买入/卖出/持有/观望]
 投资期限：[你判断这个结论成立的时间尺度，例如 3-6个月]
 目标价：[数字+币种（较现价+X%），后面紧跟一句推导：用什么倍数×什么基数、为什么选它；给不出就写"数据不足以给出目标价"并说明缺什么]
-维度打分：基本面X/34 · 价格位置X/27 · 技术面X/13 · 筹码面X/15 · 数据确定性X/13
+维度打分：基本面X/30 · 价格位置X/24 · 技术面X/11 · 筹码面X/14 · 分析师预期X/10 · 数据确定性X/11
 综合得分：[0-100的整数]
 置信度：[高/中/低]
 基本面：<一到两句话，增长数字要点出是一次性还是结构性>
@@ -1231,9 +1235,64 @@ def _chips_summary_text(symbol: str, market: str) -> str:
 
     return "\n".join(parts)
 
+
+def _analyst_view_text(symbol: str, market: str, price: float | None = None) -> str:
+    """分析师预期与催化剂：一致预期、近期评级变动、临近的财报日。
+
+    2026-09-05新增，作为打分的第六个维度。选它做独立维度的理由：这是判断
+    链条里唯一"完全外部、且带方向和时间"的信息——基本面技术面筹码面都是我们
+    自己从数据里读出来的，分析师一致预期和评级变动是别人做完功课后的结论，
+    评级从持有上调到买入、目标价从450调到530，是一个有日期的事件，可以跟
+    盘面异动对上。财报日则是催化剂时点：知道下周四出财报，跟不知道，是两种
+    仓位安排。
+
+    三段任一取不到就整段不出现，不写"暂无"占位。
+    """
+    parts = []
+
+    consensus = _analyst_consensus_text(symbol, market)
+    if consensus:
+        parts.append("一致预期：" + consensus)
+
+    # 评级变动：接口返回的是全市场近期变动，按代码过滤出这一支
+    try:
+        changes = [c for c in ds.get_rating_changes(market, limit=60)
+                   if str(c.get("symbol", "")).upper() == str(symbol).upper()]
+    except Exception:
+        changes = []
+    if changes:
+        _ct = {"UPGRADE": "上调", "DOWNGRADE": "下调", "MAINTAIN": "维持", "INIT": "首次覆盖"}
+        lines = []
+        for c in changes[:3]:
+            seg = f"{c.get('institution', '')}{_ct.get(c.get('change_type'), c.get('change_type') or '')}"
+            if c.get("last_rating") and c.get("rating"):
+                seg += f"（{c['last_rating']}→{c['rating']}）"
+            if c.get("target_price"):
+                seg += f"，目标价{c['target_price']:,.0f}"
+                if c.get("last_target_price"):
+                    seg += f"（原{c['last_target_price']:,.0f}）"
+            lines.append(seg)
+        parts.append("近期评级变动：" + "；".join(lines))
+
+    if market == "US":
+        try:
+            e = (ds.get_earnings_dates((symbol,), days=35) or {}).get(str(symbol).upper())
+        except Exception:
+            e = None
+        if e and e.get("date"):
+            seg = f"下次财报：{e['date']}"
+            if e.get("period"):
+                seg += f"（{e['period']}）"
+            if e.get("eps_predict"):
+                seg += f"，市场预期EPS {e['eps_predict']}"
+            parts.append(seg)
+
+    return "\n".join(parts)
+
 def _build_judge_user_content(symbol: str, market: str, name: str, financial_summary: str,
                                technical_summary: str, news_summary: str, position_summary: str,
-                               valuation_summary: str = "", chips_summary: str = "") -> str:
+                               valuation_summary: str = "", chips_summary: str = "",
+                               analyst_view: str = "") -> str:
     return (
         f"股票：{name}（{symbol}，{market}股）\n\n"
         f"财务摘要：\n{financial_summary or '（暂无财务数据）'}\n\n"
@@ -1241,6 +1300,7 @@ def _build_judge_user_content(symbol: str, market: str, name: str, financial_sum
         f"技术面信号：{technical_summary or '（数据不足）'}\n\n"
         f"价格位置（52周区间）：{position_summary or '（数据不足）'}\n\n"
         + (f"筹码面（谁在买谁在卖）：\n{chips_summary}\n\n" if chips_summary else "")
+        + (f"分析师预期与催化剂：\n{analyst_view}\n\n" if analyst_view else "")
         + f"近期新闻：\n{news_summary or '（暂无相关新闻）'}"
     )
 
@@ -1248,11 +1308,11 @@ def _build_judge_user_content(symbol: str, market: str, name: str, financial_sum
 def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summary: str,
                              technical_summary: str, news_summary: str, position_summary: str = "",
                              valuation_summary: str = "", holding: bool = True,
-                             chips_summary: str = "") -> dict:
+                             chips_summary: str = "", analyst_view: str = "") -> dict:
     """带多空辩论的判断——只给持仓用（见上面的成本考量注释）。bull/bear两个
     论证并发生成（互不依赖，同时发也不影响独立性——两边都只能看到原始数据，
     看不到对方的论证，这才是真正各自独立的论据，不是一个抄另一个）。"""
-    data_context = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary, chips_summary)
+    data_context = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary, chips_summary, analyst_view)
 
     def _call_stance(client, model, system_prompt):
         # 真实故障(2026-09-02)：持仓页"英伟达/阿里巴巴/美光科技/亚马逊/
@@ -1393,8 +1453,8 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
 def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
                  technical_summary: str, news_summary: str, position_summary: str = "",
                  valuation_summary: str = "", holding: bool = False,
-                 chips_summary: str = "") -> dict:
-    user_content = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary, chips_summary)
+                 chips_summary: str = "", analyst_view: str = "") -> dict:
+    user_content = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary, chips_summary, analyst_view)
     system_prompt = _JUDGE_SYSTEM + _HOLDING_ADDENDUM if holding else _JUDGE_SYSTEM
     # max_retries=0+timeout=90：真实故障(2026-09-02)排查judge_stock_with_
     # debate那边的卡死问题时顺带发现——这里的.create()调用同样从来没设过
@@ -1692,14 +1752,16 @@ def _judge_one(item: dict, source: str) -> dict | None:
     # 和技术面是并列的第三个维度，它的独特价值是给另外两个做交叉验证——
     # 技术面转强但主力净流出，说明这波是散户在推，可靠性要打折。
     chips = _chips_summary_text(symbol, market)
+    # 分析师预期与催化剂（2026-09-05新增，打分的第六维）
+    analyst_view = _analyst_view_text(symbol, market, price)
     try:
         # 持仓判断走多空辩论版本（更扎实但3倍AI调用），候选池初筛(source=
         # "screen")继续用单次判断——几十支候选一天判断一遍，辩论版本的
         # 调用量级在那个场景下不划算，见judge_stock_with_debate上面的注释。
         if holding:
-            verdict = judge_stock_with_debate(symbol, market, name, fin, tech, news, position, valuation, holding=True, chips_summary=chips)
+            verdict = judge_stock_with_debate(symbol, market, name, fin, tech, news, position, valuation, holding=True, chips_summary=chips, analyst_view=analyst_view)
         else:
-            verdict = judge_stock(symbol, market, name, fin, tech, news, position, valuation, holding=False, chips_summary=chips)
+            verdict = judge_stock(symbol, market, name, fin, tech, news, position, valuation, holding=False, chips_summary=chips, analyst_view=analyst_view)
     except Exception as e:
         return {"symbol": symbol, "market": market, "name": name, "error": str(e)}
     return {

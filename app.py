@@ -3086,27 +3086,11 @@ def _show_closure_notice(items: list[dict]):
             unsafe_allow_html=True,
         )
     st.caption("休市期间该市场不接受委托，AI 模拟盘也不会在这些日子里做决策。")
-    if st.button("知道了", type="primary", use_container_width=True, key="_closure_ack"):
-        # 点"知道了"= 今天不再提醒，直接把当天配额打满。
-        #
-        # 第一版这里只是 st.rerun()，用户反馈"点知道了没反应"——因为配额是
-        # 在弹出之前就加了1，rerun 之后次数才1、还没到3，判断照样成立，
-        # 弹窗立刻又出来，看上去就像按钮失灵。
-        #
-        # 三次配额的正确含义是给"没点确认就走开"的情况留的（用右上角叉关掉、
-        # 或者直接切页），那种情况下当天还会再提醒最多两次；一旦明确点了
-        # "知道了"，就是看到并确认过了，今天不该再打扰。
-        import datetime as _d
-        _t = str(_d.date.today())
-        st.session_state[f"_closure_n_{_t}"] = 99
-        _em = st.session_state.get("user_email")
-        if _em:
-            try:
-                for _ in range(3):
-                    bump_closure_notice_count(_em, _t)
-            except Exception:
-                pass
-        st.rerun()
+    # 不放"知道了"按钮——用户明确要求"按叉叉就直接退出了"。
+    # Streamlit 弹窗自带右上角关闭，再加一个确认按钮是多余的一次点击；而且
+    # 那个按钮之前还引入过一个真问题：点它触发 rerun，配额判断重新执行一遍，
+    # 弹窗立刻又出来，看上去像按钮失灵。少一个控件就少一处这种耦合。
+    # 关掉之后本次会话内不会再弹（见 _maybe_show_closure_notice 的会话闸门）。
 
 
 def _maybe_show_closure_notice():
