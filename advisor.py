@@ -361,7 +361,7 @@ def _is_quota_or_ratelimit_error(err: Exception) -> bool:
 
 
 def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: float = 0.3,
-                       timeout: float = 120, tag: str = "") -> str:
+                       timeout: float = 120, tag: str = "", prefer: str = "") -> str:
     """所有非流式AI调用的统一入口：千问顶不住就自动换智谱。
 
     2026-09-04真实故障催生的：千问的周额度在当天下午耗尽
@@ -386,12 +386,20 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
     # 踩过的坑是同一个。按调用点原样的预算转过去，思考链很容易把额度吃光、
     # 正文返回空——那就等于兜底了个寂寞。给智谱放宽到2倍，账号里air那包有
     # 1199万tokens，放宽这点量完全够烧。
-    for client_fn, model, who, budget_mult in (
+    _chain = [
         (_client, _MODEL, "千问", 1.0),
         (_zhipu_client, _ZHIPU_MODEL, "智谱", 2.0),
         # DeepSeek-V3 不是推理模型，没有隐藏思考链抢预算的问题，倍数用1.0。
         (_siliconflow_client, _SF_MODEL, "SiliconFlow", 1.0),
-    ):
+    ]
+    # prefer 只调整起点，不裁剪链条：把指定的那家转到队首，其余顺序不变。
+    # 这是给多空辩论用的——辩论的价值建立在"两方由互相独立的模型给出"之上，
+    # 双方都从千问开始就退化成同一个模型的左右手互搏了。让空头从智谱起步，
+    # 双方在供应商都健康时天然分开；而任何一家挂了，各自仍然能沿着完整的
+    # 三家链条往下兜，不会像以前那样只在两家之间打转。
+    if prefer:
+        _chain.sort(key=lambda x: x[2] != prefer)
+    for client_fn, model, who, budget_mult in _chain:
         # 熔断：这家刚刚才因为配额耗尽/限流失败过，冷却期内直接跳过，不再
         # 白撞一次。投研顾问一轮要judge一百多支股票，千问额度耗尽的那几天
         # 每一支都要先撞一次千问拿个429再转智谱——一百多次无谓往返，既拖慢
@@ -1349,6 +1357,46 @@ def _analyst_view_text(symbol: str, market: str, price: float | None = None) -> 
 
     return "\n".join(parts)
 
+def _web_view_text(symbol: str, market: str, name: str, *, deep: bool = False) -> str:
+    """从公开网页挖这只股票的外部看法与催化剂，喂给判断链条。
+
+    2026-09-05新增。用户要求把 web_research 这个数据源"加到我们的股票生态里面
+    去"，不只用在新股上。它补的是富途接口结构性拿不到的那类信息：接口给的是
+    数字（评级档位、目标价、持股比例），网页上才有"为什么"——某家机构上调的
+    理由、产品发布或监管落地这种带日期的催化剂、以及市场当下在担心什么。
+
+    调用强度分两档，因为成本结构完全不同：
+
+      deep=True   持仓判断和个股详情的深度分析。这两条路径一天只跑几十次，
+                  每次都值得花一次搜索加两次正文抓取，无条件带上网页材料。
+      deep=False  候选池初筛。一天要过几十上百支，无条件抓会把外部请求量和
+                  单轮耗时顶上去，所以只在原生的分析师数据本来就是空的时候
+                  才兜底——这也正是用户说的"找不到挖不到的数据才去调用"。
+
+    搜索词按市场分语言：美股用英文，港股A股用中文。不是偏好问题，是覆盖问题
+    ——美股的机构观点几乎都在英文源里，用中文搜只能搜到二手转述。
+    """
+    try:
+        import web_research
+    except Exception:
+        return ""
+
+    if market == "美":
+        q = f"{symbol} stock analyst rating price target latest news"
+    else:
+        q = f"{name} {symbol} 港股 机构 评级 目标价 最新消息"
+
+    try:
+        # 初筛路径只读搜索结果标题不抓正文（read_top=0）：标题本身就带
+        # "某某上调目标价至X"这类信息，够用来判断有没有值得注意的外部变化，
+        # 而抓正文的开销是它的十几倍。
+        txt = web_research.research(q, read_top=2 if deep else 0,
+                                    limit=6, max_chars=2500 if deep else 0)
+    except Exception:
+        return ""
+    return txt[:4000] if txt else ""
+
+
 def _build_judge_user_content(symbol: str, market: str, name: str, financial_summary: str,
                                technical_summary: str, news_summary: str, position_summary: str,
                                valuation_summary: str = "", chips_summary: str = "",
@@ -1374,7 +1422,7 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
     看不到对方的论证，这才是真正各自独立的论据，不是一个抄另一个）。"""
     data_context = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary, chips_summary, analyst_view)
 
-    def _call_stance(client, model, system_prompt):
+    def _call_stance(client, model, system_prompt, who=""):
         # 真实故障(2026-09-02)：持仓页"英伟达/阿里巴巴/美光科技/亚马逊/
         # SpaceX/台积电"这6支自选长期"AI持仓判断"栏一直空着，复盘查到
         # 是这里——千问的BULL论证对着这几支的数据context（同样的数据
@@ -1412,20 +1460,32 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
         # system prompt。辩论的价值因此打了折扣（同一个模型的左右手互搏，
         # 共同的知识盲区不会被对方发现），但比整个功能失效要好。千问额度
         # 09-08恢复之后这个性质会自动回来，不需要改代码。
-        resp = client.with_options(max_retries=0, timeout=90).chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": data_context}],
-            max_tokens=12000,
-            temperature=0.5,  # 辩论双方要有观点区分度，比最终判断的0.3稍高
-            stream=False,
+        # 2026-09-05真实故障：这里原本直接拿裸客户端调，多头写死千问、空头
+        # 写死智谱，各自的兜底就是对方。千问周额度耗尽、智谱余额也见底的那
+        # 几天，双方连同兜底全在这两家里打转，够不到进程里已经配好并且正在
+        # 正常工作的 SiliconFlow——持仓的辩论判断整个跑不出来，报"双方供应商
+        # 都没能在预算内给出结果"。
+        #
+        # 这是同一个结构性毛病第二次犯：额度预检查那次也是自己另起一套供应商
+        # 探测，结果漏掉了链条里的第三家。教训是任何一处AI调用都不该自己复刻
+        # 供应商选择逻辑，一律走 chat_with_failover，新增供应商时才不会有
+        # 某个角落还停在旧的两家世界里。
+        #
+        # 辩论要的"双方模型互相独立"用 prefer 表达：多头从千问起、空头从智谱
+        # 起，两边各自沿完整链条往下兜。供应商都健康时性质跟以前一样；都欠费
+        # 时双方会落到同一家，退化成左右手互搏——但那比整个功能失效好。
+        text = chat_with_failover(
+            [{"role": "system", "content": system_prompt},
+             {"role": "user", "content": data_context}],
+            max_tokens=12000, temperature=0.5, timeout=90,
+            tag=f"debate/{symbol}", prefer=who,
         )
-        text = resp.choices[0].message.content or ""
         if not text.strip():
-            raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
+            raise RuntimeError("AI返回空内容")
         return text
 
     def _fetch_stance(spec):
-        system_prompt, client, model, fallback_client, fallback_model = spec
+        system_prompt, client, model, fallback_client, fallback_model, who = spec
         # 一方失败（没配key/网络问题/超时/像上面那样直接卡住不返回）时回落到
         # 另一方——保证辩论功能不会因为单一供应商这次抽风就整个报废。原来
         # 只有空头(智谱)有这层回落（回落到千问），多头(千问)失败直接放弃，
@@ -1435,14 +1495,9 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
         # 整次辩论直接失败，这几支持仓因此永远判断不出来。现在两边对称：
         # 谁失败了都回落到另一家真正独立的供应商重试一次，不再区分"主线/
         # 备线"，两边天生就是互为兜底的关系。
-        if client is None:
-            return _call_stance(fallback_client, fallback_model, system_prompt)
-        try:
-            return _call_stance(client, model, system_prompt)
-        except Exception:
-            if fallback_client is None:
-                raise
-            return _call_stance(fallback_client, fallback_model, system_prompt)
+        # 回落逻辑现在整个由 chat_with_failover 承担（它会沿三家链条往下走），
+        # 这里不再自己套一层"失败了换另一家"——那正是当初漏掉第三家的原因。
+        return _call_stance(client, model, system_prompt, who)
 
     # 多头：阿里千问，失败回落智谱；空头：智谱，失败回落千问——两家真正独立
     # 的供应商各自只看原始数据单独出论证，互相看不到对方，不是同一个模型
@@ -1452,8 +1507,8 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
     # 90秒留了足够余量，不再跟主力超时的秒数强绑在一起）。
     stance_results = _run_concurrent_with_deadline(
         [
-            (_BULL_SYSTEM, _client(), _MODEL, _zhipu_client(), _ZHIPU_MODEL),
-            (_BEAR_SYSTEM, _zhipu_client(), _ZHIPU_MODEL, _client(), _MODEL),
+            (_BULL_SYSTEM, None, None, None, None, "千问"),
+            (_BEAR_SYSTEM, None, None, None, None, "智谱"),
         ],
         # 外层deadline 90->240：单次stance超时放宽到90秒，加上失败后回落到
         # 另一家再跑一次，两段串起来最坏接近180秒，外层必须比这个宽出余量，
@@ -1483,26 +1538,18 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
     # 思路：千问失败就换智谱重新裁决一次，不再是"没有更下游的兜底"，
     # 跟上面_fetch_stance的设计原则一致——即使增加了理论上的裁判/空头
     # 同供应商偏袒，也好过这支票直接判断失败、前面的论证白做。
-    def _call_judge(client, model):
-        resp = client.with_options(max_retries=0, timeout=90).chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": final_user_content}],
-            max_tokens=8000,
-            temperature=0.3,
-            stream=False,
-        )
-        text = resp.choices[0].message.content or ""
-        if not text.strip():
-            raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
-        return text
-
-    try:
-        text = _call_judge(_client(), _MODEL)
-    except Exception:
-        zhipu = _zhipu_client()
-        if zhipu is None:
-            raise
-        text = _call_judge(zhipu, _ZHIPU_MODEL)
+    # 2026-09-05：这里原本也是裸客户端加一层手写兜底（千问失败换智谱），
+    # 是同一个结构性毛病的第三处。上面两处（论证阶段、额度预检查）改完之后
+    # 实测持仓判断仍然失败，报的就是智谱的"余额不足或无可用资源包"——多空
+    # 论证已经顺利兜到 SiliconFlow 跑完了，裁决这一步却还停在旧的两家世界里，
+    # 前面两次AI调用全部白跑。改走统一入口，链条里有几家就能兜几家。
+    text = chat_with_failover(
+        [{"role": "system", "content": system_prompt},
+         {"role": "user", "content": final_user_content}],
+        max_tokens=8000, temperature=0.3, timeout=90, tag=f"judge/{symbol}",
+    )
+    if not text.strip():
+        raise RuntimeError("裁决AI返回空内容")
     action = _extract_action(text)
     return {
         "action": action, "score": _extract_score(text), "fundamental_verdict": text,
@@ -1814,6 +1861,15 @@ def _judge_one(item: dict, source: str) -> dict | None:
     chips = _chips_summary_text(symbol, market)
     # 分析师预期与催化剂（2026-09-05新增，打分的第六维）
     analyst_view = _analyst_view_text(symbol, market, price)
+    # 公开网页材料（2026-09-05新增）：接口给数字，网页给理由和催化剂。
+    # 并进 analyst_view 而不是新开参数，理由跟上面一致预期那次一样——
+    # judge_stock / judge_stock_with_debate 两个入口的签名都不用动。
+    # holding=True 的持仓路径无条件抓，候选池初筛只在分析师数据为空时兜底。
+    _web = _web_view_text(symbol, market, name, deep=bool(holding)) \
+        if (holding or not analyst_view) else ""
+    if _web:
+        analyst_view = (analyst_view + "\n\n" if analyst_view else "") + \
+            "公开网页材料（来源已标注，只能引用其中真实出现的内容）：\n" + _web
     try:
         # 持仓判断走多空辩论版本（更扎实但3倍AI调用），候选池初筛(source=
         # "screen")继续用单次判断——几十支候选一天判断一遍，辩论版本的

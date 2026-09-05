@@ -32,6 +32,7 @@ import hashlib
 import html as _html
 import json
 import re
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -80,8 +81,27 @@ def _cache_put(key: str, val) -> None:
         pass
 
 
+# 进程级出站节流。调用方 advisor._judge_one 是并发跑的（自选20线程、
+# 持仓10线程），不加约束的话一轮判断会在几秒内打出几十个请求，两个后端都是
+# 免费额度，必然被限流——而限流的表现是抓不到内容，跟"网上没有这条信息"
+# 长得一模一样，排查起来很费劲。所以宁可串行慢一点：10支持仓每支3个请求，
+# 按1.2秒间隔也就多花36秒，相对判断本身几百秒的预算可以忽略。
+_THROTTLE_LOCK = threading.Lock()
+_MIN_INTERVAL = 1.2
+_last_call = [0.0]
+
+
+def _throttle() -> None:
+    with _THROTTLE_LOCK:
+        wait = _MIN_INTERVAL - (time.time() - _last_call[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_call[0] = time.time()
+
+
 def _http(url: str, *, data: bytes | None = None, timeout: int = 25,
           ua: str = _UA_BROWSER) -> str:
+    _throttle()
     req = urllib.request.Request(url, data=data, headers={"User-Agent": ua})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read()
@@ -124,7 +144,7 @@ def search(query: str, limit: int = 8, *, ttl: int = _CACHE_TTL) -> list[dict]:
     return out
 
 
-def read_url(url: str, *, max_chars: int = 6000, timeout: int = 45,
+def read_url(url: str, *, max_chars: int = 6000, timeout: int = 30,
              ttl: int = _CACHE_TTL) -> str:
     """把网页读成正文文本。走 r.jina.ai，它会处理JS渲染并去掉导航和广告。
 
@@ -187,6 +207,11 @@ def research(query: str, *, read_top: int = 2, limit: int = 6,
 
     parts = ["【搜索结果标题】"]
     parts += [f"- {h['title']}（{h['domain']}）" for h in hits]
+
+    if read_top <= 0:
+        # 初筛路径只要标题。提前返回而不是让下面的循环空转，省掉一次无谓的
+        # 域名过滤遍历，也让"只读标题"这个意图在代码里是显式的。
+        return "\n".join(parts)
 
     bodies = []
     # 多试几条候选而不是只读前 read_top 条：抓取失败和登录墙都很常见，
