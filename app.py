@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 from data_sources import (
     get_market_closures,
+    get_institution_ratings,
+    get_morningstar_view,
     get_capital_distribution,
     get_short_interest,
     get_institutional_holding,
@@ -78,8 +80,7 @@ from tracker import (
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_closure_notice_count, bump_closure_notice_count,
     get_latest_ipo_briefs,
-    get_institution_ratings,
-    get_morningstar_view,
+    get_latest_ipo_performance,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
     get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
     get_equity_snapshots, get_period_pnl,
@@ -3578,6 +3579,89 @@ def _render_ipo_briefs():
 
     st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
     st.markdown("**港股新股认购**")
+
+    # 先摆近期整体表现，再列具体新股。顺序是有意的：打新最该先看的不是某一只
+    # 的招股书，而是"最近这个窗口打新整体赚不赚钱"——破发率六成的时候，单只
+    # 的基本面再好也要掂量一下。
+    try:
+        perf = get_latest_ipo_performance()
+    except Exception:
+        perf = {}
+    _st = (perf or {}).get("stats") or {}
+    if _st.get("count"):
+        st.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 8px'>"
+            f"近{_st['days']}天已上市 {_st['count']} 只的首日表现</div>",
+            unsafe_allow_html=True,
+        )
+        m1, m2, m3, m4 = st.columns(4)
+        _avg_c = UP_COLOR if _st["avg"] > 0 else DOWN_COLOR
+        _med_c = UP_COLOR if _st["median"] > 0 else DOWN_COLOR
+        m1.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>首日平均涨跌</div>"
+            f"<div style='font-size:1.3rem;font-weight:600;color:{_avg_c}'>{_st['avg']:+.1f}%</div>",
+            unsafe_allow_html=True)
+        m2.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>中位数</div>"
+            f"<div style='font-size:1.3rem;font-weight:600;color:{_med_c}'>{_st['median']:+.1f}%</div>",
+            unsafe_allow_html=True)
+        m3.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>破发率</div>"
+            f"<div style='font-size:1.3rem;font-weight:600;color:var(--fa-text)'>{_st['break_rate']:.0f}%</div>",
+            unsafe_allow_html=True)
+        m4.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>区间</div>"
+            f"<div style='font-size:1.05rem;font-weight:600;color:var(--fa-text)'>"
+            f"{_st['min']:+.0f}% ~ {_st['max']:+.0f}%</div>",
+            unsafe_allow_html=True)
+        st.caption("均值和中位数都给：新股首日收益是典型长尾分布，一只翻倍就能把均值"
+                   "拉高十几个点，判断随便打一只大概赚多少，要看中位数。")
+
+        _monthly = (perf or {}).get("monthly") or []
+        _items = (perf or {}).get("items") or []
+        with st.expander(f"按月拆解与逐只明细（{len(_items)} 只）"):
+            if _monthly:
+                st.markdown(
+                    "<div style='font-size:0.76rem;color:var(--fa-faint);margin-bottom:6px'>按上市月份</div>",
+                    unsafe_allow_html=True)
+                for mm in _monthly:
+                    _c = UP_COLOR if mm["avg"] > 0 else DOWN_COLOR
+                    st.markdown(
+                        f"<div style='display:flex;align-items:baseline;gap:10px;padding:7px 2px;"
+                        f"border-bottom:1px solid var(--fa-border)'>"
+                        f"<span style='flex:1;color:var(--fa-text);font-size:0.86rem'>{_esc(mm['month'])}</span>"
+                        f"<span style='color:var(--fa-faint);font-size:0.78rem'>{mm['count']} 只</span>"
+                        f"<span style='flex:1;text-align:right;color:{_c};font-size:0.86rem'>"
+                        f"平均 {mm['avg']:+.1f}%</span>"
+                        f"<span style='color:var(--fa-faint);font-size:0.78rem;min-width:84px;text-align:right'>"
+                        f"破发 {mm['break_rate']:.0f}%</span></div>",
+                        unsafe_allow_html=True)
+            if _items:
+                st.markdown(
+                    "<div style='font-size:0.76rem;color:var(--fa-faint);margin:14px 0 6px'>"
+                    "逐只（按上市日倒序）</div>", unsafe_allow_html=True)
+                for it in _items[:40]:
+                    _c = UP_COLOR if it["first_day_pct"] > 0 else DOWN_COLOR
+                    _op = (f"开盘 {it['open_pct']:+.0f}%" if it.get("open_pct") is not None else "")
+                    st.markdown(
+                        f"<div style='display:flex;align-items:baseline;gap:10px;padding:7px 2px;"
+                        f"border-bottom:1px solid var(--fa-border)'>"
+                        f"<span style='color:var(--fa-faint);font-size:0.76rem;min-width:78px'>"
+                        f"{_esc(it['list_date'])}</span>"
+                        f"<span style='flex:2;color:var(--fa-text);font-size:0.86rem'>{_esc(it['name'])}"
+                        f"<span style='color:var(--fa-faint);font-size:0.76rem'> {_esc(it['symbol'])}</span></span>"
+                        f"<span style='color:var(--fa-faint);font-size:0.76rem;min-width:86px;text-align:right'>"
+                        f"招股 {it['offer_price']:,.2f}</span>"
+                        f"<span style='color:var(--fa-faint);font-size:0.76rem;min-width:80px;text-align:right'>"
+                        f"{_esc(_op)}</span>"
+                        f"<span style='color:{_c};font-size:0.88rem;min-width:80px;text-align:right'>"
+                        f"{it['first_day_pct']:+.1f}%</span></div>",
+                        unsafe_allow_html=True)
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+    st.markdown(
+        "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 4px'>"
+        "即将上市与认购中</div>", unsafe_allow_html=True)
     st.markdown(
         "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 10px'>"
         "招股数据来自交易接口，保荐人／基石／超额认购／绿鞋回拨来自公开资讯，"
