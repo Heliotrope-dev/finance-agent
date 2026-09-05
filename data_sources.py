@@ -1771,10 +1771,62 @@ def get_macro_series(region: str, name_keyword: str, max_count: int = 14) -> dic
             return None
 
     unit = str(hist.iloc[0].get("unit_type") or "")
+
+    def _ref_month(row) -> str:
+        """把富途的 data_time 校正成数据真正所属的月份。
+
+        2026-09-05发现的真实数据错误：富途的 data_time 比数据实际所属月份
+        晚了一期。证据链是 release_time——美国CPI是次月中旬发布，而
+        data_time=2025-07-31 那条的 release_time 是 2025-09-11，9月11日
+        发布的是**8月**的CPI，不是7月的。四个指标（CPI/核心CPI/非农/PCE）
+        全部呈现 release 比 data_time 晚两个月的规律，说明 data_time 统一
+        比真实所属月份少一个月。
+
+        独立佐证：data_time=2026-07-31 的非农 release 是 2026-09-04，而那天
+        新闻和AI解读讲的都是"8月非农"。另外那个缺口也对得上——我们标成
+        2025-09缺失，按校正后是2025-10，正是政府停摆导致BLS没发布的那一期。
+
+        后果不小：首页宏观图的每个点、喂给AI的宏观简报里的日期，全都早了
+        一个月。用户拿它跟外部数据核对时会发现对不上。
+
+        不写死"+1个月"，而是按每条记录自己的发布间隔推算：正常次月发布的
+        指标 gap=2 就前移1个月，data_time本来就正确的（gap=1）不动，当月
+        发布的（gap=0）也不动。这样对发布节奏不同的指标同样成立，不需要
+        为每个指标维护一张偏移表。
+        """
+        import datetime as _d
+        raw = str(row.get("data_time") or "")[:10]
+        if len(raw) < 7:
+            return raw
+        try:
+            y, m = int(raw[:4]), int(raw[5:7])
+        except Exception:
+            return raw
+        rt = row.get("release_time")
+        gap = None
+        try:
+            if rt is not None and str(rt).replace(".", "").isdigit():
+                d = _d.datetime.fromtimestamp(float(rt))
+            else:
+                d = _d.datetime.fromisoformat(str(rt)[:19])
+            gap = (d.year - y) * 12 + (d.month - m)
+        except Exception:
+            gap = None
+        shift = max(0, (gap - 1)) if gap is not None else 1
+        # 只前移，且最多一期——间隔异常大的（比如停摆之后补发的历史数据，
+        # 实测有 gap=6 的）不能按间隔硬推，那会把日期推到离谱的位置。
+        shift = min(shift, 1)
+        m += shift
+        if m > 12:
+            m, y = m - 12, y + 1
+        last_day = [31, 29 if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)) else 28,
+                    31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]
+        return f"{y:04d}-{m:02d}-{last_day:02d}"
+
     points = []
     for _, r in hist.iterrows():
         points.append({
-            "date": str(r.get("data_time") or "")[:10],
+            "date": _ref_month(r),
             "value": _num(r.get("value")),
             "predict": _num(r.get("predict_value")),
             "previous": _num(r.get("previous_value")),
