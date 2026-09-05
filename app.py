@@ -14,6 +14,7 @@ from contextlib import nullcontext as _nullcontext
 from datetime import datetime, timedelta, timezone
 
 from data_sources import (
+    get_crypto_quotes,
     get_market_closures,
     get_institution_ratings,
     get_morningstar_view,
@@ -2140,6 +2141,37 @@ def _render_a_share_overview():
 
 
 @st.fragment
+def _render_crypto_overview():
+    """虚拟货币行情。
+
+    2026-09-05新增。跟另外三个市场最大的差别是它24小时不休市——周末和
+    夜间，行情页的另外三栏全是昨天的死数据，这一栏是唯一还在动的，所以
+    顶部直接点出这一点，省得用户对着一个"周六还在变的价格"犯嘀咕。
+
+    刻意不做run_every自动刷新：项目里那几个run_every的fragment是页面残影
+    和富途限流的主要来源（见_fragment_alive的注释），而虚拟货币这一栏的
+    数据本身带20秒缓存，用户切回来就是新的，不需要再叠一层定时器。
+    """
+    try:
+        df = get_crypto_quotes()
+    except Exception:
+        df = None
+
+    if df is None or df.empty:
+        st.caption("虚拟货币行情暂时取不到。")
+        return
+
+    up = int((df["涨跌幅"] > 0).sum())
+    down = int((df["涨跌幅"] < 0).sum())
+    st.markdown(
+        f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 10px'>"
+        f"24小时连续交易，无涨跌停 · 当前 {len(df)} 个主流币种：{up} 涨 / {down} 跌 · "
+        f"均为美元计价</div>",
+        unsafe_allow_html=True,
+    )
+    _render_stock_movers_cards(df[["代码", "名称", "最新价", "涨跌幅"]], "CC")
+
+
 def _render_hk_overview():
     """港股南向资金+核心股，独立fragment，原因同_render_a_share_overview
     （包括撤回run_every=3的原因——切到持仓页面残留）。"""
@@ -6313,7 +6345,7 @@ else:
                 <span style='font-size:1.14rem;font-weight:650;letter-spacing:-.022em;
                              color:var(--fa-text)'>Invest Agent</span>
                 <span style='font-size:.74rem;letter-spacing:.055em;color:var(--fa-faint);
-                             white-space:nowrap'>A股 · 港股 · 美股</span>
+                             white-space:nowrap'>A股 · 港股 · 美股 · 虚拟货币</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -6359,25 +6391,33 @@ else:
             # （比如"显示更多"、"更多板块"）都会带动其余几块跟着重新拉一遍
             # 数据，是页面交互卡顿的主要原因。现在各自是独立的@st.fragment，
             # 点一个按钮只重新跑对应那一块。
-            mkt_pick = st.radio("市场", ["A股", "港股", "美股"], horizontal=True, key="_market_overview_pick")
-            mkt_code = {"A股": "A", "港股": "HK", "美股": "US"}[mkt_pick]
+            mkt_pick = st.radio("市场", ["A股", "港股", "美股", "虚拟货币"], horizontal=True, key="_market_overview_pick")
+            mkt_code = {"A股": "A", "港股": "HK", "美股": "US", "虚拟货币": "CC"}[mkt_pick]
 
-            _render_index_snapshot(mkt_code)
-            st.divider()
-
-            if mkt_code == "A":
-                _render_a_share_overview()
-            elif mkt_code == "HK":
-                _render_hk_overview()
+            # 虚拟货币走单独一条渲染路径，不是"少调用几个函数"那么简单：
+            # 指数快照、涨停跌停池、南向资金、热门板块、新股这几块的概念在
+            # 这个市场里全都不存在，硬套上去只会渲染出一排空壳。它需要的是
+            # 另一组信息（24小时不休市、没有涨跌停、没有板块划分），所以给
+            # 它自己的概览函数。
+            if mkt_code == "CC":
+                _render_crypto_overview()
             else:
-                _render_us_overview()
+                _render_index_snapshot(mkt_code)
+                st.divider()
 
-            st.divider()
-            st.markdown("**热门板块**")
-            _render_hot_sectors(mkt_code)
-            # 异动榜/热度榜/新股放在板块之后：板块回答"哪个方向在动"，
-            # 这一块回答"具体哪几支在动"，从面到点，顺序上是收敛的。
-            _render_market_extras(mkt_code)
+                if mkt_code == "A":
+                    _render_a_share_overview()
+                elif mkt_code == "HK":
+                    _render_hk_overview()
+                else:
+                    _render_us_overview()
+
+                st.divider()
+                st.markdown("**热门板块**")
+                _render_hot_sectors(mkt_code)
+                # 异动榜/热度榜/新股放在板块之后：板块回答"哪个方向在动"，
+                # 这一块回答"具体哪几支在动"，从面到点，顺序上是收敛的。
+                _render_market_extras(mkt_code)
 
         elif active_section == "持仓":
             if not st.session_state.get("logged_in"):

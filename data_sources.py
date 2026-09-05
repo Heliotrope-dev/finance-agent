@@ -3212,6 +3212,10 @@ def _futu_code(symbol: str, market: str) -> str:
         return f"HK.{s}"
     if m == "US":
         return f"US.{s}"
+    if m == "CC":
+        # 虚拟货币。代码形如 CC.BTCUSD，就是"币种+计价货币"拼起来，
+        # 没有港股那种补零规则，原样拼即可。
+        return f"CC.{s}"
     if m == "A":
         # 6开头是上交所，其余（0/3）是深交所——跟 sim_trader._a_share_prefix 同一套规则
         return f"{'SH' if s.startswith('6') else 'SZ'}.{s}"
@@ -3447,6 +3451,92 @@ def get_recent_ipo_performance(days: int = 120, max_count: int = 60) -> dict:
 
     items.sort(key=lambda x: x["list_date"], reverse=True)
     return {"items": items, "stats": stats, "monthly": monthly_out}
+
+# 虚拟货币板块要展示的主流币，按市值大致排序。刻意写死一份清单而不是把
+# 富途那609个标的全端上来：那里面绝大多数是交叉盘（AAVE/BTC、ADA/EUR 这种）
+# 和长尾小币，对"看一眼大盘怎么样"没有意义，反而会把真正要看的十几个淹掉。
+# 全部取USD计价，口径统一，横向比较才有意义。
+_CRYPTO_MAJORS = (
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX",
+    "LINK", "DOT", "LTC", "BCH", "TRX", "XLM", "UNI", "ATOM",
+    "ETC", "APT", "ARB", "NEAR",
+)
+
+# 中文名。富途给的name是"BTC/USD"这种代码形式，列表里全是英文缩写不好认，
+# 常见币补一个中文名，没有的就原样显示缩写。
+_CRYPTO_CN = {
+    "BTC": "比特币", "ETH": "以太坊", "SOL": "Solana", "BNB": "币安币",
+    "XRP": "瑞波币", "DOGE": "狗狗币", "ADA": "艾达币", "AVAX": "雪崩",
+    "LINK": "Chainlink", "DOT": "波卡", "LTC": "莱特币", "BCH": "比特币现金",
+    "TRX": "波场", "XLM": "恒星币", "UNI": "Uniswap", "ATOM": "Cosmos",
+    "ETC": "以太经典", "APT": "Aptos", "ARB": "Arbitrum", "NEAR": "NEAR",
+}
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def get_crypto_universe() -> set:
+    """富途实际支持的虚拟货币代码集合（USD计价）。
+
+    存在的意义是"下单前先验代码"：实测富途的 get_market_snapshot 遇到不存在
+    的代码（比如 CC.BTC，正确的是 CC.BTCUSD）不会报错，而是**整个请求挂住
+    不返回**——一次混进一个错代码，整批行情就全拿不到，而且表现为超时不是
+    报错，很难定位。所以宁可每天多花一次清单请求，也不把没验证过的代码
+    发出去。
+    """
+    r = _futu_call(lambda c: c.get_stock_basicinfo(ft.Market.CC, ft.SecurityType.CRYPTO),
+                   timeout=40, default=None)
+    df = _unwrap_futu(r)
+    if df is None or df.empty or "code" not in df.columns:
+        return set()
+    return set(df["code"].astype(str))
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def get_crypto_quotes() -> pd.DataFrame:
+    """主流虚拟货币行情，列名跟项目里其它行情表一致（代码/名称/最新价/涨跌幅）。
+
+    2026-09-05新增。用户要求在行情页的A股/港股/美股旁边再开一栏。选它有个
+    别处没有的好处：虚拟货币24小时不休市，周末和三个股票市场都休市的时段，
+    行情页原本是一片死数据，这一栏是唯一活的。
+    """
+    universe = get_crypto_universe()
+    codes = [f"CC.{sym}USD" for sym in _CRYPTO_MAJORS
+             if not universe or f"CC.{sym}USD" in universe]
+    if not codes:
+        return pd.DataFrame()
+
+    r = _futu_call(lambda c: c.get_market_snapshot(codes), timeout=30, default=None)
+    df = _unwrap_futu(r)
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, x in df.iterrows():
+        code = str(x.get("code") or "")
+        sym = code.split(".")[-1]
+        base = sym[:-3] if sym.endswith("USD") else sym
+        last = float(x.get("last_price") or 0)
+        prev = float(x.get("prev_close_price") or 0)
+        if last <= 0 or prev <= 0:
+            continue
+        rows.append({
+            "代码": sym,
+            "名称": _CRYPTO_CN.get(base, base),
+            "最新价": last,
+            "涨跌幅": (last - prev) / prev * 100,
+            "最高": float(x.get("high_price") or 0),
+            "最低": float(x.get("low_price") or 0),
+            "成交额": float(x.get("turnover") or 0),
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    # 按主流程度（_CRYPTO_MAJORS的顺序）排，不按涨跌幅——用户打开这一栏
+    # 第一眼要找的是比特币以太坊，不是今天涨得最多的那个小币。
+    order = {f"{s}USD": i for i, s in enumerate(_CRYPTO_MAJORS)}
+    out["_o"] = out["代码"].map(lambda c: order.get(c, 999))
+    return out.sort_values("_o").drop(columns=["_o"]).reset_index(drop=True)
+
 
 # 富途机构评级的取值。实测 rating=4 对应的原文链接标题里写的是 "Reiterates Buy"
 # / "Receives a Buy" / "Reaffirms their Buy"（美银、Evercore、大摩三家都是4），
