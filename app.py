@@ -2807,23 +2807,52 @@ def _parse_portfolio_text(text: str) -> dict:
     parts: dict[str, str] = {}
     text = text or ""
     positions = []
+    # 同样容忍 markdown 加粗（见 _parse_advice_text 里那条注释：同一个根因
+    # 已经在三个地方咬过了）。段名仍然限定在行首——正文里完全可能出现
+    # "市场敞口"这四个字，不限行首会把前一段拦腰截断。
     for name in _PORTFOLIO_SECTIONS:
-        for sep in ("：", ":"):
-            idx = text.find(f"\n{name}{sep}")
-            if idx != -1:
-                positions.append((idx + 1, name, len(name) + 1))
-                break
-            if text.startswith(f"{name}{sep}"):
-                positions.append((0, name, len(name) + 1))
-                break
+        m = re.search(r"(?:^|\n)\s*\*{0,2}" + re.escape(name) + r"\*{0,2}\s*[：:]", text)
+        if m:
+            positions.append((m.start(), name, m.end()))
     positions.sort()
-    for i, (idx, name, off) in enumerate(positions):
-        start = idx + off
+    for i, (idx, name, body_start) in enumerate(positions):
         end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
-        body = text[start:end].strip()
+        body = text[body_start:end].strip()
         if body:
             parts[name] = body
     return parts
+
+
+def _clean_ai_markdown(text: str) -> str:
+    """把模型输出里的 markdown 残渣清掉，再交给分段解析。
+
+    2026-09-05：换到 DeepSeek-V3 之后，排行榜第4第5名底部出现孤立的 ****，
+    "维度打分："后面还会换行，导致原本一行的元信息在页面上裂成两行、跟前
+    三名长得不一样。
+
+    这些不是模型"写错了"，是它比之前的模型更爱用 markdown 修饰——提示词里
+    要求的是内容格式，修饰符加不加它有自由。与其反复去调提示词赌它听话，
+    不如在渲染前把修饰统一清掉：解析和展示都只认纯文本，模型加不加星号都
+    得到同样的结果。
+
+    只清修饰，不动内容：孤立的星号行删掉，行首行尾的加粗标记去掉，段名后
+    紧跟的换行折回来（"维度打分：\n基本面26/30" -> "维度打分：基本面26/30"）。
+    """
+    if not text:
+        return ""
+    out = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        # 整行只有星号（**、****、***** 这种）：纯粹是没配对的修饰符，删掉
+        if stripped and set(stripped) == {"*"}:
+            continue
+        out.append(line)
+    cleaned = "\n".join(out)
+    # 段名后面紧跟换行的，把内容折回同一行——否则"维度打分："和数值会分成两行
+    cleaned = re.sub(r"([：:])[ \t]*\n+[ \t]*(?=\S)", r"\1", cleaned)
+    # 去掉成对但跨行残留的加粗标记
+    cleaned = re.sub(r"\*\*(\s*)\*\*", r"\1", cleaned)
+    return cleaned.strip()
 
 
 def _parse_advice_text(text: str) -> dict:
@@ -2835,17 +2864,24 @@ def _parse_advice_text(text: str) -> dict:
     parts: dict[str, str] = {}
     text = text or ""
     positions = []
+    # 用正则而不是 find，为了容忍 markdown 加粗和段名与冒号之间的空格。
+    #
+    # 2026-09-05真实故障：换到 DeepSeek-V3 之后，它习惯把小节名写成
+    # **基本面**：，而原来是拿 text.find("基本面：") 精确找的，星号一挡就找
+    # 不到——整段解析失败、退回把原文当 markdown 直接渲染，排行榜第4第5名
+    # 于是整篇摊开显示，跟前三名的折叠样式完全不一样。
+    #
+    # 这已经是同一个根因的第三处了（前两处是 advisor 里的综合得分和结论
+    # 正则）。凡是解析模型自由文本的地方，都要假设它会用 markdown 修饰，
+    # 换供应商时尤其要重新验一遍——格式要求写在提示词里只是"通常会遵守"。
     for name in _ADVICE_SECTIONS:
-        idx = text.find(f"{name}：")
-        if idx == -1:
-            idx = text.find(f"{name}:")
-        if idx != -1:
-            positions.append((idx, name))
+        m = re.search(r"\*{0,2}" + re.escape(name) + r"\*{0,2}\s*[：:]", text)
+        if m:
+            positions.append((m.start(), name, m.end()))
     positions.sort()
-    for i, (idx, name) in enumerate(positions):
-        start = idx + len(name) + 1
+    for i, (idx, name, body_start) in enumerate(positions):
         end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
-        parts[name] = text[start:end].strip()
+        parts[name] = text[body_start:end].strip()
     return parts
 
 
@@ -2915,7 +2951,8 @@ def _render_advice_section():
         return
     for rank, row in enumerate(board, 1):
         market_key = row.get("market", "A")
-        parts = _parse_advice_text(row.get("fundamental_verdict", ""))
+        _vtext = _clean_ai_markdown(row.get("fundamental_verdict", ""))
+        parts = _parse_advice_text(_vtext)
         action = row.get("action", "观望")
         color = _ADVICE_ACTION_COLOR.get(action, NEUTRAL_COLOR)
         price = row.get("price_at_advice")
@@ -5262,7 +5299,7 @@ def _render_position_rows(position_items: list, _email: str):
             if adv:
                 adv_action = adv.get("action", "观望")
                 adv_color = _ADVICE_ACTION_COLOR.get(adv_action, NEUTRAL_COLOR)
-                adv_parts = _parse_advice_text(adv.get("fundamental_verdict", ""))
+                adv_parts = _parse_advice_text(_clean_ai_markdown(adv.get("fundamental_verdict", "")))
                 # 标题从"AI持仓判断：观望（2026-09-03）"缩成"观望 · 09-03"——
                 # 前缀每行都一样，重复二十遍不提供任何信息；日期只留月-日。
                 # 折叠框本身在 CSS 里去掉了边框和底色（见 .st-key-pos_row_ 那段），
