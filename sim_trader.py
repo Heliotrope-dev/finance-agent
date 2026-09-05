@@ -90,10 +90,22 @@ def _strip_market_prefix(symbol: str) -> str:
     这个函数抽出来给_to_futu_code和_execute_one共用同一份"干净"symbol，
     保证下单代码和落库记录用的是同一个值。
     """
+    symbol = str(symbol or "").strip()
     for prefix in _MARKET_PREFIXES:
         if symbol.upper().startswith(prefix):
-            return symbol[len(prefix):]
-    return symbol
+            symbol = symbol[len(prefix):]
+            break
+    # 再去掉后缀形式的市场标记。2026-09-05真实故障：AI 照着页面上的显示格式
+    # "名称（IBM·US）" 把代码写成了 IBM·US，下单时富途报"美股找不到'IBM·US'"，
+    # 当轮 IBM/SLV/TLT 三笔买入全部失败。前缀（US.IBM）早就处理了，后缀这种
+    # 写法是这次才出现的——中文间隔号·和ASCII点号.都要认，两种分隔符AI都用过。
+    for sep in ("·", ".", "-"):
+        if sep in symbol:
+            head, _, tail = symbol.rpartition(sep)
+            if head and tail.upper() in ("US", "HK", "SH", "SZ", "A"):
+                symbol = head
+                break
+    return symbol.strip()
 
 
 def _to_futu_code(symbol: str, market: str) -> str:
@@ -198,6 +210,32 @@ def get_lot_sizes(items: list[tuple]) -> dict:
     return out
 
 
+
+def _held_qty(trd, acc_id: str, code: str) -> float:
+    """账户里这支票当前持有多少股。查不到（接口失败/没这支）都返回0。
+
+    刻意返回0而不是抛异常：调用方拿到0会跳过这笔卖出并写清原因，那是安全的
+    降级方向；如果因为一次接口抖动就抛异常，会把整轮决策的执行环节打断。
+    """
+    try:
+        ret, pos = trd.position_list_query(trd_env=ft.TrdEnv.SIMULATE, acc_id=int(acc_id))
+        if ret != ft.RET_OK or pos is None or pos.empty:
+            return 0.0
+        row = pos[pos["code"] == code]
+        if row.empty:
+            return 0.0
+        # can_sell_qty 是可卖数量（扣掉未成交冻结的部分），没有这一列就退回 qty
+        for col in ("can_sell_qty", "qty"):
+            if col in row.columns:
+                try:
+                    return float(row.iloc[0][col])
+                except Exception:
+                    continue
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 def _execute_one(qot, trd, email: str, market: str, acc_id: str, signal: dict) -> dict:
     # 先在这里统一去掉symbol可能带的市场前缀，后面下单代码(code)和落库记录
     # 用的都是同一个干净symbol，不会再出现同一支票记录时而带前缀时而不带的情况。
@@ -213,6 +251,29 @@ def _execute_one(qot, trd, email: str, market: str, acc_id: str, signal: dict) -
         note = f"按每手{lot}股取整后不足一手，金额太小（AI给的股数是{shares_signal:g}）"
         tracker.log_simulated_order(email, symbol, name, market, action, shares_signal, 0, "", acc_id, "跳过", note)
         return {"symbol": symbol, "status": "跳过", "note": note}
+
+    # 卖出前先核对真实持仓（2026-09-05修真实故障）。
+    #
+    # 生产日志里连续三轮出现"MINIMAX-W 卖出 失败：暂不支持卖空"——账户里
+    # 根本没有这支票，AI 却反复对它下卖单，富途按卖空拒绝。原因是这里从来
+    # 没校验过"要卖的这支到底持有多少"，AI 判断出"卖出"就直接提交。
+    #
+    # AI 认错持仓是会发生的（候选池里的票、上一轮已经清掉的票都可能被误判成
+    # 在手里），这层校验的意义就是不让那种误判变成一次注定失败的委托：不持有
+    # 就跳过并写清原因，持有但不够就按实际持仓量下单——后者是有意义的操作
+    # （AI 想清仓，只是记错了数量），不该整笔丢掉。
+    if action == "卖出":
+        held = _held_qty(trd, acc_id, code)
+        if held <= 0:
+            note = "账户当前不持有这支，跳过（模拟盘不支持卖空）"
+            tracker.log_simulated_order(email, symbol, name, market, action, shares_signal, 0, "", acc_id, "跳过", note)
+            return {"symbol": symbol, "status": "跳过", "note": note}
+        if shares_ordered > held:
+            shares_ordered = int(held // lot) * lot
+            if shares_ordered <= 0:
+                note = f"持有{held:g}股不足一手（每手{lot}股），跳过"
+                tracker.log_simulated_order(email, symbol, name, market, action, shares_signal, 0, "", acc_id, "跳过", note)
+                return {"symbol": symbol, "status": "跳过", "note": note}
 
     trd_side = ft.TrdSide.BUY if action == "买入" else ft.TrdSide.SELL
     # 用市价单(MARKET)，不用限价单——目的是验证"如果照抄AI建议会怎样"，限价

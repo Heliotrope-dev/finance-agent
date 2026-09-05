@@ -1475,6 +1475,7 @@ def get_latest_advice(limit_per_market: int = 3) -> dict:
         if latest is None:
             return {"run_date": None, "US": [], "HK": [], "A": []}
         run_date = latest["created_at"][:10]
+        _cutoff = _latest_run_cutoff(c, source) or (run_date + "T00:00:00")
         rows = c.execute(
             "SELECT * FROM advice WHERE source = 'screen' AND created_at LIKE ? ORDER BY created_at",
             (f"{run_date}%",),
@@ -1518,6 +1519,42 @@ def _apply_market_quota(rows: list[dict], limit: int, quota: dict[str, int]) -> 
     return result[:limit]
 
 
+def _latest_run_cutoff(c, source: str) -> str:
+    """最近一轮 advisor 跑批的起始时间戳，用来把"这一轮"跟之前几轮切开。
+
+    2026-09-05新增。原来两处调用方都是拿最新一条记录所在的**自然日**当一批，
+    当时的注释写着"就算同一天手动多跑了几次，也只是同一天的记录被合并当一批，
+    不影响正确性"——那个结论只在打分口径不变时成立。
+
+    这天打分从四维改成六维，同一个UTC日里先后跑了旧口径和新口径两轮，混在
+    一起按分数排序，旧口径那轮打出的90-92分（旧规则满分更好拿）直接把新口径
+    的85分压下去，页面上看到的还是改动前的榜单，看起来像"改了没生效"。
+
+    改成从最新一条往回走、遇到超过30分钟空档就断开：一轮跑下来相邻两条判断
+    之间只有几十秒，两轮之间隔着几小时，用间隔切分能干净地只取最近那一轮，
+    跟自然日无关，也不用给表加批次列。
+
+    时间戳解析不了就退回"当天零点"，即老行为，至少不比改之前更差。
+    """
+    stamps = [r[0] for r in c.execute(
+        "SELECT created_at FROM advice WHERE source = ? AND score IS NOT NULL "
+        "ORDER BY created_at DESC LIMIT 800", (source,),
+    ).fetchall()]
+    if not stamps:
+        return ""
+    cutoff = stamps[0]
+    try:
+        prev = datetime.fromisoformat(stamps[0])
+        for ts in stamps[1:]:
+            cur = datetime.fromisoformat(ts)
+            if (prev - cur).total_seconds() > 30 * 60:
+                break
+            cutoff, prev = ts, cur
+    except Exception:
+        return stamps[0][:10] + "T00:00:00"
+    return cutoff
+
+
 def get_latest_leaderboard(limit: int = 10, source: str = "screen", market_quota: dict[str, int] | None = None) -> dict:
     """2026-08-25新增：三个市场混排的综合得分排行榜，取代"每个市场固定
     前3"的老逻辑——用户明确要求"好的就上，不好不出现也没事"，不要求每个
@@ -1558,6 +1595,7 @@ def get_latest_leaderboard(limit: int = 10, source: str = "screen", market_quota
         if latest is None:
             return {"run_date": None, "leaderboard": []}
         run_date = latest["created_at"][:10]
+        _cutoff = _latest_run_cutoff(c, source) or (run_date + "T00:00:00")
         # market_quota要在全量候选里挑，不能先用SQL LIMIT截断到limit条
         # （截断早了美股候选可能压根没进这批行，配额也补不回来）。这批
         # 候选本来就是一天的观察池（约120支封顶），全取出来在Python里
@@ -1565,14 +1603,14 @@ def get_latest_leaderboard(limit: int = 10, source: str = "screen", market_quota
         sql_limit = 100000 if market_quota else limit
         rows = c.execute(
             """
-            SELECT * FROM advice WHERE source = ? AND created_at LIKE ? AND score IS NOT NULL
+            SELECT * FROM advice WHERE source = ? AND created_at >= ? AND score IS NOT NULL
             AND id IN (
-                SELECT MAX(id) FROM advice WHERE source = ? AND created_at LIKE ? AND score IS NOT NULL
+                SELECT MAX(id) FROM advice WHERE source = ? AND created_at >= ? AND score IS NOT NULL
                 GROUP BY symbol
             )
             ORDER BY score DESC LIMIT ?
             """,
-            (source, f"{run_date}%", source, f"{run_date}%", sql_limit),
+            (source, _cutoff, source, _cutoff, sql_limit),
         ).fetchall()
     board = [dict(r) for r in rows]
     if market_quota:
@@ -1601,18 +1639,19 @@ def get_watchlist_verdict_for_symbol(symbol: str, source: str = "watchlist") -> 
         if latest is None:
             return {"in_pool": False, "run_date": None, "pool_size": 0}
         run_date = latest["created_at"][:10]
+        _cutoff = _latest_run_cutoff(c, source) or (run_date + "T00:00:00")
         # 当天完整打分池（去重取每支symbol当天最新一条，score不为空），
         # 用来算这支股票的真实排名和池子总大小。
         rows = c.execute(
             """
-            SELECT * FROM advice WHERE source = ? AND created_at LIKE ? AND score IS NOT NULL
+            SELECT * FROM advice WHERE source = ? AND created_at >= ? AND score IS NOT NULL
             AND id IN (
-                SELECT MAX(id) FROM advice WHERE source = ? AND created_at LIKE ? AND score IS NOT NULL
+                SELECT MAX(id) FROM advice WHERE source = ? AND created_at >= ? AND score IS NOT NULL
                 GROUP BY symbol
             )
             ORDER BY score DESC
             """,
-            (source, f"{run_date}%", source, f"{run_date}%"),
+            (source, _cutoff, source, _cutoff),
         ).fetchall()
         pool = [dict(r) for r in rows]
     for rank, row in enumerate(pool, start=1):
