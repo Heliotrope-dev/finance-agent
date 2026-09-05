@@ -153,6 +153,13 @@ def init_db():
             c.execute("ALTER TABLE advice ADD COLUMN score_technical INTEGER")
         if "score_data_certainty" not in _advice_cols:
             c.execute("ALTER TABLE advice ADD COLUMN score_data_certainty INTEGER")
+        # 2026-09-05打分从四维扩到六维，补两列。加在这里而不是新写一个
+        # migration函数，是为了让"六个维度"在代码里始终是并排的六行——
+        # 下次再加维度时不会漏掉某一处。
+        if "score_chips" not in _advice_cols:
+            c.execute("ALTER TABLE advice ADD COLUMN score_chips INTEGER")
+        if "score_analyst" not in _advice_cols:
+            c.execute("ALTER TABLE advice ADD COLUMN score_analyst INTEGER")
 
         # positions：取代 watchlist 表的"持仓分析"数据模型。shares=0 表示"只
         # 关注不持仓"（详情页"关注"按钮走这个状态）。
@@ -1263,16 +1270,28 @@ def extract_score_breakdown(text: str) -> dict:
     没法打分），这种情况该子项返回None，不当0分处理，跟这个项目一贯
     "解析不出来不代表0分"的原则一致。
     """
-    result = {"fundamental": None, "price_position": None, "technical": None, "data_certainty": None}
+    result = {"fundamental": None, "price_position": None, "technical": None,
+              "chips": None, "analyst": None, "data_certainty": None}
     m = re.search(r"维度打分[：:]([^\n]+)", text)
     if not m:
         return result
     line = m.group(1)
+    # 分母写成 \d+ 而不是写死具体数字。2026-09-05真实故障：09-05把打分从
+    # 四维扩到六维、并按短线重新配权（基本面40->22、价格位置30->20、
+    # 技术面15->20、数据确定性15->10），但这里的正则还写死着旧分母，
+    # 于是四个维度全部匹配失败、整列落库成NULL——总分照常写进去了，
+    # 所以从页面上完全看不出问题，直到审计时查数据库才发现。
+    #
+    # 把分母参数化掉，以后再调权重这里就不会跟着失效。分母本身对解析没有
+    # 意义（我们要的是分子），当初写死纯粹是为了让正则更"精确"，结果精确
+    # 变成了脆弱。
     patterns = {
-        "fundamental": r"基本面\s*(\d+)\s*/\s*40",
-        "price_position": r"价格位置\s*(\d+)\s*/\s*30",
-        "technical": r"技术面\s*(\d+)\s*/\s*15",
-        "data_certainty": r"数据确定性\s*(\d+)\s*/\s*15",
+        "fundamental": r"基本面\s*(\d+)\s*/\s*\d+",
+        "price_position": r"价格位置\s*(\d+)\s*/\s*\d+",
+        "technical": r"技术面\s*(\d+)\s*/\s*\d+",
+        "chips": r"筹码面\s*(\d+)\s*/\s*\d+",
+        "analyst": r"分析师预期\s*(\d+)\s*/\s*\d+",
+        "data_certainty": r"数据确定性\s*(\d+)\s*/\s*\d+",
     }
     for key, pat in patterns.items():
         pm = re.search(pat, line)
@@ -1292,12 +1311,14 @@ def log_advice(
         cur = c.execute(
             "INSERT INTO advice (email, symbol, market, name, created_at, price_at_advice, "
             "fundamental_verdict, technical_signal, action, source, score, "
-            "score_fundamental, score_price_position, score_technical, score_data_certainty) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "score_fundamental, score_price_position, score_technical, score_data_certainty, "
+            "score_chips, score_analyst) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (email, symbol, market, name, datetime.now(timezone.utc).isoformat(), price_at_advice,
              fundamental_verdict, technical_signal, action, source, score,
              breakdown["fundamental"], breakdown["price_position"],
-             breakdown["technical"], breakdown["data_certainty"]),
+             breakdown["technical"], breakdown["data_certainty"],
+             breakdown["chips"], breakdown["analyst"]),
         )
         c.commit()
         return cur.lastrowid
@@ -1407,6 +1428,8 @@ _DIMENSION_COLUMNS = {
     "基本面质量": "score_fundamental",
     "价格位置安全边际": "score_price_position",
     "技术面确认": "score_technical",
+    "筹码面": "score_chips",
+    "分析师预期": "score_analyst",
     "数据确定性": "score_data_certainty",
 }
 

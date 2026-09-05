@@ -3452,6 +3452,127 @@ def get_recent_ipo_performance(days: int = 120, max_count: int = 60) -> dict:
     items.sort(key=lambda x: x["list_date"], reverse=True)
     return {"items": items, "stats": stats, "monthly": monthly_out}
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_capital_flow_history(symbol: str, market: str, days: int = 30) -> pd.DataFrame:
+    """主力资金流向的历史序列。
+
+    2026-09-05新增。项目此前只有 get_capital_distribution（当日快照），
+    审计时发现富途还提供 get_capital_flow，一次能给三百多个交易日的序列。
+    这个差别不是"数据多一点"：单日主力净流入是噪音，连续五天净流入才是
+    信号。用当日快照去判断"主力在建仓还是在撤"，本来就问错了问题。
+
+    返回列：日期 / 主力净流入 / 超大单 / 大单 / 中单 / 小单（单位：元）。
+    """
+    code = _futu_code(symbol, market)
+    if not code:
+        return pd.DataFrame()
+    # period_type 必须显式传 DAY。默认值是 INTRADAY，返回的是当日盘中的
+    # 分时资金流——第一版没传这个参数，拿回来八行数据日期全是同一天，
+    # 差点当成"八天的趋势"用。这个错误很隐蔽：数据结构、列名、数值量级
+    # 全都正常，只有日期列能看出问题。
+    import datetime as _d
+    _end = _d.date.today()
+    _start = _end - _d.timedelta(days=max(days * 2, 60))
+    r = _futu_call(
+        lambda c: c.get_capital_flow(code, period_type=ft.PeriodType.DAY,
+                                     start=_start.isoformat(), end=_end.isoformat()),
+        timeout=30, default=None)
+    df = _unwrap_futu(r)
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    # 时间列只认一个。富途这个接口同时返回 last_valid_time 和
+    # capital_flow_item_time，两个都映射成"日期"的话 df["日期"] 取回来的是
+    # 一个两列的 DataFrame 而不是 Series，后面 .str 直接报错。按优先级挑
+    # 第一个存在的，其余不管。
+    time_col = next((c for c in ("capital_flow_item_time", "last_valid_time")
+                     if c in df.columns), None)
+    if not time_col:
+        return pd.DataFrame()
+    ren = {
+        time_col: "日期",
+        "main_in_flow": "主力净流入", "super_in_flow": "超大单",
+        "big_in_flow": "大单", "mid_in_flow": "中单", "sml_in_flow": "小单",
+        "in_flow": "净流入",
+    }
+    df = df.rename(columns={k: v for k, v in ren.items() if k in df.columns})
+    df["日期"] = df["日期"].astype(str).str[:10]
+    keep = [c for c in ("日期", "主力净流入", "超大单", "大单", "中单", "小单", "净流入")
+            if c in df.columns]
+    out = df[keep].copy()
+    # 富途对部分市场的某些字段返回字符串 "N/A"。不转成数值的话，调用方
+    # 一做比较就 TypeError（str 和 int 不能比大小），而这类崩溃往往发生在
+    # 渲染路径上。统一转成数值，拿不到就是 NaN，调用方自己决定怎么显示。
+    for c_ in keep:
+        if c_ != "日期":
+            out[c_] = pd.to_numeric(out[c_], errors="coerce")
+    return out.tail(days).reset_index(drop=True)
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def get_revenue_breakdown(symbol: str, market: str) -> dict:
+    """营收按业务线/地区拆解。
+
+    2026-09-05新增。回答的是"这家公司到底靠什么赚钱"——这个问题在项目原有的
+    财务摘要里是缺的：那里只有总营收和增速，看不出增长是主业带来的还是某个
+    一次性业务撑起来的。对判断增长可持续性，拆解比总额有用。
+    """
+    code = _futu_code(symbol, market)
+    if not code:
+        return {}
+    r = _futu_call(lambda c: c.get_financials_revenue_breakdown(code),
+                   timeout=30, default=None)
+    # 不能走 _unwrap_futu：那个函数最后一行是 `data if hasattr(data,"columns")
+    # else None`，专门为 DataFrame 写的，而这个接口返回的是纯 dict，会被
+    # 当成"拆不出来"直接丢掉。这是第二次在同一处踩坑——第一次以为是解析
+    # 层级不对，改完还是空，才发现数据在更上游就被吃掉了。
+    data = r[1] if (r and r[0] == ft.RET_OK and len(r) > 1) else None
+    # 这个接口返回的是 dict 而不是 DataFrame，跟富途大多数行情接口不一样，
+    # 而且 breakdown_list 里还要再进一层 item_list 才是真正的分项。第一版
+    # 按"列表里直接是分项"解析，拿到的是空——没报错，只是静默返回 {}。
+    if not isinstance(data, dict):
+        return {}
+    groups = data.get("breakdown_list") or []
+    out = []
+    for g in groups:
+        for it in (g.get("item_list") or []):
+            name = str(it.get("name") or "").strip()
+            if not name:
+                continue
+            out.append({
+                "项目": name,
+                "金额": it.get("main_oper_income") or 0,
+                "占比": it.get("ratio"),
+            })
+    if not out:
+        return {}
+    out.sort(key=lambda x: -(x["占比"] or 0))
+    return {"期间": data.get("period", ""), "币种": data.get("currency_code", ""),
+            "构成": out}
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_fed_dot_plot() -> pd.DataFrame:
+    """美联储点阵图：委员们对未来各年利率的投票分布。
+
+    2026-09-05新增。跟已有的 get_fed_rate_path（市场用期货定价隐含的预期）
+    是互补的两面：点阵图是**决策者自己说打算怎么做**，利率路径是**市场
+    认为他们会怎么做**。两者背离的时候恰恰是最有信息量的时刻——市场不信
+    美联储的指引，往往意味着有一方要调整。
+
+    返回列：年份 / 利率 / 票数 / 是否中位数 / 中位利率 / 当前利率。
+    """
+    r = _futu_call(lambda c: c.get_fed_watch_dot_plot(), timeout=30, default=None)
+    df = _unwrap_futu(r)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    ren = {"year": "年份", "rate": "利率", "vote_count": "票数",
+           "is_median": "是否中位数", "median_rate": "中位利率",
+           "current_rate": "当前利率"}
+    df = df.rename(columns={k: v for k, v in ren.items() if k in df.columns})
+    return df
+
+
 # 虚拟货币板块要展示的主流币，按市值大致排序。刻意写死一份清单而不是把
 # 富途那609个标的全端上来：那里面绝大多数是交叉盘（AAVE/BTC、ADA/EUR 这种）
 # 和长尾小币，对"看一眼大盘怎么样"没有意义，反而会把真正要看的十几个淹掉。

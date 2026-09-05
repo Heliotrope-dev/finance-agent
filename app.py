@@ -3199,6 +3199,21 @@ def _maybe_show_closure_notice():
     if st.session_state.get("_closure_seen_session"):
         return
 
+    # 站内跳转不弹。2026-09-05审计实测：游客态下从详情页返回自选，公告又弹了
+    # 一次——因为项目里的详情页跳转是整页导航（<a href="?open_symbol=">），
+    # 每次导航都新建一个 Streamlit session、清空 session_state，上面那道
+    # 会话闸门等于不存在。已登录用户的次数落了库不受影响，游客只能靠
+    # session_state，正好踩在这个坑上。
+    #
+    # 判据就用 URL 上有没有参数：干净的 URL 才是"重新打开网站"，带着
+    # open_symbol/section 这类参数的一定是站内跳转。这比再造一套游客标识
+    # 简单得多，也正好对上用户的原话——"不需要每次点进去就跳"。
+    try:
+        if dict(st.query_params):
+            return
+    except Exception:
+        pass
+
     _email = st.session_state.get("user_email")
 
     # 已登录用户的次数落库，整页刷新之后仍然有效（项目里的跳转全是整页导航，
