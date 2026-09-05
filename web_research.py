@@ -118,7 +118,18 @@ def search(query: str, limit: int = 8, *, ttl: int = _CACHE_TTL) -> list[dict]:
     try:
         h = _http("https://html.duckduckgo.com/html/",
                   data=urllib.parse.urlencode({"q": query}).encode())
-    except Exception:
+    except Exception as e:
+        print(f"[web_research] 搜索请求失败({type(e).__name__})，本次拿不到材料：{query[:40]}")
+        return []
+
+    # 限流要能被看见。2026-09-05实测：调用频繁之后DDG会返回一个200的页面，
+    # 里面一条结果都没有、但带着 anomaly 字样——如果只看"解析出0条"就返回
+    # 空列表，调用方和AI都会把它理解成"网上确实没有这条信息"，而真相是
+    # "我们被挡住了"。这两种情况对打新判断的意义完全相反：前者是事实，
+    # 后者是我们的数据缺口。所以宁可在日志里吵一句，也不要静默退化。
+    if "anomaly" in h.lower() or "unusual traffic" in h.lower():
+        print(f"[web_research] 搜索被限流（DuckDuckGo 反爬拦截），本次没有材料。"
+              f"这不代表网上没有相关信息：{query[:40]}")
         return []
 
     out, seen = [], set()
@@ -203,6 +214,9 @@ def research(query: str, *, read_top: int = 2, limit: int = 6,
     """
     hits = search(query, limit=limit)
     if not hits:
+        # 返回空串而不是一句"没搜到"：调用方（ipo_brief/advisor）都会在材料
+        # 为空时走各自的降级路径，塞一句解释进去反而会被当成材料喂给AI。
+        # 真正的可见性在 search() 里的日志，那是给排查的人看的。
         return ""
 
     parts = ["【搜索结果标题】"]
