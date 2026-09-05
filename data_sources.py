@@ -3600,12 +3600,17 @@ def get_revenue_breakdown(symbol: str, market: str) -> dict:
     if not isinstance(data, dict):
         return {}
     groups = data.get("breakdown_list") or []
-    out = []
+    out, seen = [], set()
     for g in groups:
         for it in (g.get("item_list") or []):
             name = str(it.get("name") or "").strip()
-            if not name:
+            # 去重。富途会按不同口径返回多组拆解（业务线/地区），同一个
+            # 项目会在多组里各出现一次——实测腾讯的"增值服务"会重复两遍。
+            # 平铺不去重的话喂给AI的就是"增值服务48.5%、增值服务48.5%"，
+            # 看着像数据错乱，会拉低它对整段材料的信任。
+            if not name or name in seen:
                 continue
+            seen.add(name)
             out.append({
                 "项目": name,
                 "金额": it.get("main_oper_income") or 0,

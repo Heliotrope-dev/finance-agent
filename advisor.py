@@ -1357,6 +1357,84 @@ def _analyst_view_text(symbol: str, market: str, price: float | None = None) -> 
 
     return "\n".join(parts)
 
+def _extra_facts_text(symbol: str, market: str) -> str:
+    """把项目里已经接了、但一直没喂进判断链路的几块数据整合成一段。
+
+    2026-09-06 用户要求"把能用上的数据全部喂给他"。审计发现 09-05/09-06
+    新接的四个接口（营收拆解、资金流历史、公司概况、美联储点阵图）都停在
+    data_sources 里没有下游——数据取到了，AI 却看不到，等于白接。
+
+    每一块回答的是判断链条里一个具体的空缺：
+
+      公司概况    此前AI要靠新闻和财务数字倒推这家公司是干什么的。这是
+                  接口直接给的事实，没有理由让它猜。
+      营收拆解    财务摘要只有总营收和增速，看不出增长是主业带来的还是
+                  某个一次性业务撑的——这直接决定增长可不可持续。
+      资金流趋势  项目原有的是当日快照。单日主力净流入是噪音，连续五天
+                  同向才是信号。这里给近10日的方向和净额。
+      点阵图      美联储委员自己投票的利率路径。对高估值成长股，贴现率
+                  预期的变化往往比公司自身的季度业绩影响更大。
+
+    任何一块取不到就跳过，不阻断判断——这些是增量信息，缺了判断质量下降，
+    但不该让整支票判不出来。
+    """
+    parts = []
+
+    try:
+        prof = ds.get_company_profile_text(symbol, market)
+        if prof:
+            parts.append(f"公司基本资料：{prof}")
+    except Exception:
+        pass
+
+    try:
+        rb = ds.get_revenue_breakdown(symbol, market)
+        items = (rb or {}).get("构成") or []
+        if items:
+            seg = "、".join(f"{x['项目']}{x['占比']:.1f}%" for x in items[:6]
+                           if x.get("占比") is not None)
+            if seg:
+                parts.append(f"营收构成（{rb.get('期间', '')}）：{seg}。"
+                             "看增长是主业带来的还是单一业务撑的。")
+    except Exception:
+        pass
+
+    try:
+        cf = ds.get_capital_flow_history(symbol, market, days=10)
+        if cf is not None and not cf.empty and "主力净流入" in cf.columns:
+            ser = cf["主力净流入"].dropna()
+            if len(ser) >= 5:
+                pos_days = int((ser > 0).sum())
+                total = float(ser.sum())
+                unit = "亿" if abs(total) >= 1e8 else "万"
+                div = 1e8 if unit == "亿" else 1e4
+                parts.append(
+                    f"近{len(ser)}个交易日主力资金：{pos_days}天净流入、"
+                    f"{len(ser) - pos_days}天净流出，累计{total / div:+.2f}{unit}。"
+                    "连续同向比单日金额更有意义。")
+    except Exception:
+        pass
+
+    # 点阵图对所有标的都一样，但对高估值成长股意义更大，所以只在美股带上——
+    # 港股A股的贴现率锚不是美联储，硬塞进去只会稀释提示词。
+    if market == "US":
+        try:
+            dp = ds.get_fed_dot_plot()
+            if dp is not None and not dp.empty and "是否中位数" in dp.columns:
+                med = dp[dp["是否中位数"] == True]  # noqa: E712
+                if not med.empty:
+                    cur = float(med.iloc[0].get("当前利率") or 0)
+                    seg = "、".join(
+                        f"{int(r['年份'])}年{float(r['中位利率']):.2f}%"
+                        for _, r in med.iterrows())
+                    parts.append(f"美联储点阵图中位预期：{seg}（当前{cur:.2f}%）。"
+                                 "这是决策者自己的投票，跟市场定价可能背离。")
+        except Exception:
+            pass
+
+    return "\n".join(parts)
+
+
 def _web_view_text(symbol: str, market: str, name: str, *, deep: bool = False) -> str:
     """从公开网页挖这只股票的外部看法与催化剂，喂给判断链条。
 
@@ -1859,6 +1937,12 @@ def _judge_one(item: dict, source: str) -> dict | None:
     # 和技术面是并列的第三个维度，它的独特价值是给另外两个做交叉验证——
     # 技术面转强但主力净流出，说明这波是散户在推，可靠性要打折。
     chips = _chips_summary_text(symbol, market)
+    # 补充事实（2026-09-06）：公司概况/营收构成/资金流趋势/点阵图。
+    # 并进 chips 那一段送进去，理由跟前面几次一样——两个判断入口的签名
+    # 都不用动，改动面最小。
+    _extra = _extra_facts_text(symbol, market)
+    if _extra:
+        chips = (chips + "\n\n" if chips else "") + "补充事实：\n" + _extra
     # 分析师预期与催化剂（2026-09-05新增，打分的第六维）
     analyst_view = _analyst_view_text(symbol, market, price)
     # 公开网页材料（2026-09-05新增）：接口给数字，网页给理由和催化剂。
