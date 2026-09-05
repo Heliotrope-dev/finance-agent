@@ -77,6 +77,9 @@ from tracker import (
     get_latest_macro_briefs,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_closure_notice_count, bump_closure_notice_count,
+    get_latest_ipo_briefs,
+    get_institution_ratings,
+    get_morningstar_view,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
     get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
     get_equity_snapshots, get_period_pnl,
@@ -3549,6 +3552,121 @@ def _render_ai_assistant():
 _MACRO_SECTIONS = ("一句话结论", "现状", "影响", "盯什么")
 
 
+_IPO_SECTIONS = ("一句话结论", "公司概况", "定价与门槛", "市场热度", "绿鞋与回拨", "风险")
+
+
+@st.fragment
+def _render_ipo_briefs():
+    """港股新股认购专区。
+
+    2026-09-05用户要求。跟宏观专区同一个模式：数据和AI判断预先算好落库，
+    首页只读一行，不在渲染路径里跑AI。
+
+    列表只显示还没上市的——打新窗口过了之后这块内容对用户就没有行动价值了，
+    留在页面上只会占位置。认购截止日单独标出来并且做了紧迫度提示：新股最容易
+    错过的不是"不知道有这只"，是"知道但忘了截止日"。
+    """
+    try:
+        briefs = get_latest_ipo_briefs(limit=6)
+    except Exception:
+        briefs = []
+    if not briefs:
+        return
+
+    import datetime as _d
+    today = _d.date.today()
+
+    st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
+    st.markdown("**港股新股认购**")
+    st.markdown(
+        "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 10px'>"
+        "招股数据来自交易接口，保荐人／基石／超额认购／绿鞋回拨来自公开资讯，"
+        "资讯里没提到的一律标注未查到</div>",
+        unsafe_allow_html=True,
+    )
+
+    for b in briefs:
+        parts = _parse_ipo_text(_clean_ai_markdown(b.get("brief_text", "")))
+        head = parts.get("一句话结论", "")
+        # 结论词决定颜色：值得申购用涨色，建议回避用跌色，其余中性。
+        _tone = "var(--fa-muted)"
+        if "值得申购" in head:
+            _tone = UP_COLOR
+        elif "建议回避" in head:
+            _tone = DOWN_COLOR
+
+        try:
+            facts = json.loads(b.get("facts_json") or "{}")
+        except Exception:
+            facts = {}
+
+        # 认购截止的紧迫度
+        _due = b.get("apply_end") or ""
+        _due_txt = ""
+        if _due:
+            try:
+                left = (_d.date.fromisoformat(_due) - today).days
+                if left < 0:
+                    _due_txt = f"认购已截止（{_due}）"
+                elif left == 0:
+                    _due_txt = "今日认购截止"
+                else:
+                    _due_txt = f"认购截止 {_due}（还有{left}天）"
+            except Exception:
+                _due_txt = f"认购截止 {_due}"
+
+        _meta = []
+        if b.get("list_date"):
+            _meta.append(f"{b['list_date']} 上市")
+        if facts.get("entrance_price"):
+            _meta.append(f"入场费 HK${facts['entrance_price']:,.0f}")
+        if facts.get("lot_size"):
+            _meta.append(f"每手 {int(facts['lot_size'])}股")
+        _pmin, _pmax = facts.get("price_min"), facts.get("price_max")
+        if _pmin and _pmax:
+            _meta.append(f"招股价 {_pmin:,.2f}" + (f"-{_pmax:,.2f}" if _pmax != _pmin else ""))
+
+        st.markdown(
+            f"<div style='padding:14px 0 4px;border-top:1px solid var(--fa-border)'>"
+            f"<div style='display:flex;align-items:baseline;gap:10px;flex-wrap:wrap'>"
+            f"<span style='font-weight:600;font-size:0.98rem;color:var(--fa-text)'>{_esc(b['name'])}</span>"
+            f"<span style='color:var(--fa-faint);font-size:0.78rem'>{_esc(b['symbol'])}</span>"
+            f"<span style='color:{_tone};font-size:0.86rem;flex:1'>{_esc(head)}</span></div>"
+            f"<div style='color:var(--fa-faint);font-size:0.78rem;margin-top:5px'>"
+            f"{_esc(' · '.join(_meta))}{('　' + _esc(_due_txt)) if _due_txt else ''}</div></div>",
+            unsafe_allow_html=True,
+        )
+        with st.expander("展开详情"):
+            for name in _IPO_SECTIONS[1:]:
+                body = parts.get(name)
+                if body:
+                    st.markdown(_labeled_line(name, body), unsafe_allow_html=True)
+            try:
+                srcs = json.loads(b.get("sources_json") or "[]")
+            except Exception:
+                srcs = []
+            if srcs:
+                st.caption(f"参考资讯 {len(srcs)} 条")
+
+
+def _parse_ipo_text(text: str) -> dict:
+    """按段名切开新股简报。跟 _parse_advice_text 同一套约定和同样的加粗容忍。"""
+    parts: dict = {}
+    text = text or ""
+    positions = []
+    for name in _IPO_SECTIONS:
+        m = re.search(r"(?:^|\n)\s*\*{0,2}" + re.escape(name) + r"\*{0,2}\s*[：:]", text)
+        if m:
+            positions.append((m.start(), name, m.end()))
+    positions.sort()
+    for i, (idx, name, body_start) in enumerate(positions):
+        end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+        body = text[body_start:end].strip()
+        if body:
+            parts[name] = body
+    return parts
+
+
 @st.fragment
 def _render_event_calendar():
     """财经日历——接下来几天要公布什么数据、有哪些评级变动。
@@ -3856,6 +3974,7 @@ def _render_home_page():
     st.divider()
     _render_macro_briefs()
     _render_event_calendar()
+    _render_ipo_briefs()
 
     st.divider()
     _render_advice_section()
@@ -3905,6 +4024,84 @@ def _render_home_page():
             if st.button("收起", key="_home_news_collapse"):
                 st.session_state["_home_news_expand"] = False
                 st.rerun()
+
+
+@st.fragment
+def _render_institution_view(symbol: str, market: str):
+    """机构观点：各大机构的评级与目标价，以及晨星研报。
+
+    2026-09-05用户提出"很多分析里没有专家机构的背书"。此前页面上只有我们
+    自己AI的判断，唯一的外部意见是折在估值里的一句"分析师一致预期均值"。
+
+    这块补的是两种此前没有的东西：一是逐家机构的评级和目标价——是谁说的、
+    什么时候说的、带原文链接，可以点进去核对，而不是一个抹平分歧的平均数；
+    二是晨星研报，那是真正带论证过程的第三方估值分析，不只是一个评级数字。
+
+    分歧刻意突出显示：实测苹果8家机构里7家买入目标价340-400，富瑞独家给
+    强烈卖出263.66——这种分歧是均值给不了的信息，也正是用户该自己判断的地方。
+    """
+    try:
+        insts = get_institution_ratings(symbol, market, limit=8)
+    except Exception:
+        insts = []
+    try:
+        ms = get_morningstar_view(symbol, market)
+    except Exception:
+        ms = {}
+    if not insts and not (ms and (ms.get("fair_value") or ms.get("star_rating"))):
+        return
+
+    st.divider()
+    st.subheader("机构观点")
+
+    if ms and (ms.get("fair_value") or ms.get("star_rating")):
+        _cur = {"HK": "HK$", "US": "$", "A": "¥"}.get(market, "")
+        c1, c2 = st.columns([1, 2])
+        _star = ms.get("star_rating")
+        c1.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>晨星星级</div>"
+            f"<div style='font-size:1.35rem;font-weight:600;color:var(--fa-text)'>"
+            f"{_esc(str(_star) + ' 星') if _star else '-'}</div>"
+            + (f"<div style='font-size:0.76rem;color:var(--fa-faint);margin-top:2px'>"
+               f"公允价值 {_cur}{ms['fair_value']:,.2f}</div>" if ms.get("fair_value") else ""),
+            unsafe_allow_html=True,
+        )
+        c2.caption("晨星星级衡量的是相对它算出的内在价值、现在贵不贵："
+                   "5星明显低估、3星接近公允、1星明显高估。它不含对短期股价的判断，"
+                   "跟券商的买入卖出评级不是一回事。")
+        if ms.get("content"):
+            with st.expander("晨星的估值论证"):
+                st.markdown(ms["content"][:2400])
+
+    if insts:
+        _tps = [i["target_price"] for i in insts if i.get("target_price")]
+        _spread = ""
+        if len(_tps) >= 3:
+            _spread = (f"　最高 {max(_tps):,.0f} · 最低 {min(_tps):,.0f}"
+                       f"（相差 {(max(_tps) - min(_tps)) / min(_tps) * 100:.0f}%）")
+        st.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:14px 0 6px'>"
+            f"各机构最新评级{_esc(_spread)}</div>",
+            unsafe_allow_html=True,
+        )
+        for it in insts:
+            _c = UP_COLOR if "买入" in it["rating"] else (
+                DOWN_COLOR if "卖出" in it["rating"] else "var(--fa-muted)")
+            _name = _esc(it["institution"])
+            if it.get("url"):
+                _name = (f"<a href='{_safe_href(it['url'])}' target='_blank' "
+                         f"style='color:inherit;text-decoration:none'>{_name}</a>")
+            st.markdown(
+                f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
+                f"border-bottom:1px solid var(--fa-border)'>"
+                f"<span style='flex:2;color:var(--fa-text);font-size:0.88rem'>{_name}</span>"
+                f"<span style='color:{_c};font-size:0.85rem;min-width:56px'>{_esc(it['rating'])}</span>"
+                f"<span style='flex:1;text-align:right;color:var(--fa-text-2);font-size:0.85rem'>"
+                f"{('目标价 ' + format(it['target_price'], ',.2f')) if it.get('target_price') else ''}</span>"
+                f"<span style='color:var(--fa-faint);font-size:0.76rem;min-width:76px;text-align:right'>"
+                f"{_esc(it.get('date', ''))}</span></div>",
+                unsafe_allow_html=True,
+            )
 
 
 @st.fragment
@@ -4181,6 +4378,9 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     # 资金筹码放在新闻之后、AI分析之前：它跟新闻一样是"事实材料"，而AI分析是
     # 基于所有材料的结论，材料该排在结论前面。
     _render_chips_section(symbol, market)
+    # 机构观点排在筹码之后、AI分析之前：同样属于"事实材料"，
+    # 而且是外部第三方的意见，放在我们自己AI的结论前面更合适。
+    _render_institution_view(symbol, market)
 
     st.divider()
     _head_col, _refresh_col = st.columns([5, 1])

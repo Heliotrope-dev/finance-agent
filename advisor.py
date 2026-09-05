@@ -1288,6 +1288,52 @@ def _analyst_view_text(symbol: str, market: str, price: float | None = None) -> 
             lines.append(seg)
         parts.append("近期评级变动：" + "；".join(lines))
 
+    # 逐家机构的评级与目标价（2026-09-05新增）。用户指出"很多分析里没有专家
+    # 机构的背书"——此前只有一个汇总的一致预期，那是统计量，看不到是谁说的。
+    # 逐家列出来还有一个均值给不了的信息：分歧。同一只票有人给380有人给263，
+    # 说明市场判断并不一致，这比一个平均数更该被写进理由里。
+    try:
+        insts = ds.get_institution_ratings(symbol, market, limit=8)
+    except Exception:
+        insts = []
+    if insts:
+        segs = []
+        for it in insts[:6]:
+            seg = f"{it['institution']}{it['rating']}"
+            if it.get("target_price"):
+                seg += f"（目标价{it['target_price']:,.0f}）"
+            if it.get("date"):
+                seg += f" {it['date']}"
+            segs.append(seg)
+        parts.append("各机构评级：" + "；".join(segs))
+        _tps = [i["target_price"] for i in insts if i.get("target_price")]
+        if len(_tps) >= 3:
+            parts.append(
+                f"机构目标价分歧：最高{max(_tps):,.0f}、最低{min(_tps):,.0f}，"
+                f"相差{(max(_tps) - min(_tps)) / min(_tps) * 100:.0f}%"
+                "——分歧大说明这只票的判断依赖的假设差异很大，结论的置信度要相应下调"
+            )
+
+    # 晨星研报：星级 + 公允价值 + 论证正文
+    try:
+        ms = ds.get_morningstar_view(symbol, market)
+    except Exception:
+        ms = {}
+    if ms and (ms.get("fair_value") or ms.get("star_rating")):
+        seg = "晨星研报："
+        if ms.get("star_rating"):
+            seg += f"{ms['star_rating']}星"
+        if ms.get("fair_value"):
+            seg += f"，公允价值{ms['fair_value']:,.2f}"
+        if ms.get("updated"):
+            seg += f"（{ms['updated']}更新）"
+        seg += ("。晨星星级衡量的是'相对它自己算出的内在价值，现在贵不贵'"
+                "：5星=明显低估、3星=接近公允、1星=明显高估，不含对短期股价的判断，"
+                "不要跟券商的买入卖出评级混为一谈。")
+        if ms.get("content"):
+            seg += "\n晨星的估值论证摘要：" + ms["content"][:600].replace("\n", " ")
+        parts.append(seg)
+
     if market == "US":
         try:
             e = (ds.get_earnings_dates((symbol,), days=35) or {}).get(str(symbol).upper())

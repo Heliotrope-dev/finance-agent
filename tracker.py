@@ -408,6 +408,40 @@ def init_db():
             """
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_macro_topic ON macro_briefs (topic, created_at DESC)")
+
+        # ipo_briefs：港股新股的申购参考（2026-09-05新增）。跟 macro_briefs
+        # 同一个模式——预先算好落库，首页只读，不在渲染路径里跑AI。
+        # 每只新股每次重算写一条新记录，读的时候按 symbol 取最新那条，保留
+        # 历史是为了事后能回看"当时是怎么判断的"，跟实际上市表现对照。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ipo_briefs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                name TEXT NOT NULL,
+                list_date TEXT NOT NULL DEFAULT '',
+                apply_end TEXT NOT NULL DEFAULT '',
+                brief_text TEXT NOT NULL,
+                facts_json TEXT NOT NULL DEFAULT '',
+                sources_json TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ipo_symbol ON ipo_briefs (symbol, created_at DESC)")
+
+        # ipo_performance：近期已上市新股的首日表现统计（2026-09-05新增）。
+        # 算一次要为每只新股各发一次历史K线请求，几十次，富途历史K线有每日
+        # 额度限制，不能放在页面渲染路径里。定时算好存这里，页面只读最新一行。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ipo_performance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         # chart_json：这条议题配套的结构化数据，页面拿它画图（比如美联储那条
         # 存的是CME FedWatch的利率概率表）。存下来而不是渲染时现查，是因为
         # 首页每个访客都要画一次，现查等于每次打开都打一次Futu接口。
@@ -747,6 +781,63 @@ def bump_closure_notice_count(email: str, day: str) -> None:
             (email, f"{day}:{n}"),
         )
         c.commit()
+
+
+
+
+def log_ipo_performance(payload_json: str) -> None:
+    init_db()
+    with closing(_conn()) as c:
+        c.execute("INSERT INTO ipo_performance (payload_json, created_at) VALUES (?, ?)",
+                  (payload_json, datetime.now(timezone.utc).isoformat()))
+        # 只留最近5次，这是个可重算的派生统计，没必要无限堆历史
+        c.execute("DELETE FROM ipo_performance WHERE id NOT IN "
+                  "(SELECT id FROM ipo_performance ORDER BY id DESC LIMIT 5)")
+        c.commit()
+
+
+def get_latest_ipo_performance() -> dict:
+    init_db()
+    with closing(_conn()) as c:
+        row = c.execute("SELECT payload_json, created_at FROM ipo_performance "
+                        "ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:
+        return {}
+    try:
+        d = json.loads(row[0])
+        d["created_at"] = row[1]
+        return d
+    except Exception:
+        return {}
+
+
+def log_ipo_brief(symbol: str, name: str, list_date: str, apply_end: str,
+                  brief_text: str, facts_json: str = "", sources_json: str = "") -> None:
+    init_db()
+    with closing(_conn()) as c:
+        c.execute(
+            "INSERT INTO ipo_briefs (symbol, name, list_date, apply_end, brief_text, "
+            "facts_json, sources_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (symbol, name, list_date, apply_end, brief_text, facts_json, sources_json,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        c.commit()
+
+
+def get_latest_ipo_briefs(limit: int = 6) -> list[dict]:
+    """每只新股最新的一条，按上市日期正序——先上市的排前面，因为申购截止
+    也更早，用户要先处理那一只。已经上市的不再显示（打新窗口已经过了）。"""
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM ipo_briefs WHERE id IN "
+            "(SELECT MAX(id) FROM ipo_briefs GROUP BY symbol) "
+            "ORDER BY list_date ASC LIMIT ?", (limit * 3,),
+        ).fetchall()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    out = [dict(r) for r in rows if (r["list_date"] or "9999") >= today]
+    return out[:limit]
 
 
 def get_unnotified_orders(email: str, limit: int = 20) -> list[dict]:

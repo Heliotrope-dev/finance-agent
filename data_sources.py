@@ -3291,6 +3291,11 @@ def get_ipo_calendar(market: str = "HK", limit: int = 8) -> list[dict]:
             "price_min": _f("ipo_price_min"),
             "price_max": _f("ipo_price_max"),
             "lot_size": _f("lot_size"),
+            # 打新最直接的门槛和估值参照，之前没取（2026-09-05补）
+            "entrance_price": _f("entrance_price"),
+            "issue_pe": _f("issue_pe_rate"),
+            "industry_pe": _f("industry_pe_rate"),
+            "list_price": _f("list_price"),
         })
     out.sort(key=lambda x: x["list_date"] or "9999")
     return out[:limit]
@@ -3340,3 +3345,192 @@ def get_earnings_dates(symbols: tuple, days: int = 21) -> dict:
                 "name": _s("name"),
             }
     return found
+
+def get_recent_ipo_performance(days: int = 120, max_count: int = 60) -> dict:
+    """近期港股新股的首日表现统计。返回 {"items":[...], "stats":{...}, "monthly":[...]}。
+
+    2026-09-05新增。用户要求"列一个近期已经上市的新股的涨跌幅，把近几个月新股
+    首日涨跌幅的平均值算一下"。这个统计对打新的判断价值比单只新股的招股材料
+    还高——它回答的是"最近这个窗口打新整体赚不赚钱"，而单只的基本面在上市首日
+    往往不是主导因素。
+
+    数据来源上有个很干净的发现：新股上市首日那根日K的 last_close 就是招股价
+    （交易所把发行价当作首日的前收盘），所以 change_rate 直接就是"相对招股价
+    的首日涨跌幅"，不需要另外去找发行价再自己算。实测乐动机器人首日
+    last_close=26.36、close=60.0、change_rate=127.6%，跟公开报道一致。
+
+    刻意不加 st.cache_data：这个函数要为每只新股各发一次历史K线请求，60只就是
+    60次，而富途的历史K线有每日额度限制，放在页面渲染路径里被访问量一乘就会
+    把额度打穿。调用方应该是定时任务，算完落库，页面只读那一行。
+    """
+    import datetime as _dt
+
+    r = _futu_call(lambda c: c.get_stock_basicinfo(ft.Market.HK, ft.SecurityType.STOCK),
+                   timeout=40, default=None)
+    df = _unwrap_futu(r)
+    if df is None or df.empty or "listing_date" not in df.columns:
+        return {"items": [], "stats": {}, "monthly": []}
+
+    cut = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
+    today = _dt.date.today().isoformat()
+    recent = df[(df["listing_date"].astype(str) >= cut) & (df["listing_date"].astype(str) <= today)]
+    recent = recent.sort_values("listing_date", ascending=False).head(max_count)
+
+    items = []
+    for _, row in recent.iterrows():
+        code = str(row.get("code") or "")
+        ld = str(row.get("listing_date") or "")[:10]
+        if not code or not ld:
+            continue
+        rk = _futu_call(
+            lambda c, a=code, b=ld: c.request_history_kline(a, start=b, end=b, max_count=2),
+            timeout=25, default=None,
+        )
+        k = _unwrap_futu(rk)
+        if k is None or k.empty:
+            continue
+        row0 = k.iloc[0]
+        try:
+            offer = float(row0.get("last_close") or 0)
+            close = float(row0.get("close") or 0)
+            openp = float(row0.get("open") or 0)
+            chg = float(row0.get("change_rate") or 0)
+        except Exception:
+            continue
+        if offer <= 0 or close <= 0:
+            continue
+        items.append({
+            "symbol": code.split(".")[-1],
+            "name": str(row.get("name") or ""),
+            "list_date": ld,
+            "offer_price": offer,
+            "open_price": openp,
+            "close_price": close,
+            "first_day_pct": chg,
+            # 首日开盘相对招股价——"暗盘/开盘就赚多少"，跟收盘涨跌幅分开看
+            # 有意义：开盘高开但收盘回落，说明首日情绪在退潮。
+            "open_pct": ((openp - offer) / offer * 100) if openp > 0 else None,
+        })
+
+    if not items:
+        return {"items": [], "stats": {}, "monthly": []}
+
+    pcts = [i["first_day_pct"] for i in items]
+    pcts_sorted = sorted(pcts)
+    n = len(pcts_sorted)
+    median = pcts_sorted[n // 2] if n % 2 else (pcts_sorted[n // 2 - 1] + pcts_sorted[n // 2]) / 2
+    broke = sum(1 for p in pcts if p < 0)
+    stats = {
+        "count": n,
+        "avg": sum(pcts) / n,
+        # 中位数一定要给：新股首日收益是典型的长尾分布，一只翻倍能把均值拉起
+        # 十几个点，只看均值会高估"随便打一只大概能赚多少"。
+        "median": median,
+        "break_rate": broke / n * 100,
+        "max": max(pcts),
+        "min": min(pcts),
+        "days": days,
+    }
+
+    monthly: dict = {}
+    for i in items:
+        ym = i["list_date"][:7]
+        monthly.setdefault(ym, []).append(i["first_day_pct"])
+    monthly_out = [
+        {"month": ym, "count": len(v), "avg": sum(v) / len(v),
+         "break_rate": sum(1 for x in v if x < 0) / len(v) * 100}
+        for ym, v in sorted(monthly.items())
+    ]
+
+    items.sort(key=lambda x: x["list_date"], reverse=True)
+    return {"items": items, "stats": stats, "monthly": monthly_out}
+
+# 富途机构评级的取值。实测 rating=4 对应的原文链接标题里写的是 "Reiterates Buy"
+# / "Receives a Buy" / "Reaffirms their Buy"（美银、Evercore、大摩三家都是4），
+# 据此推断是 1-5 的五档。没见过的值原样显示成数字，不硬套一个标签——评级是
+# 会被用来做决策的信息，猜错比显示原始值糟糕得多。
+_INST_RATING_TEXT = {1: "强烈卖出", 2: "卖出", 3: "持有", 4: "买入", 5: "强烈买入"}
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_institution_ratings(symbol: str, market: str, limit: int = 8) -> list[dict]:
+    """各大机构对这只股票的最新评级与目标价。
+
+    2026-09-05新增。用户指出"很多分析里没有专家机构的背书"——此前只有一个
+    汇总的"分析师一致预期"（覆盖机构数、目标价均值），那是个统计量，看不到
+    是谁说的、什么时候说的。这个接口给的是逐家机构：美银证券、摩根士丹利、
+    花旗、Evercore 各自的评级、目标价、给出日期，还带原文链接。
+
+    "某家机构怎么看"和"平均目标价多少"是两种不同的信息：均值抹掉了分歧，
+    而分歧本身有价值——同一只票有人给380有人给360，说明市场对它的判断并不
+    一致，这比一个平均数更能说明问题。
+
+    每家只取最新一条评级（同一家机构历史上会反复发布），按日期倒序。
+    """
+    code = _futu_code(symbol, market)
+    if not code:
+        return []
+    r = _futu_call(lambda c: c.get_research_rating_summary(code, num=limit * 2),
+                   timeout=25, default=None)
+    if not r or r[0] != ft.RET_OK or not isinstance(r[1], dict):
+        return []
+    out = []
+    for entry in (r[1].get("inst_rating_summary_list") or []):
+        info = entry.get("institution_info") or {}
+        items = entry.get("rating_item_list") or []
+        if not items:
+            continue
+        # 同一家机构可能有多条历史评级，取推荐日期最新的那条
+        latest = max(items, key=lambda x: x.get("recommendation_date") or 0)
+        rating = latest.get("rating")
+        try:
+            tp = float(latest.get("target_price") or 0) or None
+        except Exception:
+            tp = None
+        out.append({
+            "institution": str(info.get("institution_name") or info.get("institution_en_name") or ""),
+            "rating": _INST_RATING_TEXT.get(rating, f"评级{rating}" if rating is not None else ""),
+            "rating_raw": rating,
+            "target_price": tp,
+            "date": str(latest.get("recommendation_date_str") or "")[:10],
+            "url": str(latest.get("rating_url") or ""),
+        })
+    out.sort(key=lambda x: x["date"], reverse=True)
+    return out[:limit]
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def get_morningstar_view(symbol: str, market: str) -> dict:
+    """晨星（Morningstar）的星级评定与公允价值估计，含中文分析正文。
+
+    2026-09-05新增。这是项目里第一份真正意义上的"第三方机构研报"——不是评级
+    数字，是带论证过程的估值分析（收入复合增速预测、毛利率路径、公允价值怎么
+    算出来的）。港股美股都支持，实测腾讯控股拿到5星、公允价值780港元。
+
+    星级是晨星自己的口径：5星表示相对公允价值明显低估，1星表示明显高估，
+    3星是接近公允价值。它跟券商的买入卖出评级不是一回事——晨星的星级本质上
+    是"相对我们算出来的内在价值，现在贵不贵"，不含对短期股价的判断。
+    """
+    code = _futu_code(symbol, market)
+    if not code:
+        return {}
+    r = _futu_call(lambda c: c.get_research_morningstar_report(code), timeout=25, default=None)
+    if not r or r[0] != ft.RET_OK or not isinstance(r[1], dict):
+        return {}
+    d = r[1]
+    try:
+        fv = float(d.get("fair_value") or 0) or None
+    except Exception:
+        fv = None
+    content = ""
+    fvc = d.get("fair_value_content")
+    if isinstance(fvc, dict):
+        content = str(fvc.get("context") or "")
+    elif isinstance(fvc, str):
+        content = fvc
+    return {
+        "star_rating": d.get("star_rating"),
+        "fair_value": fv,
+        "updated": str(d.get("star_update_time_str") or "")[:10],
+        "content": content.strip(),
+    }
