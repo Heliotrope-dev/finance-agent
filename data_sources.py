@@ -3452,6 +3452,73 @@ def get_recent_ipo_performance(days: int = 120, max_count: int = 60) -> dict:
     items.sort(key=lambda x: x["list_date"], reverse=True)
     return {"items": items, "stats": stats, "monthly": monthly_out}
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_sector_heatmap(market: str = "US", limit: int = 30) -> pd.DataFrame:
+    """板块热力图数据：各板块的涨跌幅和成交额。
+
+    2026-09-06新增。回答"今天钱往哪个方向走"——项目原有的热门板块是按
+    热度排的，热度高不等于在涨，两者经常背离（被砸的板块讨论度也很高）。
+    """
+    mk = {"US": ft.Market.US, "HK": ft.Market.HK, "A": ft.Market.SH}.get(
+        (market or "US").upper(), ft.Market.US)
+    r = _futu_call(lambda c: c.get_heat_map_data(mk), timeout=30, default=None)
+    df = _unwrap_futu(r)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    ren = {"plate_name": "板块", "cur_price": "点位", "change_rate": "涨跌幅",
+           "turnover": "成交额", "market_val": "总市值", "plate": "代码"}
+    df = df.rename(columns={k: v for k, v in ren.items() if k in df.columns})
+    keep = [c for c in ("板块", "涨跌幅", "成交额", "总市值") if c in df.columns]
+    if "涨跌幅" not in keep:
+        return pd.DataFrame()
+    return df[keep].sort_values("涨跌幅", ascending=False).head(limit).reset_index(drop=True)
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_ark_holdings(limit: int = 20) -> pd.DataFrame:
+    """ARK 基金持仓及变动。
+
+    2026-09-06新增。ARK 的持仓是公开且每日披露的，这在主动基金里很罕见——
+    绝大多数基金要等季报。它的价值不在于"跟着买"，而在于它是一个仓位变化
+    可以被逐日观察的成长股风向标：某只票被连续加仓还是在被清，比它的静态
+    持仓占比有意义。
+    """
+    r = _futu_call(lambda c: c.get_ark_fund_holding(), timeout=30, default=None)
+    df = _unwrap_futu(r)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    ren = {"security": "代码", "name": "名称", "shares": "持股数",
+           "shares_change": "持股变动", "market_value": "市值",
+           "weight": "权重", "weight_change": "权重变动"}
+    df = df.rename(columns={k: v for k, v in ren.items() if k in df.columns})
+    keep = [c for c in ("代码", "名称", "持股数", "持股变动", "市值", "权重", "权重变动")
+            if c in df.columns]
+    return df[keep].head(limit).reset_index(drop=True)
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def get_company_profile_text(symbol: str, market: str) -> str:
+    """公司概况：主营、行业、上市地等基础信息，拼成一段文本。
+
+    2026-09-06新增。给AI判断用——此前AI要靠新闻和财务数字倒推这家公司
+    是干什么的，而这是接口直接能给的事实，没有理由让它猜。
+    """
+    code = _futu_code(symbol, market)
+    if not code:
+        return ""
+    r = _futu_call(lambda c: c.get_company_profile(code), timeout=25, default=None)
+    df = _unwrap_futu(r)
+    if df is None or df.empty or "name" not in df.columns:
+        return ""
+    parts = []
+    for _, x in df.iterrows():
+        k = str(x.get("name") or "").strip()
+        v = str(x.get("value") or "").strip()
+        if k and v and v not in ("N/A", "-", "None"):
+            parts.append(f"{k}：{v[:120]}")
+    return "；".join(parts[:10])
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_capital_flow_history(symbol: str, market: str, days: int = 30) -> pd.DataFrame:
     """主力资金流向的历史序列。
