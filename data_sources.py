@@ -3427,6 +3427,9 @@ def get_recent_ipo_performance(days: int = 120, max_count: int = 60) -> dict:
         # 十几个点，只看均值会高估"随便打一只大概能赚多少"。
         "median": median,
         "break_rate": broke / n * 100,
+        # 上涨只数占比。跟 avg 是两回事，缺了它光看"平均+55.7%"很容易被
+        # 误读成"55.7%的新股上涨"（实际只有64%），所以一并算出来给AI和页面。
+        "up_rate": sum(1 for p in pcts if p > 0) / n * 100,
         "max": max(pcts),
         "min": min(pcts),
         "days": days,

@@ -3594,11 +3594,20 @@ def _render_ipo_briefs():
             f"近{_st['days']}天已上市 {_st['count']} 只的首日表现</div>",
             unsafe_allow_html=True,
         )
-        m1, m2, m3, m4 = st.columns(4)
+        # 上涨占比这一项是用户看到"首日平均+55.7%"时问出来的：他不确定这个数
+        # 是涨跌幅的均值，还是上涨股票占全部新股的比例。两种读法差别极大——
+        # 均值55.7%是被几只翻三倍的票拉起来的，而实际上涨的只有64%。既然一个
+        # 标签解释不清，就把两个数并排列出来，歧义自然消失。
+        # 用 items 现算而不是读 stats：库里已有的那条记录是加这个字段之前写的，
+        # 从 stats 取会是空的，而 items 一直都在。
+        _ups = [i for i in ((perf or {}).get("items") or []) if (i.get("first_day_pct") or 0) > 0]
+        _up_rate = len(_ups) / _st["count"] * 100 if _st.get("count") else 0.0
+
+        m1, m2, m3, m4, m5 = st.columns(5)
         _avg_c = UP_COLOR if _st["avg"] > 0 else DOWN_COLOR
         _med_c = UP_COLOR if _st["median"] > 0 else DOWN_COLOR
         m1.markdown(
-            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>首日平均涨跌</div>"
+            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>首日涨跌幅均值</div>"
             f"<div style='font-size:1.3rem;font-weight:600;color:{_avg_c}'>{_st['avg']:+.1f}%</div>",
             unsafe_allow_html=True)
         m2.markdown(
@@ -3606,16 +3615,21 @@ def _render_ipo_briefs():
             f"<div style='font-size:1.3rem;font-weight:600;color:{_med_c}'>{_st['median']:+.1f}%</div>",
             unsafe_allow_html=True)
         m3.markdown(
-            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>破发率</div>"
-            f"<div style='font-size:1.3rem;font-weight:600;color:var(--fa-text)'>{_st['break_rate']:.0f}%</div>",
+            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>上涨占比</div>"
+            f"<div style='font-size:1.3rem;font-weight:600;color:{UP_COLOR}'>{_up_rate:.0f}%</div>",
             unsafe_allow_html=True)
         m4.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>破发率</div>"
+            f"<div style='font-size:1.3rem;font-weight:600;color:{DOWN_COLOR}'>{_st['break_rate']:.0f}%</div>",
+            unsafe_allow_html=True)
+        m5.markdown(
             f"<div style='font-size:0.76rem;color:var(--fa-faint)'>区间</div>"
             f"<div style='font-size:1.05rem;font-weight:600;color:var(--fa-text)'>"
             f"{_st['min']:+.0f}% ~ {_st['max']:+.0f}%</div>",
             unsafe_allow_html=True)
-        st.caption("均值和中位数都给：新股首日收益是典型长尾分布，一只翻倍就能把均值"
-                   "拉高十几个点，判断随便打一只大概赚多少，要看中位数。")
+        st.caption(f"前两项是涨跌幅本身，后两项才是只数占比：{_st['count']}只里"
+                   f"{len(_ups)}只首日收涨。新股首日收益是典型长尾分布，均值被少数"
+                   f"翻倍股拉高，判断随便打一只大概赚多少要看中位数。")
 
         _monthly = (perf or {}).get("monthly") or []
         _items = (perf or {}).get("items") or []
