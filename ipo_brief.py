@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 import advisor
 import data_sources as ds
 import tracker
+import web_research
 
 _SYSTEM = """你是一位熟悉港股新股市场的分析师，服务对象是一位会自己决定要不要
 申购的个人投资者。下面会给你一只即将上市的港股新股的招股硬数据，以及搜到的
@@ -31,19 +32,26 @@ _SYSTEM = """你是一位熟悉港股新股市场的分析师，服务对象是�
 
 硬性要求：
 
-1. 只能用给定的材料。招股价、每手股数、入场费、上市日期这些是接口给的硬数据，
-   可以直接用；保荐人、基石投资者、超额认购倍数、绿鞋（超额配售选择权）、
-   回拨机制这些**接口拿不到**，只有在下面的资讯材料里真的提到才能写，没提到
-   就明确写"未查到"。绝对不要凭对这家公司或这个行业的印象推测这些数字——
-   打新是要真金白银下单的，编一个"超额认购50倍"或"设有绿鞋"出来，比不说危险
-   得多。
+1. 只能用给定的材料，但要把材料用尽。材料分三块：交易接口给的招股硬数据
+   （招股价、每手股数、入场费、上市日期）；从公开网页挖到的招股材料（保荐人、
+   基石投资者、超额认购倍数、绿鞋、回拨机制、业务范围、募资用途通常在这里，
+   每段都标了来源域名）；以及富途资讯。只要材料里写了就必须写进简报，不要
+   在材料明明给了保荐人的情况下还回一句"未查到"。绝对不要凭对这家公司或这个
+   行业的印象推测材料里没有的数字——打新是要真金白银下单的，编一个"超额认购
+   50倍"出来，比不说危险得多。
+
+   区分"未查到"和"确认没有"：材料里写"绿鞋 无"是查到了、结论是这只没有绿鞋，
+   要写成"没有绿鞋安排"并说明这意味着破发时缺少承销商托底；只有材料里根本
+   没提这一项，才写"未查到"。把"确认没有"写成"未查到"会让人以为还有希望，
+   是实打实的误导。
 
 2. 关于绿鞋和回拨要讲清楚它们的意义，不要只报有无：绿鞋（超额配售选择权）是
    承销商在上市后一段时间内可以按发行价增发一部分股份，作用是稳定股价、通常
    意味着破发时有一定托底；回拨机制是公开发售超额认购到一定倍数时从国际配售
    回拨股份给散户，回拨比例越高散户中签率越高但单签获配也越分散。材料里没提
-   就说未查到，不要展开解释一个不存在的机制。港股没有"红鞋"这种机制，用户
-   如果这么问，如实说明。
+   就说未查到，不要展开解释一个不存在的机制。材料里如果给了回拨机制的档位表
+   （认购倍数对应的公开发售占比），要把当前认购倍数落在哪一档说清楚，这直接
+   决定散户能分到多少货。港股没有"红鞋"这种机制，用户如果这么问，如实说明。
 
 3. 结论要给一个明确的倾向：值得申购 / 谨慎参与 / 建议回避 / 信息不足难以判断。
    最后一个不是逃避——招股信息披露不全的时候，说"信息不足"比硬凑一个结论
@@ -65,17 +73,22 @@ _SYSTEM = """你是一位熟悉港股新股市场的分析师，服务对象是�
 
 严格按以下格式输出（每段以段名加中文冒号开头，段名不要改写）：
 一句话结论：<值得申购/谨慎参与/建议回避/信息不足难以判断，加一句为什么>
-公司概况：<这家公司做什么，几句话，材料里没有就写未查到>
+公司概况：<这家公司做什么、主要股东、募资拿去干什么，几句话，材料里没有就写未查到>
 定价与门槛：<招股价区间、每手股数、入场费、发行市盈率如果有的话>
-市场热度：<超额认购倍数、基石投资者、保荐人，只写材料里有的，没有就写未查到>
+市场热度：<超额认购倍数、基石投资者、保荐人、稳价人，只写材料里有的，没有就写未查到>
 绿鞋与回拨：<只写材料里明确提到的，没有就写未查到；有的话说明它对散户意味着什么>
 风险：<具体到这一只>
 """
 
 
 def _ipo_news_text(name: str, limit: int = 8) -> tuple[str, list]:
-    """搜这只新股的相关资讯。名字本身就是最好的搜索词——新股没有历史行情、
-    没有财报，能拿到的外部信息几乎全在新闻里。"""
+    """富途新闻库里的相关资讯。
+
+    对新股这几乎总是空的：富途的新闻按**已上市**股票代码索引，还没上市的
+    公司搜不到任何东西（实测三只新股全是0条）。留着它是因为偶尔能命中同名
+    的A股母公司新闻，成本又只有一次接口调用。真正的材料来源是下面的
+    _web_material。
+    """
     try:
         df = ds.get_stock_news(name, limit=limit)
         items = df.to_dict("records") if df is not None and not df.empty else []
@@ -90,6 +103,27 @@ def _ipo_news_text(name: str, limit: int = 8) -> tuple[str, list]:
         lines.append(f"- {title}（{it.get('日期') or it.get('date') or ''}）")
         keep.append(it)
     return "\n".join(lines), keep
+
+
+def _web_material(name: str, symbol: str) -> str:
+    """从公开网页挖招股材料。这是简报里保荐人/基石/超额认购/绿鞋回拨的唯一来源。
+
+    两条路一起走，因为它们缺的东西正好互补：
+      hkipox 的结构化页  版式固定、URL就是股票代码，保荐人、稳价人、绿鞋有无、
+                         认购倍数、回拨机制表、业务范围一次给全，但只有硬事实，
+                         没有市场怎么看这一只。
+      网页搜索           补基石投资者名单和外界评价这类叙述性的信息，
+                         比如"传音、联想、蓝思等14家基投"这种只出现在新闻里。
+    """
+    parts = []
+    facts = web_research.hk_ipo_facts(symbol)
+    if facts:
+        parts.append(facts)
+    news = web_research.research(f"{name} {symbol} 港股 招股 保荐人 基石投资者 超额认购",
+                                 read_top=2, max_chars=3500)
+    if news:
+        parts.append(news)
+    return "\n\n".join(parts)
 
 
 def _facts_text(ipo: dict) -> str:
@@ -121,6 +155,7 @@ def _facts_text(ipo: dict) -> str:
 def build_one(ipo: dict) -> bool:
     news_text, items = _ipo_news_text(ipo["name"])
     facts = _facts_text(ipo)
+    web_text = _web_material(ipo["name"], ipo["symbol"])
 
     # 把近期新股整体表现一并给AI：单只的招股材料常常很薄（实测这三只新闻
     # 一条都搜不到），而"最近打新整体赚不赚钱、破发率多少"是有真实数据支撑
@@ -145,7 +180,9 @@ def build_one(ipo: dict) -> bool:
         f"新股：{ipo['name']}（{ipo['symbol']}）\n\n"
         f"招股硬数据：\n{facts}\n\n"
         + (f"近期新股市场整体表现（真实统计，可以引用）：\n{market_ctx}\n\n" if market_ctx else "")
-        + (f"相关资讯：\n{news_text}\n\n" if news_text else "相关资讯：（没有搜到相关新闻）\n\n")
+        + (f"公开网页挖到的招股材料（可以引用，注意标注的来源）：\n{web_text}\n\n"
+           if web_text else "公开网页没有挖到招股材料。\n\n")
+        + (f"富途资讯：\n{news_text}\n\n" if news_text else "")
         + f"当前时间：{datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M')}"
     )
 
@@ -159,9 +196,11 @@ def build_one(ipo: dict) -> bool:
 
     tracker.log_ipo_brief(
         ipo["symbol"], ipo["name"], ipo.get("list_date", ""), ipo.get("apply_end", ""),
-        text, json.dumps(ipo, ensure_ascii=False), json.dumps(items, ensure_ascii=False),
+        text, json.dumps(ipo, ensure_ascii=False),
+        json.dumps({"futu_news": items, "web": web_text}, ensure_ascii=False),
     )
-    print(f"[{ipo['symbol']}] {ipo['name']} 已写入，{len(text)}字，资讯{len(items)}条")
+    print(f"[{ipo['symbol']}] {ipo['name']} 已写入，{len(text)}字，"
+          f"富途资讯{len(items)}条，网页材料{len(web_text)}字")
     return True
 
 
