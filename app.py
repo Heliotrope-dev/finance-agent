@@ -2888,7 +2888,76 @@ def _clean_ai_markdown(text: str) -> str:
     cleaned = re.sub(r"([：:])[ \t]*\n+[ \t]*(?=\S)", r"\1", cleaned)
     # 去掉成对但跨行残留的加粗标记
     cleaned = re.sub(r"\*\*(\s*)\*\*", r"\1", cleaned)
+    cleaned = _normalize_dimension_line(cleaned)
     return cleaned.strip()
+
+
+# 六个维度的名字。顺序写死，因为归一化后要按这个顺序输出——AI 列出来的
+# 顺序偶尔会变，而排行榜上五张卡片的维度顺序不一致会很扎眼。
+_DIM_NAMES = ("基本面", "价格位置", "技术面", "筹码面", "分析师预期", "数据确定性")
+
+
+def _normalize_dimension_line(text: str) -> str:
+    """把"维度打分"那段统一成一行，不管模型写成什么格式。
+
+    2026-09-06 用户反馈"为啥每次的第四名和第五名长得不太一样"。第4名
+    (Meta) 是紧凑单行，第5名 (Nutanix) 被渲染成了带括号说明的 markdown
+    列表，五张卡片排在一起格式明显不齐。
+
+    根因是模型对格式有自由裁量：提示词要求的是
+    "维度打分：基本面X/22 · 价格位置X/20 · ..."，但它有时会写成
+
+        维度打分
+        ：- 基本面 16/22（盈利能力改善但高基数下增速或放缓）
+        - 价格位置 12/20（52周区间70%分位…）
+
+    这不算写错——六项分数都在，只是加了列表符号和括号注解。反复调提示词
+    赌它每次都听话是没有尽头的，不如在渲染前把格式抹平：只要六项分数能被
+    提取出来，就重新拼成标准的一行。
+
+    括号里的注解一并丢掉。前三名没有注解，第四五名有，留着一样会造成格式
+    不齐；而且那些注解在下面的"多空逻辑/基本面"展开区里本来就有。
+    """
+    if not text or "维度打分" not in text:
+        return text
+
+    # 冒号可能跟"维度打分"之间隔着换行（实测模型会写成"维度打分\n：- 基本面"），
+    # 所以这里允许中间有空白。第一版要求冒号紧跟，整段就没匹配上。
+    m = re.search(r"维度打分\s*[：:]", text)
+    if not m:
+        return text
+    head_start, head_end = m.start(), m.end()
+    tail = text[head_end:]
+
+    # 这一段到哪结束：遇到"综合得分"或空行为止。
+    stop = len(tail)
+    for pat in (r"\n\s*\n", r"综合得分"):
+        mm = re.search(pat, tail)
+        if mm and mm.start() < stop:
+            stop = mm.start()
+    seg = tail[:stop]
+    rest = tail[stop:]
+
+    found = {}
+    for name in _DIM_NAMES:
+        # 容忍列表符号、加粗标记、名字与数字间的空格、全角斜杠
+        mm = re.search(rf"{name}\s*\**\s*[:：]?\s*(\d+)\s*[/／]\s*(\d+)", seg)
+        if mm:
+            found[name] = (mm.group(1), mm.group(2))
+
+    # 至少认出四项才改写。认出太少说明这段根本不是维度打分，或者模型输出
+    # 严重跑偏——那时保持原样比强行拼一个残缺的行要好。
+    if len(found) < 4:
+        return text
+
+    line = " · ".join(f"{n}{found[n][0]}/{found[n][1]}" for n in _DIM_NAMES if n in found)
+    # 补回换行。第一版直接拼 rest，"数据确定性8/10"会跟"综合得分"粘成一行。
+    if rest and not rest.startswith("\n"):
+        rest = "\n" + rest.lstrip()
+    # 段名本身也归一化成"维度打分："。模型偶尔会写成"维度打分\n：..."，
+    # 冒号跑到了下一行开头，页面上就会裂成两行——而这正是用户看到的
+    # "第四第五名长得不一样"里的一部分。
+    return text[:head_start] + "维度打分：" + line + rest
 
 
 def _parse_advice_text(text: str) -> dict:
