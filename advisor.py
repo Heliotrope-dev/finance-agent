@@ -1802,14 +1802,107 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
     return {"action": action, "score": _extract_score(text), "fundamental_verdict": text}
 
 
+# 财务摘要里真正要喂给AI的字段。键是接口的英文列名，值是中文标签和单位。
+# 港股和美股的列名不完全一样（港股有 HOLDER_PROFIT，美股叫
+# PARENT_HOLDER_NETPROFIT），所以两套都列上，取到哪个算哪个。
+_FIN_FIELDS = (
+    ("OPERATE_INCOME", "营业收入", "money"),
+    ("OPERATE_INCOME_YOY", "营收同比", "pct"),
+    ("GROSS_PROFIT_RATIO", "毛利率", "pct"),
+    ("HOLDER_PROFIT", "归母净利", "money"),
+    ("PARENT_HOLDER_NETPROFIT", "归母净利", "money"),
+    ("HOLDER_PROFIT_YOY", "净利同比", "pct"),
+    ("PARENT_HOLDER_NETPROFIT_YOY", "净利同比", "pct"),
+    ("NET_PROFIT_RATIO", "净利率", "pct"),
+    ("BASIC_EPS", "每股收益", "num"),
+    ("ROE_AVG", "ROE", "pct"),
+    ("ROE_YEARLY", "ROE(年化)", "pct"),
+)
+
+
+def _fmt_money(v) -> str:
+    """把金额转成亿/万，带单位。原始值动辄十几位数字，AI 读起来容易看错
+    数量级——把 4210000000 写成"42.10亿"比原样给一串零可靠得多。"""
+    try:
+        x = float(v)
+    except Exception:
+        return str(v)
+    if abs(x) >= 1e8:
+        return f"{x / 1e8:.2f}亿"
+    if abs(x) >= 1e4:
+        return f"{x / 1e4:.2f}万"
+    return f"{x:.2f}"
+
+
 def _financial_summary_text(symbol: str, market: str) -> str:
+    """财务摘要，整理成中文关键指标。
+
+    2026-09-06 跑 SK海力士报告时发现的问题：这里原来是 df.to_string()，
+    直接把接口返回的原始表格塞给 AI——列名全是 SECUCODE / ORG_CODE /
+    OPERATE_INCOME_YOY 这种，还夹着一堆跟判断无关的字段（证券内部编码、
+    会计准则、公告日期）。
+
+    两个代价。一是浪费：二十行乘三十列的宽表占掉的 token，比整理后的
+    关键指标多一个数量级，而提示词预算是有限的，这些位置本可以留给
+    筹码面和市场环境。二是误读风险：AI 要自己从英文列名猜含义，
+    GROSS_PROFIT 是毛利额还是毛利率、金额单位是元还是千元，猜错一次
+    整段基本面判断就歪了。
+
+    改成只挑判断真正用得上的字段，中文标签，金额转成亿/万。
+    """
     try:
         df = ds.get_financial_abstract(symbol, market)
     except Exception:
         return ""
     if df is None or df.empty:
         return ""
-    return df.head(20).to_string(index=False)
+
+    date_col = next((c for c in ("REPORT_DATE", "STD_REPORT_DATE", "FINANCIAL_DATE")
+                     if c in df.columns), None)
+    lines = []
+    for _, row in df.head(4).iterrows():          # 最近四期够看趋势了
+        period = str(row.get(date_col) or "")[:10] if date_col else "期间未知"
+        seen = set()
+        vals = []
+        for col, label, kind in _FIN_FIELDS:
+            if col not in df.columns or label in seen:
+                continue
+            v = row.get(col)
+            if v is None or str(v) in ("", "nan", "None", "--"):
+                continue
+            seen.add(label)
+            if kind == "money":
+                vals.append(f"{label} {_fmt_money(v)}")
+            elif kind == "pct":
+                try:
+                    vals.append(f"{label} {float(v):+.1f}%" if "同比" in label
+                                else f"{label} {float(v):.1f}%")
+                except Exception:
+                    vals.append(f"{label} {v}")
+            else:
+                try:
+                    vals.append(f"{label} {float(v):.2f}")
+                except Exception:
+                    vals.append(f"{label} {v}")
+        if vals:
+            lines.append(f"{period}：" + "、".join(vals))
+    if not lines:
+        # 一个字段都没对上（接口换了列名之类），退回原样，总比一片空白好。
+        return df.head(6).to_string(index=False)[:1200]
+    cur = str(df.iloc[0].get("CURRENCY") or "").strip()
+    head = ""
+    if cur:
+        head = f"（财报币种：{cur}"
+        # 币种跟股价币种不一致时必须点破。SK海力士的ADR以美元交易，财报
+        # 却是韩国元报的——"营业收入971466亿"这种数量级如果不说明币种，
+        # 很容易被读成天文数字级别的美元收入，进而把估值判断带偏。
+        # 绝对值在这种情况下没有可比性，能用的是同比和利润率这些比率。
+        native = {"US": "美元", "HK": "港元", "A": "人民币"}.get(market)
+        if native and native not in cur and cur not in ("USD", "HKD", "CNY"):
+            head += f"，与股价计价货币（{native}）不同，"
+            head += "绝对金额不要跨币种比较，看同比和利润率这些比率"
+        head += "）"
+    return head + "\n" + "\n".join(lines)
 
 
 def _valuation_text(symbol: str, market: str) -> str:
