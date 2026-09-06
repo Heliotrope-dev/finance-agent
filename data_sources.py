@@ -3837,6 +3837,66 @@ def get_crypto_universe() -> set:
     return set(df["code"].astype(str))
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_crypto_regime() -> dict:
+    """加密市场的"结构"指标：BTC主导率、ETF资金流。
+
+    2026-09-06 接的。此前跟用户讲加密行情时明确说过这两个拿不到——
+    CoinGecko/CoinGlass 的页面是 JS 渲染的，r.jina.ai 读回来只有说明文字
+    没有数值。接了 Serper 之后能拿到了：搜索结果的摘要里直接带着数字
+    （"Bitcoin Dominance (BTC.D) is 59.2% ... Total crypto market cap:
+    $2.70T"、"Bitcoin ETF Net Flow (Sep 3, 2026) + $174.60M"）。
+
+    这两个指标回答的是价格本身答不了的问题：
+      主导率  资金在往BTC集中还是往山寨扩散。它下降说明风险偏好在抬升，
+              轮动进入外层；上升说明资金在避险回流。判断"现在在轮动哪
+              一层"，这比看20个币的涨跌幅有用得多。
+      ETF流向 场外增量资金的正规入口。持续净流入是新钱进场，净流出是
+              传统资金在撤。
+
+    数值从搜索摘要里正则提取，拿不到就留空——这类聚合数据宁可没有，
+    也不要给一个来源不明的数字。
+    """
+    import re as _re
+    out = {}
+    try:
+        import web_research
+    except Exception:
+        return out
+
+    # BTC 主导率
+    try:
+        hits = web_research.search("bitcoin dominance percentage today BTC.D current", limit=5)
+        for h in hits:
+            txt = f"{h.get('title','')} {h.get('snippet','')}"
+            m = _re.search(r"(?:dominance|BTC\.D)[^0-9]{0,40}(\d{2}\.\d)\s*%", txt, _re.I)
+            if not m:
+                m = _re.search(r"BTC[^0-9]{0,10}(\d{2}\.\d)\s*%", txt)
+            if m:
+                v = float(m.group(1))
+                if 30 <= v <= 80:          # 合理区间，挡掉误匹配
+                    out["BTC主导率"] = v
+                    out["主导率来源"] = h.get("domain", "")
+                    break
+    except Exception:
+        pass
+
+    # ETF 净流入
+    try:
+        hits = web_research.search("bitcoin ETF net flow today inflow million", limit=5)
+        for h in hits:
+            txt = f"{h.get('title','')} {h.get('snippet','')}"
+            m = _re.search(r"[Nn]et [Ff]low[^+\-]{0,30}([+\-]?\s*\$?\s*[\d,.]+)\s*(M|million|亿|万)",
+                           txt)
+            if m:
+                out["ETF净流"] = m.group(0)[:60]
+                out["ETF来源"] = h.get("domain", "")
+                break
+    except Exception:
+        pass
+    return out
+
+
 @st.cache_data(ttl=20, show_spinner=False)
 def get_crypto_quotes() -> pd.DataFrame:
     """主流虚拟货币行情，列名跟项目里其它行情表一致（代码/名称/最新价/涨跌幅）。

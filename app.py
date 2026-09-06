@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from data_sources import (
     get_crypto_quotes,
+    get_crypto_regime,
     get_market_closures,
     get_institution_ratings,
     get_morningstar_view,
@@ -2169,6 +2170,32 @@ def _render_crypto_overview():
         f"均为美元计价</div>",
         unsafe_allow_html=True,
     )
+
+    # 市场结构指标。价格答不了"现在在轮动哪一层"，主导率和ETF流向能答：
+    # 主导率下降说明资金在往山寨扩散、风险偏好抬升；ETF净流入是场外增量
+    # 资金在进场。这两个比20个币的涨跌幅更能说明市场处在什么阶段。
+    try:
+        reg = get_crypto_regime()
+    except Exception:
+        reg = {}
+    if reg:
+        seg = []
+        if reg.get("BTC主导率"):
+            seg.append(
+                f"<span style='color:var(--fa-text);font-weight:600'>"
+                f"BTC主导率 {reg['BTC主导率']:.1f}%</span>"
+                f"<span style='color:var(--fa-faint)'>（下降=资金往山寨扩散，"
+                f"上升=避险回流BTC）</span>")
+        if reg.get("ETF净流"):
+            seg.append(
+                f"<span style='color:var(--fa-text);font-weight:600'>"
+                f"ETF资金流 {reg['ETF净流']}</span>"
+                f"<span style='color:var(--fa-faint)'>（场外增量资金的正规入口）</span>")
+        if seg:
+            st.markdown(
+                "<div style='font-size:0.76rem;margin:0 0 14px;line-height:1.9'>"
+                + "<br>".join(seg) + "</div>",
+                unsafe_allow_html=True)
     _render_stock_movers_cards(df[["代码", "名称", "最新价", "涨跌幅"]], "CC")
 
 
