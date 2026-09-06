@@ -1434,9 +1434,17 @@ def _market_context_text(symbol: str, market: str) -> str:
     try:
         ind = ds.get_owner_industries([(symbol, market)]).get((symbol, market))
         if ind:
-            hm = ds.get_sector_heatmap(market, limit=60)
+            # limit 要够大。第一版取前60，NVDA 的"半导体"板块排在60名之外
+            # 就匹配不到，同一个行业的 SKHY 却能匹配上——表现为"有时有有时
+            # 没有"，很容易被当成随机故障。热力图本身几百行，全取回来也不贵。
+            hm = ds.get_sector_heatmap(market, limit=400)
             if hm is not None and not hm.empty and "板块" in hm.columns:
-                hit = hm[hm["板块"].astype(str).str.contains(str(ind)[:4], na=False)]
+                names = hm["板块"].astype(str)
+                # 先试完全相等，再试包含。直接用包含会让"半导体"优先命中
+                # 排在前面的"半导体设备与材料"，而不是"半导体"本身。
+                hit = hm[names == str(ind)]
+                if hit.empty:
+                    hit = hm[names.str.contains(re.escape(str(ind)[:3]), na=False)]
                 if not hit.empty:
                     row = hit.iloc[0]
                     parts.append(
@@ -1859,9 +1867,34 @@ def _financial_summary_text(symbol: str, market: str) -> str:
 
     date_col = next((c for c in ("REPORT_DATE", "STD_REPORT_DATE", "FINANCIAL_DATE")
                      if c in df.columns), None)
+    # 公告日跟报告期是两回事，而且差得很远。2026-09-06 用户指出"财报是对的
+    # 但发布的时间都不对，基本都是七八月份"——查证完全属实：SK海力士的
+    # 2025年报报告期是 2025-12-31，公告日却是 2026-07-10，差了191天。
+    #
+    # 这个区别是决定性的：报告期末那天数据还没公开，市场不可能反应；公告日
+    # 才是信息进入市场的时刻。用报告期算"距今多少天"会把一份七月才发布、
+    # 市场刚消化完的财报，误判成八个月前的老数据。
+    notice_col = next((c for c in ("NOTICE_DATE", "UPDATE_DATE") if c in df.columns), None)
+    import datetime as _dt
     lines = []
+    newest_age = None      # 按公告日算的天数，拿不到公告日才退回报告期
+    age_basis = ""
+    newest_notice = None
     for _, row in df.head(4).iterrows():          # 最近四期够看趋势了
         period = str(row.get(date_col) or "")[:10] if date_col else "期间未知"
+        notice = str(row.get(notice_col) or "")[:10] if notice_col else ""
+        if newest_age is None:
+            for cand, basis in ((notice, "公告日"), (period, "报告期末")):
+                if not cand or cand == "期间未知":
+                    continue
+                try:
+                    newest_age = (_dt.date.today() - _dt.date.fromisoformat(cand)).days
+                    age_basis = basis
+                    if basis == "公告日":
+                        newest_notice = cand
+                    break
+                except Exception:
+                    continue
         seen = set()
         vals = []
         for col, label, kind in _FIN_FIELDS:
@@ -1885,10 +1918,31 @@ def _financial_summary_text(symbol: str, market: str) -> str:
                 except Exception:
                     vals.append(f"{label} {v}")
         if vals:
-            lines.append(f"{period}：" + "、".join(vals))
+            tag = f"报告期 {period}"
+            # 公告日只在最新一期显示。实测东财对历史期次返回的是同一个公告日
+            # （SK海力士2023/2024/2025三份年报都写着 2026-07-10 发布），显然
+            # 不可能三份同一天发。既然分辨不出哪些是真的，就只信最新一期那个
+            # ——它至少跟"最近一次财报什么时候公开"这个我们真正要用的信息对得上。
+            if notice and notice != period and len(lines) == 0:
+                tag += f"（{notice} 发布）"
+            lines.append(tag + "：" + "、".join(vals))
     if not lines:
         # 一个字段都没对上（接口换了列名之类），退回原样，总比一片空白好。
         return df.head(6).to_string(index=False)[:1200]
+    # 数据新鲜度必须说出来。2026-09-06 用户看到"2025-12-31"以为是当前日期
+    # 写错了——那其实是报告期。但这个疑问点出了一件真事：这个接口只给年报，
+    # 最新一期距今249天，而用户做的是5-10天的短线。8个月前的财报当然可以
+    # 用来看基本面底子，但它对"这一周会怎么走"几乎没有信息量，AI 在打
+    # "数据确定性"那一项时必须知道这个时间差，而不是默认财报是新的。
+    age_note = ""
+    if newest_age is not None:
+        age_note = f"最新一期发布至今 {newest_age} 天（按{age_basis}算）"
+        if age_basis == "报告期末":
+            age_note += "，这个市场拿不到公告日，实际公开时间通常还要晚一到两个月"
+        if newest_age > 150:
+            age_note += ("；这已经是较旧的数据，基本面底子可以看，"
+                         "但不要拿它推断最近一个季度的变化")
+
     cur = str(df.iloc[0].get("CURRENCY") or "").strip()
     head = ""
     if cur:
@@ -1902,6 +1956,8 @@ def _financial_summary_text(symbol: str, market: str) -> str:
             head += f"，与股价计价货币（{native}）不同，"
             head += "绝对金额不要跨币种比较，看同比和利润率这些比率"
         head += "）"
+    if age_note:
+        head = (head + " " if head else "") + f"（{age_note}）"
     return head + "\n" + "\n".join(lines)
 
 

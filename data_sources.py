@@ -2793,8 +2793,31 @@ def get_stock_notices(symbol: str) -> pd.DataFrame:
     df = df.sort_values("日期", ascending=False)
     return df[["日期", "新闻标题", "分类", "url"]].head(10)
 
+class _EmptyLookup(Exception):
+    """查询成功但结果为空。用异常表达是为了绕过 st.cache_data——它不缓存
+    抛异常的调用，正好是我们要的"失败不要污染缓存"。
+
+    2026-09-06 真实故障：SK海力士的行业分类查不到，市场环境那段少了一行。
+    单独重查却查得到，富途返回的确实是"半导体 / INDUSTRY"。根因是某次
+    调用（网络抖动或富途连接刚重连）返回了空，而这个函数挂着24小时缓存，
+    于是那个空结果被钉了一整天——一次抖动污染一天，而且完全静默。
+    """
+
+
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
+def _owner_industries_cached(items_key: tuple) -> dict:
+    return _owner_industries_impl(list(items_key))
+
+
 def get_owner_industries(items: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
+    """带缓存的行业查询。空结果不进缓存，见 _EmptyLookup。"""
+    try:
+        return _owner_industries_cached(tuple(items))
+    except _EmptyLookup:
+        return {}
+
+
+def _owner_industries_impl(items: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
     """批量查这批港美股各自的所属行业板块。返回 {(symbol, market): 行业名}。
 
     2026-09-04为组合分析新增。原来的组合体检只算"市场敞口"(港股占多少、
@@ -2835,7 +2858,12 @@ def get_owner_industries(items: list[tuple[str, str]]) -> dict[tuple[str, str], 
     # 没有，全是概念板块），所以美股这边覆盖率天然偏低。查不到的不放进结果，
     # 调用方按"未知行业"如实处理，不拿概念板块凑数——概念板块一支股票能挂
     # 七八个，用来算集中度会把权重重复计算，得出的分散度是假的。
-    return {k: v for k, v in out.items() if v}
+    result = {k: v for k, v in out.items() if v}
+    if not result:
+        # 空结果抛异常而不是返回 {}：st.cache_data 不缓存抛异常的调用，
+        # 这样一次失败只影响这一次，不会被钉住24小时。
+        raise _EmptyLookup()
+    return result
 
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def get_fed_rate_path(lookback_days: int = 800) -> dict:
