@@ -1842,6 +1842,41 @@ def _fmt_money(v) -> str:
     return f"{x:.2f}"
 
 
+def _interim_from_web(symbol: str, market: str) -> str:
+    """接口没有季报/中期报告时，去公开网页找最近一期业绩。
+
+    只取搜索结果的标题，不抓正文。财经媒体的标题在这类新闻上信息密度极高
+    ——"泡泡玛特发布2026财年中期业绩：总营业额171.73亿人民币，同比增长
+    23.76%；归母净利润50.38亿人民币，同比增长10.14%"，一句话把要点都给全了，
+    而抓正文要多花十几倍时间还容易撞上登录墙。
+
+    明确标注来源是网页而不是接口。这类数据没有经过接口的结构化校验，AI
+    引用时要知道它的可靠性低一档。
+    """
+    try:
+        import web_research
+        name_hint = {"HK": "港股", "US": "美股"}.get(market, "")
+        hits = web_research.search(
+            f"{symbol} {name_hint} 最新 中期业绩 半年报 营收 净利润", limit=6)
+    except Exception:
+        return ""
+    if not hits:
+        return ""
+    # 只留看起来真的在报业绩的标题：含数字且含营收/净利这类词。
+    keep = []
+    for h in hits:
+        t = str(h.get("title") or "")
+        if any(k in t for k in ("营收", "营业额", "净利", "业绩", "中报", "半年报")) \
+                and any(c.isdigit() for c in t):
+            keep.append(f"- {t[:110]}（{h.get('domain','')}）")
+        if len(keep) >= 3:
+            break
+    if not keep:
+        return ""
+    return ("接口没有季度/中期财报，以下来自公开网页报道（可靠性低于接口数据，"
+            "引用时说明出处）：\n" + "\n".join(keep))
+
+
 def _quarterly_text(symbol: str, market: str) -> str:
     """最近几个季度的营收/毛利/营业利润趋势。
 
@@ -1864,7 +1899,14 @@ def _quarterly_text(symbol: str, market: str) -> str:
     # 而且会打断季度之间的连续性。
     qs = [r for r in rows if "Q" in str(r.get("期间", ""))]
     if not qs:
-        return ""
+        # 富途对部分港股只收录年报（泡泡玛特实测9期全是FY）。但"富途没有"
+        # 不等于"公司没发"——港股是半年报制，泡泡玛特每年8月发中期业绩，
+        # 2026中期营收171.73亿、同比+23.76%，只是没进富途的库。
+        #
+        # 2026-09-06 用户拿 Gemini 的回答指出了这个差别，查证属实：我原来
+        # 说"这支只有年报"，那是从我们数据源看到的，不是事实。数据源缺口
+        # 不该被当成事实告诉用户，能补就补。
+        return _interim_from_web(symbol, market)
 
     lines = []
     for r in qs[:4]:
