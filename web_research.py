@@ -31,6 +31,7 @@
 import hashlib
 import html as _html
 import json
+import os
 import re
 import threading
 import time
@@ -108,12 +109,62 @@ def _http(url: str, *, data: bytes | None = None, timeout: int = 25,
     return raw.decode("utf-8", "ignore")
 
 
+def _serper(query: str, limit: int) -> list[dict]:
+    """Serper（Google 搜索 API）。有 key 才走这条。
+
+    2026-09-06 接的。此前只有 DuckDuckGo 一条路，一被反爬拦截整条网页兜底
+    就失效——实测查港股中期业绩时三支里两支拿不到，而那正是判断最需要的
+    数据。付费 API 的价值不在于结果更好，在于它不会在关键时刻突然不可用。
+
+    返回里带 snippet，信息密度比标题高得多，而且往往已经包含要点：
+    "净利润为50.4亿元人民币，同比增长8.9%，不及市场预估的66.4亿元" ——
+    营收、同比、以及"不及预期"这个关键判断，一句话全有了。所以 snippet
+    直接进结果，调用方不一定要再去抓正文。
+    """
+    key = os.environ.get("SERPER_API_KEY", "")
+    if not key:
+        return []
+    try:
+        req = urllib.request.Request(
+            "https://google.serper.dev/search",
+            data=json.dumps({"q": query, "gl": "hk", "hl": "zh-cn",
+                             "num": max(limit, 6)}).encode(),
+            headers={"X-API-KEY": key, "Content-Type": "application/json"})
+        d = json.loads(urllib.request.urlopen(req, timeout=25).read().decode())
+    except Exception as e:
+        print(f"[web_research] Serper 调用失败({type(e).__name__})，回退 DuckDuckGo")
+        return []
+    out = []
+    for x in (d.get("organic") or [])[:limit]:
+        u = x.get("link") or ""
+        if not u.startswith("http"):
+            continue
+        out.append({
+            "title": x.get("title") or "",
+            "url": u,
+            "domain": urllib.parse.urlparse(u).netloc,
+            # snippet 是 Serper 相对 DDG 最大的增量：DDG 的 html 端点只给
+            # 标题，而摘要里常常已经含着要用的数字。
+            "snippet": (x.get("snippet") or "")[:300],
+            "date": x.get("date") or "",
+        })
+    return out
+
+
 def search(query: str, limit: int = 8, *, ttl: int = _CACHE_TTL) -> list[dict]:
-    """网页搜索，返回 [{"title","url","domain"}]。失败返回空列表。"""
-    ck = f"ddg::{query}::{limit}"
+    """网页搜索，返回 [{"title","url","domain","snippet"}]。失败返回空列表。
+
+    优先 Serper（稳定、带摘要），没配 key 或调用失败时回退 DuckDuckGo。
+    """
+    ck = f"search::{query}::{limit}"
     hit = _cache_get(ck, ttl)
     if hit is not None:
         return hit
+
+    got = _serper(query, limit)
+    if got:
+        _cache_put(ck, got)
+        return got
 
     try:
         h = _http("https://html.duckduckgo.com/html/",
@@ -219,8 +270,26 @@ def research(query: str, *, read_top: int = 2, limit: int = 6,
         # 真正的可见性在 search() 里的日志，那是给排查的人看的。
         return ""
 
-    parts = ["【搜索结果标题】"]
-    parts += [f"- {h['title']}（{h['domain']}）" for h in hits]
+    # 摘要优先。Serper 的 snippet 里常常已经含着要用的数字（"净利润50.4亿、
+    # 同比+8.9%、不及市场预估的66.4亿"），比标题有用得多，也让很多情况下
+    # 不必再去抓正文——抓正文慢十几倍，还容易撞登录墙。
+    parts = ["【搜索结果】"]
+    for h in hits:
+        line = f"- {h['title']}（{h['domain']}"
+        if h.get("date"):
+            line += f"，{h['date']}"
+        line += "）"
+        parts.append(line)
+        if h.get("snippet"):
+            parts.append(f"  {h['snippet']}")
+
+    # 摘要里已经有足够多的数字时，不再抓正文。判据是"至少三条摘要里出现
+    # 了百分号或金额"——那说明搜索引擎已经把要点摘出来了，再抓正文只是
+    # 重复劳动。
+    rich = sum(1 for h in hits
+               if h.get("snippet") and ("%" in h["snippet"] or "亿" in h["snippet"]))
+    if rich >= 3:
+        read_top = 0
 
     if read_top <= 0:
         # 初筛路径只要标题。提前返回而不是让下面的循环空转，省掉一次无谓的

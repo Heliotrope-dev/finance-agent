@@ -1588,10 +1588,15 @@ def _web_view_text(symbol: str, market: str, name: str, *, deep: bool = False) -
     except Exception:
         return ""
 
-    if market == "美":
-        q = f"{symbol} stock analyst rating price target latest news"
+    # 查询词按市场分语言，并且明确写上"最新"和当前年份——2026-09-06 接
+    # Serper 之后搜索质量上了一个台阶，但也更容易搜到往年的同类报道，
+    # 加年份能把它们挡掉大半。
+    import datetime as _d
+    _y = _d.date.today().year
+    if market in ("美", "US"):
+        q = f"{symbol} stock analyst rating price target {_y} latest"
     else:
-        q = f"{name} {symbol} 港股 机构 评级 目标价 最新消息"
+        q = f"{name} {symbol} {_y} 机构 评级 目标价 最新 研报"
 
     try:
         # 初筛路径只读搜索结果标题不抓正文（read_top=0）：标题本身就带
