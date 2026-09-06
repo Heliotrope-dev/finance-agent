@@ -1327,6 +1327,32 @@ def get_stock_history(symbol: str, start_date: str, end_date: str, frequency: st
     get_stock_kline_futu 里给用户主动切换周期（周K/月K/分时K）时按需尝试，那条路径
     自己有超时保护，卡住也只影响那一次点击，不会拖累首屏。
     """
+    if market == "CC":
+        # 虚拟货币走富途的CC市场。2026-09-06 补：用户问"为什么不推荐虚拟币"，
+        # 查下来 advisor 完全不认 CC 市场——它只在行情页展示，从来没进过判断
+        # 链路。价格位置那一项本来就能算（它走的是快照不是K线），缺的只是
+        # 技术面，因为这个函数没有 CC 分支，均线和MACD全部算不出来。
+        code = _futu_code(symbol, market)
+        s_ = start_date.replace("/", "-")
+        e_ = end_date.replace("/", "-")
+        if len(s_) == 8 and "-" not in s_:      # 兼容 YYYYMMDD
+            s_ = f"{s_[:4]}-{s_[4:6]}-{s_[6:]}"
+        if len(e_) == 8 and "-" not in e_:
+            e_ = f"{e_[:4]}-{e_[4:6]}-{e_[6:]}"
+        r = _futu_call(
+            lambda c: c.request_history_kline(code, start=s_, end=e_, max_count=300),
+            timeout=30, default=None)
+        df = _unwrap_futu(r)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        ren = {"time_key": "日期", "open": "开盘", "close": "收盘",
+               "high": "最高", "low": "最低", "volume": "成交量",
+               "turnover": "成交额", "change_rate": "涨跌幅"}
+        df = df.rename(columns={k: v for k, v in ren.items() if k in df.columns})
+        if "日期" in df.columns:
+            df["日期"] = df["日期"].astype(str).str[:10]
+        return df
+
     if market == "HK":
         df = _with_retry(lambda: _fetch_history_hk(symbol, start_date, end_date), throttle=False)  # 新浪
         return _append_today_bar(df, symbol, market) if frequency == "d" else df
