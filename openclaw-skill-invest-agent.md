@@ -35,7 +35,9 @@ cd /root/finance-agent && venv/bin/python3 expectancy.py
 
 | 想知道什么 | 跑什么 |
 |---|---|
-| 今天该买什么、买多少（最常用） | `venv/bin/python3 daily_plan.py` |
+| 今天该买什么、买多少、什么价位买 | `venv/bin/python3 daily_plan.py` |
+| 用户发来成交截图要记账 | `venv/bin/python3 quick_record.py --buy/--sell ...` |
+| 盘中有没有触发提醒 | `tail -20 /var/log/finance-agent-watch.log` |
 | 持仓现在什么情况 | `venv/bin/python3 position_report.py --session hk-mid --dry-run` |
 | 策略期望值验证到哪一步 | `venv/bin/python3 expectancy.py` |
 | 模拟盘刚才干了什么 | `cat data/last_sim_agent_run.log` |
@@ -54,6 +56,7 @@ cd /root/finance-agent && venv/bin/python3 expectancy.py
 | 06:30 | advisor 全市场判断，产出当天评分 |
 | 07:25 | 港股新股简报 |
 | **08:25** | **港股开盘前推操作清单** |
+| 盘中每3分钟 | 盯盘（跌破止损/触及目标/急涨急跌才推，平静时静默） |
 | 12:00 | 港股午盘持仓报告 |
 | 16:10 | 港股收盘报告 + 收益结算 |
 | 17:50 | 记录期望值验证进度 |
@@ -62,6 +65,34 @@ cd /root/finance-agent && venv/bin/python3 expectancy.py
 
 用户问"怎么没收到"时，先看 `/var/log/finance-agent-plan.log` 和
 `/var/log/finance-agent-report.log`，再看 `crontab -l`。
+
+## 用户发成交截图时（重要）
+
+用户会直接把汇丰的成交截图发到微信，让你替他记账——他明确说过"懒得再打开
+填数字了"。收到图片时你会自动路由到多模态模型（Qwen3-VL），能读出股票名、
+方向、股数、成交价。
+
+读出来之后跑：
+
+```
+cd /root/finance-agent && venv/bin/python3 quick_record.py --buy \
+  --symbol 00700 --shares 100 --price 442.8
+```
+
+卖出用 `--sell`，参数一样。脚本会回显完整持仓，**把它原样发给用户**——
+你读截图可能出错（数字看错一位、认错股票都发生过），这些错误会一路污染
+止损计算和收益结算，让他扫一眼是最后一道防线。
+
+用户回复「撤销」时跑 `quick_record.py --undo`。
+查当前持仓跑 `quick_record.py --show`。
+
+几条硬要求：
+
+- **认不出代码就问，不要猜。** 脚本本身也会拒绝写入。猜错代码等于把仓位
+  记到别的股票上，后面所有判断都算在错的标的上。
+- **数字拿不准就问。** 截图糊、被手指挡住、有多笔成交混在一起时，宁可
+  多问一句，不要按最像的那个数写进去。
+- **一次只记一笔。** 截图里有多笔成交时逐笔确认，不要合并。
 
 ## 用户的实际流程
 
