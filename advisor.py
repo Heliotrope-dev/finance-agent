@@ -1412,7 +1412,7 @@ def _chips_summary_text(symbol: str, market: str) -> str:
     return "\n".join(parts)
 
 
-def _coverage_note(n: int) -> str:
+def _coverage_note(n: int | None) -> str:
     """覆盖机构数，少的时候要说破。
 
     2026-09-06 发现的打分盲点：思格新能只有4家机构持有、几乎没有卖方覆盖，
@@ -1427,6 +1427,24 @@ def _coverage_note(n: int) -> str:
     所以这里把数量本身变成一句判断，而不只是一个数字——模型看到"仅2家
     覆盖，样本太小"比看到"覆盖机构2家"更难忽略。
     """
+    # None 表示数据源没给这个字段，跟"确实是0家"完全是两回事。
+    # 2026-09-06真实故障：富途对思格新能(06656)只返回目标价的
+    # highest/average/lowest，没有total字段，代码里 int(c.get("total") or 0)
+    # 把缺失读成了0，于是喂给AI的原料是"无分析师覆盖、目标价均值440.44
+    # （最高495.98／最低384.90）"——一句自相矛盾的话：没人覆盖，哪来的
+    # 目标价均值和最高最低价。
+    #
+    # AI 把这个矛盾自己"解决"了：判断正文里写"依据5家机构目标价均值"，
+    # 而"5家"这个数在输入里根本不存在。这是编造，但根子在我们给了它一份
+    # 自相矛盾的材料——模型遇到互相打架的两句话，倾向于编一个能同时圆上
+    # 的版本，而不是指出材料有矛盾。所以修的是材料，不是再加一条禁令。
+    #
+    # 而且"无分析师覆盖"在这里还是事实错误：同一轮的新闻材料里，东吴证券
+    # 和中邮证券都刚给了买入评级，只是富途这个接口没统计到家数。
+    if n is None:
+        return ("覆盖机构家数未知（数据源只给了目标价、没给覆盖家数，"
+                "不等于没有机构覆盖；家数不明时这个目标价的共识强度无法判断，"
+                "按样本偏小对待）")
     if n <= 0:
         return "无分析师覆盖"
     if n <= 2:
@@ -2522,7 +2540,7 @@ def _analyst_consensus_text(symbol: str, market: str) -> str:
     if not c or not c.get("average"):
         return ""
     bits = [
-        _coverage_note(int(c.get("total") or 0)),
+        _coverage_note(int(c["total"]) if c.get("total") is not None else None),
         f"目标价均值{c['average']:.2f}（最高{c.get('highest', 0):.2f}／最低{c.get('lowest', 0):.2f}）",
     ]
     rating_bits = []

@@ -1891,13 +1891,35 @@ def get_analyst_consensus(symbol: str, market: str) -> dict:
     if market not in ("HK", "US"):
         return {}
     code = f"{market}.{symbol}"
-    ret, data = _futu_call(lambda ctx: ctx.get_research_analyst_consensus(code), timeout=10, default=(None, None))
-    if ret != ft.RET_OK or not data:
-        return {}
-    try:
-        return dict(data)
-    except Exception:
-        return {}
+    # 残缺响应要重试。2026-09-06实测：对思格新能(06656)连打10次，4次拿到
+    # 完整的12个字段（含total=5家覆盖），4次只回highest/average/lowest三个
+    # 字段（没有total、没有评级分布），2次直接失败；同一时刻对小米(01810)
+    # 打10次则10次完整。也就是说这个接口对覆盖机构少的票会间歇性只回一半，
+    # 不是那些票真的没有覆盖数据。
+    #
+    # 后果不只是"少一段信息"：调用方拿 total 缺失当成0家覆盖，喂给AI的是
+    # "无分析师覆盖、目标价均值440.44（最高495.98／最低384.90）"这样一句
+    # 自相矛盾的话——没人覆盖哪来的目标价均值。而这一维占打分8分，同一支票
+    # 每轮拿到的东西不一样，分数就会跟着随机漂，回测时看到的方差里有一部分
+    # 纯粹是这个接口抖出来的。
+    #
+    # 最多打3次，拿到带total的完整包就收工；三次都残缺就返回手上最全的那个
+    # （残缺也比没有强，调用方那边已经能区分"字段缺失"和"确实是0家"）。
+    best: dict = {}
+    for _ in range(3):
+        ret, data = _futu_call(lambda ctx: ctx.get_research_analyst_consensus(code),
+                               timeout=10, default=(None, None))
+        if ret != ft.RET_OK or not data:
+            continue
+        try:
+            d = dict(data)
+        except Exception:
+            continue
+        if d.get("total") is not None:
+            return d
+        if len(d) > len(best):
+            best = d
+    return best
 
 
 @st.cache_data(ttl=300, show_spinner=False)
