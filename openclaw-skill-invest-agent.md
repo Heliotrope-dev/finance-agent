@@ -12,6 +12,19 @@ description: 用户的投研站项目（finance-agent）。问股票判断、持
 网页：https://invest.heliotrope.online
 代码：/root/finance-agent　数据库：/root/finance-agent/data/track_record.db
 
+## 搜索优先用项目自己的入口
+
+```
+cd /root/finance-agent && venv/bin/python3 search_cli.py "泡泡玛特 2026 中期业绩"
+venv/bin/python3 search_cli.py --full "查询词"      # 搜索+抓正文，慢但完整
+venv/bin/python3 search_cli.py --read "https://..." # 直接读一个网页
+```
+
+它走的是项目配的 Serper（Google 搜索 API），返回带摘要和日期，实测能拿到
+"营收171.7亿元同比增长23.8%，预估199.8亿元"这种带**实际vs预估对比**的
+结果。你自带的 web_search 走 Exa，也能用，但两条链路的限流处理、结果过滤
+逻辑不一样——查这个项目相关的东西时用 search_cli.py，答案才跟网页端一致。
+
 ## 数据源：接口拿不到就去网上找，但要认准来源
 
 项目现在有三层取数：
@@ -51,6 +64,7 @@ cd /root/finance-agent && venv/bin/python3 expectancy.py
 |---|---|
 | 今天该买什么、买多少、什么价位买 | `venv/bin/python3 daily_plan.py` |
 | 用户发来成交截图要记账 | `venv/bin/python3 quick_record.py --buy/--sell ...` |
+| **查任何东西（走项目的 Serper）** | `venv/bin/python3 search_cli.py "查询词"` |
 | 盘中有没有触发提醒 | `tail -20 /var/log/finance-agent-watch.log` |
 | 持仓现在什么情况 | `venv/bin/python3 position_report.py --session hk-mid --dry-run` |
 | 策略期望值验证到哪一步 | `venv/bin/python3 expectancy.py` |

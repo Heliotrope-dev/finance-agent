@@ -1527,16 +1527,36 @@ def _corporate_actions_text(symbol: str, market: str) -> str:
     try:
         bb = ds.get_buybacks(symbol, market, limit=5)
         if bb:
+            import datetime as _d
             total = sum(float(x.get("回购金额") or 0) for x in bb)
-            days = len(bb)
             last = bb[0]
             cum = last.get("累计占已发行股本")
-            seg = (f"回购：近{days}个交易日累计 {total / 1e8:.2f}亿，"
-                   f"最近一次 {last.get('日期')} 买入 "
-                   f"{float(last.get('回购股数') or 0):,.0f}股")
+            last_day = str(last.get("日期") or "")
+            try:
+                gap = (_d.date.today() - _d.date.fromisoformat(last_day)).days
+            except Exception:
+                gap = None
+
+            seg = f"回购：最近一次 {last_day}"
+            if gap is not None:
+                seg += f"（{gap}天前）"
+            seg += (f" 买入 {float(last.get('回购股数') or 0):,.0f}股，"
+                    f"最近{len(bb)}次累计 {total / 1e8:.2f}亿")
             if cum:
-                seg += f"，年内累计已回购已发行股本的 {float(cum):.2f}%"
-            seg += "。管理层拿公司的钱买自己，是对现价的直接表态。"
+                seg += f"，累计已回购已发行股本的 {float(cum):.2f}%"
+
+            # "多久没回购了"跟"回购了多少"同样是信号，而且方向相反。
+            # 2026-09-06 核查时看到泡泡玛特最近一次回购是 4月2日、已经停了
+            # 5个月，而腾讯是 9月4日、几乎每天在买——如果只报"累计回购
+            # 0.84%"，这两家看起来差不多，实际态度完全相反。
+            if gap is not None and gap > 60:
+                seg += (f"。注意已经 {gap} 天没有回购动作了——回购中断本身是"
+                        "信号，可能是管理层认为价格不再便宜，也可能是现金"
+                        "安排变了，值得在理由里点出来")
+            elif gap is not None and gap <= 5:
+                seg += "。仍在持续回购中，管理层用真金白银表态现价低估"
+            else:
+                seg += "。管理层拿公司的钱买自己，是对现价的直接表态"
             parts.append(seg)
     except Exception:
         pass
