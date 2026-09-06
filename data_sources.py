@@ -1713,13 +1713,20 @@ def _futu_snapshot_row_to_dict(symbol: str, row) -> dict:
 
 
 def get_stock_realtime_futu(symbol: str, market: str) -> dict:
-    """走本地 Futu OpenD 网关拿真实时快照，只支持港股/美股（A股无权限）。
+    """走本地 Futu OpenD 网关拿真实时快照，支持港股/美股/虚拟货币（A股无权限）。
 
     market 检查放在最前面——A股走这函数是必然返回空的，没必要为此白连一次 Futu。
+
+    2026-09-06补上 CC（虚拟货币）：观察池并入 BTC/ETH/SOL/BNB 之后，那几条
+    判断记录的 price_at_advice 全是 NULL——AI 正文里明明写着"现价79,918美元"
+    （技术面那段是从 get_stock_history 的 CC 分支拿的，那条路早就通了），但
+    落库的入场价是空的。没有入场价，这几支就永远进不了回测和期望值验证，
+    等于白判断。get_market_snapshot 本身支持 CC.BTCUSD 这种代码
+    （get_crypto_quotes 用的就是它），缺的只是这里的市场白名单。
     """
-    if market not in ("HK", "US"):
+    if market not in ("HK", "US", "CC"):
         return {}
-    code = f"HK.{symbol}" if market == "HK" else f"US.{symbol}"
+    code = _futu_code(symbol, market)
     ret, data = _futu_call(lambda ctx: ctx.get_market_snapshot([code]), default=(None, None))
     if ret != ft.RET_OK or data is None or data.empty:
         return {}
