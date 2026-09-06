@@ -160,12 +160,17 @@ def _build_watchlist() -> list[dict]:
     results = _run_concurrent_with_deadline(
         list(_WATCHLIST_TARGET_SIZE.items()), _fetch, timeout=150, max_workers=3,
     )
+    # 顺序很要紧：自选和虚拟货币排在最前面，热门榜跟在后面。
+    #
+    # 2026-09-06 第一版把它们追加在池子末尾，结果那一轮日志写着"105/119
+    # 完成，到达900秒截止线，未完成的这批不再等"——被砍掉的正好是末尾
+    # 那14支，也就是用户的自选和虚拟货币。等于修了"没有并入"，却因为
+    # 排在最后又被超时砍掉，用户看到的结果没有任何变化。
+    #
+    # 并发执行本身不保证顺序，但 _run_concurrent_with_deadline 是按列表
+    # 顺序提交任务的，先提交的先开始，截止线到达时未完成的多是靠后提交
+    # 的那批。把用户真正关心的放在最前面，即使超时也先保住它们。
     items = []
-    for market, df in ((m, results.get(i)) for i, (m, _n) in enumerate(_WATCHLIST_TARGET_SIZE.items())):
-        if df is None or df.empty:
-            continue
-        for _, r in df.iterrows():
-            items.append({"symbol": str(r["代码"]), "market": market, "name": r.get("名称", "") or ""})
 
     # 用户自选无条件并进观察池。
     #
@@ -202,6 +207,20 @@ def _build_watchlist() -> list[dict]:
     for _sym, _nm in (("BTCUSD", "比特币"), ("ETHUSD", "以太坊"),
                       ("SOLUSD", "Solana"), ("BNBUSD", "币安币")):
         items.append({"symbol": _sym, "market": "CC", "name": _nm})
+
+    # 热门榜排在自选和虚拟货币之后，并去掉重复的。
+    seen2 = {(x["symbol"], x["market"]) for x in items}
+    for market, df in ((m, results.get(i))
+                       for i, (m, _n) in enumerate(_WATCHLIST_TARGET_SIZE.items())):
+        if df is None or df.empty:
+            continue
+        for _, r in df.iterrows():
+            key = (str(r["代码"]), market)
+            if key in seen2:
+                continue
+            seen2.add(key)
+            items.append({"symbol": key[0], "market": market,
+                          "name": r.get("名称", "") or ""})
     return items
 
 
@@ -894,7 +913,11 @@ def judge_watchlist() -> list[dict]:
     watchlist = _build_watchlist()
     print(f"（观察池取到{len(watchlist)}支，开始逐支AI判断…）")
     results = _run_concurrent_with_deadline(
-        watchlist, lambda it: _judge_one(it, "watchlist"), timeout=900, max_workers=20,
+        # timeout 900 -> 1500：2026-09-06 实测119支在900秒只跑完105支，
+        # 剩下14支被截断。观察池现在含用户自选和虚拟货币，规模比原来大，
+        # 而这个函数本身有进度输出（不会被外部监控误判成卡死），没有理由
+        # 把截止线卡在一个必然跑不完的数上。
+        watchlist, lambda it: _judge_one(it, "watchlist"), timeout=1500, max_workers=20,
         progress_label="观察池AI判断进度",
     )
     return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
