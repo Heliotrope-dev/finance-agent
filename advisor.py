@@ -1416,6 +1416,73 @@ _BENCH = {"HK": ("HK.800000", "恒生指数"), "US": ("US.SPY", "标普500(SPY)"
           "A": ("SH.000001", "上证指数")}
 
 
+def _corporate_actions_text(symbol: str, market: str) -> str:
+    """公司行为：大股东增减持、回购、人效。
+
+    2026-09-06 补。这三样回答的都是"公司自己和最了解它的人在做什么"，
+    跟财报（过去发生了什么）和技术面（价格在做什么）是不同的信息维度。
+
+      大股东变动  谁在动、动了多少钱。集中减持往往是内部人先知道了什么，
+                  分散调仓可能只是被动基金的例行再平衡。
+      回购        管理层拿公司的钱在市场上买自己，比任何研报都直接。
+                  连续回购意味着管理层认为现价低于内在价值。
+      人效        人均创收/创利及其同比。回答"增长是靠扩张人力堆出来的，
+                  还是效率真的提升了"——泡泡玛特2025年员工数+62%但人均
+                  创收还+75%，那是真的规模效应；反过来就是虚胖。
+    """
+    parts = []
+    try:
+        chg = ds.get_shareholder_changes(symbol, market, limit=4)
+        if chg:
+            segs = []
+            for x in chg:
+                n = x.get("变动股数") or 0
+                amt = x.get("变动金额") or 0
+                direction = "增持" if n > 0 else "减持"
+                amt_s = (f"{abs(amt) / 1e8:.2f}亿" if abs(amt) >= 1e8
+                         else f"{abs(amt) / 1e4:.0f}万")
+                segs.append(f"{x.get('股东')} {direction} {abs(n):,.0f}股（{amt_s}）")
+            parts.append(f"大股东变动（{chg[0].get('期间','')}）：" + "；".join(segs))
+    except Exception:
+        pass
+
+    try:
+        bb = ds.get_buybacks(symbol, market, limit=5)
+        if bb:
+            total = sum(float(x.get("回购金额") or 0) for x in bb)
+            days = len(bb)
+            last = bb[0]
+            cum = last.get("累计占已发行股本")
+            seg = (f"回购：近{days}个交易日累计 {total / 1e8:.2f}亿，"
+                   f"最近一次 {last.get('日期')} 买入 "
+                   f"{float(last.get('回购股数') or 0):,.0f}股")
+            if cum:
+                seg += f"，年内累计已回购已发行股本的 {float(cum):.2f}%"
+            seg += "。管理层拿公司的钱买自己，是对现价的直接表态。"
+            parts.append(seg)
+    except Exception:
+        pass
+
+    try:
+        eff = ds.get_operational_efficiency(symbol, market)
+        if eff and eff.get("income_per_capita"):
+            emp = eff.get("employee_num")
+            ipc = eff.get("income_per_capita")
+            ipc_y = eff.get("income_per_capita_yoy")
+            emp_y = eff.get("employee_num_yoy")
+            seg = f"人效（{eff.get('期间','')}）：人均创收 {ipc / 1e4:.0f}万"
+            if isinstance(ipc_y, (int, float)):
+                seg += f"（同比{ipc_y:+.1f}%）"
+            if emp and isinstance(emp_y, (int, float)):
+                seg += f"，员工{int(emp):,}人（同比{emp_y:+.1f}%）"
+            seg += "。人均创收增速高于员工增速才是真的效率提升，反过来是虚胖。"
+            parts.append(seg)
+    except Exception:
+        pass
+
+    return "\n".join(parts)
+
+
 def _market_context_text(symbol: str, market: str) -> str:
     """当前市场环境：大盘在涨还是跌、这只票所在板块什么方向、资金在进还是出。
 
@@ -2405,6 +2472,14 @@ def _judge_one(item: dict, source: str) -> dict | None:
     _extra = _extra_facts_text(symbol, market)
     if _extra:
         chips = (chips + "\n\n" if chips else "") + "补充事实：\n" + _extra
+    # 公司行为（2026-09-06）。让 AI 自己列"还缺什么数据"时，机构持仓动态
+    # 排在第三位——项目原有的只是一个"机构持股环比±X%"的汇总数，看不出
+    # 是谁在动。大股东集中减持和被动指数基金再平衡是完全不同的信号。
+    # 回购则是管理层用公司的钱表达"现在便宜"，比任何研报都直接。
+    _act = _corporate_actions_text(symbol, market)
+    if _act:
+        chips = (chips + "\n\n" if chips else "") + _act
+
     # 市场环境（2026-09-06）。放在最后拼进去，因为它是所有个股数据的
     # 背景板——先读完个股再看环境，跟人的判断顺序一致。
     _env = _market_context_text(symbol, market)

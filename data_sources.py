@@ -3837,6 +3837,87 @@ def get_crypto_universe() -> set:
     return set(df["code"].astype(str))
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_shareholder_changes(symbol: str, market: str, limit: int = 6) -> list[dict]:
+    """大股东持股变动。谁在增持、谁在减持、变动了多少。
+
+    2026-09-06 让 AI 自己列"还缺什么数据"时排第三的一项：机构持仓动态。
+    项目原有的只是一个"机构持股比例环比±X%"的汇总数，看不出是谁在动。
+    大股东集中减持和分散调仓是完全不同的信号，前者往往是内部人先知道了
+    什么，后者可能只是被动指数基金的例行再平衡。
+    """
+    code = _futu_code(symbol, market)
+    if not code:
+        return []
+    r = _futu_call(lambda c: c.get_shareholders_holding_changes(code),
+                   timeout=25, default=None)
+    df = _unwrap_futu(r)
+    if df is None or df.empty:
+        return []
+    ren = {"period_text": "期间", "name": "股东", "share_change_num": "变动股数",
+           "shares_change_price": "变动金额", "share_ratio": "持股比例"}
+    df = df.rename(columns={k: v for k, v in ren.items() if k in df.columns})
+    keep = [c for c in ("期间", "股东", "变动股数", "变动金额", "持股比例")
+            if c in df.columns]
+    return df[keep].head(limit).to_dict("records")
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_buybacks(symbol: str, market: str, limit: int = 5) -> list[dict]:
+    """公司回购记录。港股专有（美股接口不支持）。
+
+    回购是管理层用公司的钱表达"现在便宜"，比任何研报都直接。泡泡玛特
+    2026年宣布过20亿回购计划，这种信息原来完全没进判断链条。
+    """
+    code = _futu_code(symbol, market)
+    if not code or market != "HK":
+        return []
+    r = _futu_call(lambda c: c.get_corporate_actions_buybacks(code),
+                   timeout=25, default=None)
+    d = r[1] if (r and r[0] == ft.RET_OK and len(r) > 1) else None
+    if not isinstance(d, dict):
+        return []
+    lst = d.get("hk_buy_back_list")
+    if lst is None or getattr(lst, "empty", True):
+        return []
+    # 列名按实际返回来：buy_back_money 是金额、buy_back_sum 是股数，
+    # 第一版按 buy_back_amount/buy_back_num 猜的，全部没对上，结果只剩
+    # 日期一列——数据看着"有"，实际上一个数字都没拿到。
+    ren = {"publ_date_str": "日期", "buy_back_sum": "回购股数",
+           "buy_back_money": "回购金额", "high_price": "最高价",
+           "low_price": "最低价", "cumulative_percentage": "累计占已发行股本",
+           "cumulative_sum": "累计回购股数"}
+    lst = lst.rename(columns={k: v for k, v in ren.items() if k in lst.columns})
+    keep = [c for c in ("日期", "回购股数", "回购金额", "最高价", "最低价",
+                        "累计回购股数", "累计占已发行股本") if c in lst.columns]
+    return lst[keep].head(limit).to_dict("records")
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def get_operational_efficiency(symbol: str, market: str) -> dict:
+    """经营效率指标：周转率、账期这类。回答"增长是不是靠压货撑出来的"。"""
+    code = _futu_code(symbol, market)
+    if not code:
+        return {}
+    r = _futu_call(lambda c: c.get_company_operational_efficiency(code),
+                   timeout=25, default=None)
+    d = r[1] if (r and r[0] == ft.RET_OK and len(r) > 1) else None
+    if not isinstance(d, dict):
+        return {}
+    items = d.get("item_list") or []
+    if not items:
+        return {}
+    latest = items[0] if isinstance(items[0], dict) else {}
+    out = {"期间": latest.get("period_text", "")}
+    for k, v in latest.items():
+        if k in ("fiscal_year", "financial_type", "period_text", "end_date",
+                 "end_date_str"):
+            continue
+        if isinstance(v, (int, float)):
+            out[k] = v
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_crypto_regime() -> dict:
     """加密市场的"结构"指标：BTC主导率、ETF资金流。
