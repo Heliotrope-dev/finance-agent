@@ -400,6 +400,27 @@ def _is_failover_worthy(err: Exception) -> bool:
 # 每个cron触发都是全新进程，这正是想要的粒度：一轮运行内不重复撞同一堵墙，
 # 但下一轮会重新试一次（额度可能已经重置了，不该被上一轮的结论长期锁死）。
 _PROVIDER_COOLDOWN: dict[str, float] = {}
+
+
+def _healthy_provider_count() -> int:
+    """当前还能用的AI供应商有几家——并发度要跟着这个数走。
+
+    2026-09-06真实故障：千问的一周token套餐用光（"token-plan 1-week quota
+    has been exhausted"，09-08才重置）、智谱余额不足，三家只剩SiliconFlow
+    一家。并发度还是按三家配的20路，结果136支观察池只有72支产出有效判断，
+    另外64支在单家供应商上排队超时、静默返空——日志里"热门观察池：72支已
+    更新"是唯一的痕迹，而故障转移本身是好的（266次成功改道），所以看
+    failover日志只会觉得一切正常。
+
+    这个数在判断开始前就是准的：调用链前面的preflight已经把挂掉的供应商
+    写进_PROVIDER_COOLDOWN了，不用等第一批任务失败才发现。
+
+    至少返回1——一家都不健康时并发降到最低，让它慢慢跑而不是直接不跑。
+    """
+    now = time.time()
+    healthy = sum(1 for who in ("千问", "智谱", "SiliconFlow")
+                  if _PROVIDER_COOLDOWN.get(who, 0) <= now)
+    return max(healthy, 1)
 _COOLDOWN_SEC = 900
 
 
@@ -917,7 +938,12 @@ def judge_watchlist() -> list[dict]:
         # 剩下14支被截断。观察池现在含用户自选和虚拟货币，规模比原来大，
         # 而这个函数本身有进度输出（不会被外部监控误判成卡死），没有理由
         # 把截止线卡在一个必然跑不完的数上。
-        watchlist, lambda it: _judge_one(it, "watchlist"), timeout=1500, max_workers=20,
+        # max_workers 跟着健康供应商数走，不写死20。三家健康时还是20路，
+        # 只剩一家时降到7路——单家供应商吃不下20路并发，超出的部分不是
+        # 慢一点，是直接超时返空（2026-09-06丢了64支）。宁可跑得久一点，
+        # 截止线已经放宽到1500秒，够单家慢慢跑完。
+        watchlist, lambda it: _judge_one(it, "watchlist"), timeout=1500,
+        max_workers=7 * _healthy_provider_count(),
         progress_label="观察池AI判断进度",
     )
     return [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
