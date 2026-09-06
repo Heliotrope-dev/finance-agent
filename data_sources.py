@@ -2793,6 +2793,59 @@ def get_stock_notices(symbol: str) -> pd.DataFrame:
     df = df.sort_values("日期", ascending=False)
     return df[["日期", "新闻标题", "分类", "url"]].head(10)
 
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_quarterly_financials(symbol: str, market: str, periods: int = 4) -> list[dict]:
+    """最近几期的季度财报。这是项目里最新鲜的一手财务数据。
+
+    2026-09-06 用户问"最新的财报数据我们现成的有吗"时接的。此前财务摘要走
+    东财的 stock_financial_abstract，那个接口**只给年报**——扫描11支股票，
+    最新一期普遍是上一年度的年报。用年报去支撑 5-10 天的短线判断，基本面
+    那一项等于在看历史，季度之间的拐点完全看不见。
+
+    富途的 get_financials_statements 一直躺在未使用的接口里，实测能给到季度
+    粒度：NVDA 最新到 2027/Q2、腾讯 2026/Q2，而且每一项自带同比和环比。
+
+    返回结构上两个坑值得写下来。报表的值在 item_list 的 `data` 字段而不是
+    `value`——第一版按 value 取，拿到一片 None 而期间信息却是对的，很容易
+    误判成"这个接口只有元数据没有数据"。字段名要靠 structure_list 里的
+    field_id 映射，不能按位置取，不同股票的字段顺序不一样。
+
+    注意这里返回的日期是**报告期末**，不是公告日。富途这个接口不给公告日，
+    所以判断"市场什么时候知道这个信息"要另外找依据——见 advisor 里
+    _financial_summary_text 关于公告日的那段注释。
+    """
+    code = _futu_code(symbol, market)
+    if not code:
+        return []
+    r = _futu_call(lambda c: c.get_financials_statements(code), timeout=30, default=None)
+    if not r or r[0] != ft.RET_OK or not isinstance(r[1], dict):
+        return []
+    d = r[1]
+    fid2name = {x.get("field_id"): x.get("display_name")
+                for x in (d.get("structure_list") or [])}
+
+    # 只挑判断用得上的。全部23项塞进提示词是浪费，而且大部分（营业费用、
+    # 销售和管理费用这类）对"这一周会怎么走"没有信息量。
+    want = ("营业总收入", "总收入", "毛利", "营业利润", "净利润",
+            "归属于母公司股东的净利润", "研发费用")
+    out = []
+    for rep in (d.get("report_list") or [])[:periods]:
+        items = {}
+        for it in (rep.get("item_list") or []):
+            nm = fid2name.get(it.get("field_id"))
+            if nm in want and nm not in items:
+                items[nm] = {"值": it.get("data"), "同比": it.get("yoy"),
+                             "环比": it.get("qoq")}
+        if items:
+            out.append({
+                "期间": rep.get("period_text", ""),
+                "期末": str(rep.get("date_time_str") or "")[:10],
+                "币种": rep.get("currency_code", ""),
+                "指标": items,
+            })
+    return out
+
+
 class _EmptyLookup(Exception):
     """查询成功但结果为空。用异常表达是为了绕过 st.cache_data——它不缓存
     抛异常的调用，正好是我们要的"失败不要污染缓存"。

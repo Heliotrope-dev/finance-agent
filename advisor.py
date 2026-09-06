@@ -1842,6 +1842,55 @@ def _fmt_money(v) -> str:
     return f"{x:.2f}"
 
 
+def _quarterly_text(symbol: str, market: str) -> str:
+    """最近几个季度的营收/毛利/营业利润趋势。
+
+    2026-09-06 接的。这一段回答的是年报回答不了的问题：**最近这几个季度是
+    在加速还是在减速**。扫描时发现原来的财务摘要只有年报，而年报把四个季度
+    揉成一个数字，拐点完全看不见——NVDA 从 Q1 同比 +85.2% 到 Q2 +105.9% 是
+    加速，SK海力士 +198.1% 到 +256.8% 也是加速，这两条在年报里都读不出来。
+
+    对 5-10 天的短线，季度趋势的方向比年报的绝对水平有用得多：市场交易的是
+    预期变化，而不是"这家公司好不好"。
+
+    部分港股中小盘只披露年报（泡泡玛特实测四期全是 FY），这种情况返回空，
+    调用方照常用年报那段，不假装有季度数据。
+    """
+    try:
+        rows = ds.get_quarterly_financials(symbol, market, periods=4)
+    except Exception:
+        return ""
+    # 只保留真正的季度期次。混着年报的话，"环比"在 FY 行上是没有意义的，
+    # 而且会打断季度之间的连续性。
+    qs = [r for r in rows if "Q" in str(r.get("期间", ""))]
+    if not qs:
+        return ""
+
+    lines = []
+    for r in qs[:4]:
+        parts = []
+        for key in ("营业总收入", "总收入", "毛利", "营业利润", "净利润"):
+            it = (r.get("指标") or {}).get(key)
+            if not it or it.get("值") is None:
+                continue
+            if any(key in p for p in parts):
+                continue
+            v = it["值"]
+            vs = f"{v / 1e8:,.1f}亿" if abs(float(v)) >= 1e8 else f"{float(v):,.0f}"
+            seg = f"{key} {vs}"
+            if isinstance(it.get("同比"), (int, float)):
+                seg += f"（同比{it['同比']:+.1f}%"
+                if isinstance(it.get("环比"), (int, float)):
+                    seg += f"、环比{it['环比']:+.1f}%"
+                seg += "）"
+            parts.append(seg)
+        if parts:
+            lines.append(f"{r['期间']}（期末{r['期末']}）：" + "、".join(parts[:3]))
+    if not lines:
+        return ""
+    return ("最近季度（比年报新，看的是加速还是减速）：\n" + "\n".join(lines))
+
+
 def _financial_summary_text(symbol: str, market: str) -> str:
     """财务摘要，整理成中文关键指标。
 
@@ -2193,6 +2242,11 @@ def _judge_one(item: dict, source: str) -> dict | None:
     except Exception:
         price = None
     fin = _financial_summary_text(symbol, market)
+    # 季度趋势拼在年报后面。年报给的是底子和完整指标（ROE、净利率这些
+    # 富途季报接口没有），季报给的是最近的方向——两者互补不是替代。
+    _q = _quarterly_text(symbol, market)
+    if _q:
+        fin = (fin + "\n\n" if fin else "") + _q
     valuation = _valuation_text(symbol, market)
     tech = _technical_summary_text(symbol, market)
     news = _news_summary_text(symbol, market, name)
