@@ -2923,17 +2923,29 @@ def _normalize_dimension_line(text: str) -> str:
 
     # 冒号可能跟"维度打分"之间隔着换行（实测模型会写成"维度打分\n：- 基本面"），
     # 所以这里允许中间有空白。第一版要求冒号紧跟，整段就没匹配上。
+    # 先把加粗标记整个抹掉再匹配。模型写过"维度打分**：- 基本面…"这种
+    # 单侧星号，_clean_ai_markdown 只处理成对跨行的，漏掉了它，导致段名
+    # 正则匹配不上、整段原样返回——五条里有两条因此还是乱的。
+    text = text.replace("**", "")
+
     m = re.search(r"维度打分\s*[：:]", text)
     if not m:
         return text
     head_start, head_end = m.start(), m.end()
     tail = text[head_end:]
 
-    # 这一段到哪结束：遇到"综合得分"或空行为止。
+    # 这一段到哪结束：遇到"综合得分"为止；没有"综合得分"时退回空行。
+    #
+    # 不能只用空行做边界：模型有时把每一项的解释写得很长（"基本面 18/22：
+    # 营收同比+145%、净利润+405%…"），六项之间还夹着换行，用空行截断会
+    # 只切到第一项，后面五项提取不到，函数就认为"认出不足四项"而放弃。
     stop = len(tail)
-    for pat in (r"\n\s*\n", r"综合得分"):
-        mm = re.search(pat, tail)
-        if mm and mm.start() < stop:
+    mm = re.search(r"综合得分", tail)
+    if mm:
+        stop = mm.start()
+    else:
+        mm = re.search(r"\n\s*\n", tail)
+        if mm:
             stop = mm.start()
     seg = tail[:stop]
     rest = tail[stop:]
