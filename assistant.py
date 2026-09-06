@@ -176,10 +176,33 @@ def build_context(email: str | None) -> str:
     这里只做数据整理/格式化，不碰任何AI调用，方便调用方在打开浮窗时就先
     算好（用户还没打第一个字之前），不用每轮对话都重新查一遍数据库。
     """
+    import datetime as _dt
+
     import tracker
     import data_sources as ds
 
     parts = []
+
+    # 当前日期必须放在最前面。2026-09-06 真实故障：用户问"礼拜五 Nvidia
+    # 收盘价"，助手答"上周五（2026-09-02）228.45 美元"——两处都错。09-02
+    # 是周三，上周五是 09-04；228.45 是 09-03 周四的收盘价，09-04 收的是
+    # 230.36。
+    #
+    # 根因就是这里：context 从来没有告诉过 AI 今天是几号、星期几。它面对
+    # "上周五""昨天"这类相对日期只能靠训练数据里的印象推算，而那个印象跟
+    # 系统当前时间没有任何关系。价格倒是真实存在的（228.45 确实是某天的
+    # 收盘价），只是被安到了错的日期上——这种"数字对、日期错"的答案比
+    # 完全答不上来更危险，因为它看起来是有据可查的。
+    _now = _dt.datetime.now(_dt.timezone.utc).astimezone()
+    _wd = "一二三四五六日"[_now.isoweekday() - 1]
+    _last_fri = _now.date() - _dt.timedelta(days=(_now.isoweekday() - 5) % 7 or 7)
+    parts.append(
+        f"【当前时间】{_now.strftime('%Y-%m-%d %H:%M')}（星期{_wd}）。"
+        f"最近一个已收盘的星期五是 {_last_fri.isoformat()}。"
+        "用户问“上周五/昨天/这周”这类相对日期时，一律按这个时间推算，"
+        "不要凭印象猜日期。拿不准某个具体日期对应星期几时，就说不确定，"
+        "或者用工具查——把真实价格安到错误的日期上，比答不上来更容易误导人。"
+    )
 
     # 三个市场的核心指数快照+首页世界地图那几个国际指数——用户明确反馈过
     # "问恒生科技指数最新数据答不上来，网站'行情'页明明就有"，说明这类
@@ -640,7 +663,27 @@ def _execute_tool(name: str, args: dict) -> str:
             spot = ds.get_stock_realtime(args["symbol"], market=args.get("market", "US"))
             if not spot:
                 return "查不到这支股票的实时行情，可能代码或市场填错了。"
-            return "，".join(f"{k}：{v}" for k, v in spot.items() if v is not None)
+            body = "，".join(f"{k}：{v}" for k, v in spot.items() if v is not None)
+            # 强制带上这份数据是什么时候的。2026-09-06 的教训：用户问"礼拜五
+            # 收盘价"，助手报了一个真实存在但属于周四的价格，还配了个错误的
+            # 日期。价格本身没问题，问题是它不知道这个数字对应哪一天，于是
+            # 自己编了一个日期出来。
+            stamp = spot.get("数据时间") or spot.get("更新时间") or ""
+            # 字段含义必须写清楚，尤其是"最新价"和"昨收"的区别。
+            # 2026-09-06 真实故障：用户问"礼拜五收盘价"，助手报了 228.45，
+            # 那是"昨收"字段的值（周四收盘），而周五收盘价是"最新价"
+            # 230.36。数字都是真的，只是选错了字段——盘后场景下"最新价"
+            # 就是当日收盘价，而"昨收"是前一个交易日的。这种错误比编数字
+            # 更隐蔽，因为每个数字都能在数据里对上。
+            hint = (
+                f"（数据时间 {stamp}。字段含义：「最新价」是这个时间点的价格，"
+                "收盘后它就等于当日收盘价；「昨收」是**前一个交易日**的收盘价，"
+                "不要拿它回答“今天/某天收盘多少”。）"
+                if stamp else
+                "（这份行情没有带时间戳，不要替它编日期。另外注意「昨收」是"
+                "前一个交易日的收盘价，不是当日收盘价。）"
+            )
+            return body + hint
         if name == "get_stock_financials":
             fin = ds.get_financial_abstract(args["symbol"], market=args.get("market", "A"))
             if fin is None or fin.empty:

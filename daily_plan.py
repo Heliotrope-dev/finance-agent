@@ -383,6 +383,21 @@ def build_plan(email: str | None = None) -> dict:
     email = email or advisor._EMAIL
     today = dt.date.today().isoformat()
 
+    # AI 可用性探测。放在最前面是因为它决定清单该怎么被读——评分是旧的
+    # 时候，用户需要知道是"还在跑"还是"跑不了"，这两种情况的应对完全不同。
+    # 探测只花一次极小的调用，比让用户对着旧评分下单便宜得多。
+    ai_status = "正常"
+    try:
+        advisor.chat_with_failover(
+            [{"role": "user", "content": "ok"}],
+            max_tokens=4, temperature=0, timeout=25, tag="plan-probe")
+    except Exception as e:
+        msg = str(e)
+        if "quota" in msg.lower() or "balance" in msg.lower() or "余额" in msg or "配额" in msg:
+            ai_status = "AI 供应商额度用尽，今天的判断跑不出来（需要充值）"
+        else:
+            ai_status = f"AI 调用失败：{type(e).__name__}"
+
     # 一、验证状态。放在最前面构造，因为它决定这份清单该怎么被读。
     verify = expectancy.summary_text()
     band = expectancy.score_band_expectancy()
@@ -434,6 +449,7 @@ def build_plan(email: str | None = None) -> dict:
         "验证状态": verify,
         "已验证": verified,
         "资金规模": _capital_cny(),
+        "AI状态": ai_status,
         "评分批次": lb_date,
         "评分是否当天": (lb_date == today) if lb_date else None,
         "关注候选": items_watch[:_MAX_ITEMS],
@@ -457,9 +473,18 @@ def render_text(plan: dict) -> str:
 
     lb_date = plan.get("评分批次")
     if lb_date and plan.get("评分是否当天") is False:
-        L.append(f"[注意] 下面用的评分是 {lb_date} 那一批，不是今早刚算的。")
-        L.append("今早的判断还在跑（06:30 启动，整轮约50分钟）。隔夜如果出了")
-        L.append("重大消息，这批分数未必反映得进来——开盘前留意一下新闻。")
+        L.append(f"[注意] 评分来自 {lb_date} 那一批，不是今早算的。")
+        if plan.get("AI状态") and plan["AI状态"] != "正常":
+            # 区分"还在跑"和"跑不了"。前者等一会儿就有，后者要充值才行，
+            # 用户的应对完全不同。2026-09-06 四家供应商同时欠费时踩到：
+            # 清单只说"评分不是当天的"，用户会以为再等等就好。
+            L.append(f"原因：{plan['AI状态']}")
+            L.append("")
+            L.append("下面的价格、止损、目标位、盈亏比、仓位全部是今天现算的，")
+            L.append("不经过 AI，照常可用。只有「评分」和「判断理由」是旧的。")
+        else:
+            L.append("今早的判断还在跑（06:30 启动，整轮约50分钟）。隔夜如果出了")
+            L.append("重大消息，这批分数未必反映得进来——开盘前留意一下新闻。")
         L.append("")
 
     if not plan.get("已验证"):
