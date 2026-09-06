@@ -245,8 +245,18 @@ def build_plan(email: str | None = None) -> dict:
     # "要不要减/清"，观察池给的是"要不要进"，混在一起用户没法分辨哪条
     # 是在说他已经有的仓位。
     items_watch, items_pos = [], []
+    lb_date = None
     try:
         lb = tracker.get_latest_leaderboard(limit=_MAX_ITEMS, source="watchlist")
+        # 评分的批次日期。清单要在开盘前推，而产出评分的 advisor 是同一个
+        # 早晨才开始跑的（06:30 起，实测整轮要 50 分钟以上）——如果那时
+        # watchlist 那一段还没跑完，这里读到的就是昨天的分数。
+        #
+        # 读到旧分数本身不算错，市场没开盘时昨天收盘后的判断依然有效。
+        # 真正危险的是用户不知道它是旧的：他会以为这是今早刚算出来的，
+        # 从而对一个可能已经被隔夜消息推翻的判断下单。所以把批次日期
+        # 原样印在清单上，隔天了就明确说出来。
+        lb_date = (lb or {}).get("run_date")
         for r in (lb or {}).get("leaderboard", []):
             if (r.get("score") or 0) >= _MIN_SCORE:
                 it = _build_item(r)
@@ -277,6 +287,8 @@ def build_plan(email: str | None = None) -> dict:
         "验证状态": verify,
         "已验证": verified,
         "资金规模": _capital_cny(),
+        "评分批次": lb_date,
+        "评分是否当天": (lb_date == today) if lb_date else None,
         "关注候选": items_watch[:_MAX_ITEMS],
         "持仓处理": items_pos,
     }
@@ -295,6 +307,13 @@ def render_text(plan: dict) -> str:
         L.append(f"资金规模 {cap:,.0f} 元 · 单笔风险上限 {cap * _RISK_PER_TRADE_PCT / 100:,.0f} 元"
                  f"（{_RISK_PER_TRADE_PCT:.0f}%）")
     L.append("")
+
+    lb_date = plan.get("评分批次")
+    if lb_date and plan.get("评分是否当天") is False:
+        L.append(f"[注意] 下面用的评分是 {lb_date} 那一批，不是今早刚算的。")
+        L.append("今早的判断还在跑（06:30 启动，整轮约50分钟）。隔夜如果出了")
+        L.append("重大消息，这批分数未必反映得进来——开盘前留意一下新闻。")
+        L.append("")
 
     if not plan.get("已验证"):
         L.append("[尚未验证] 这套打分的数学期望还在积累样本，第一批可信数据")
