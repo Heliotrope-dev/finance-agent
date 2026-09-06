@@ -43,6 +43,9 @@ _MIN_SCORE = 65
 # 能认真处理的决策数量有限，宁可漏掉边缘机会，也不要让真正值得看的那几条
 # 被淹没。
 _MAX_ITEMS = 8
+# 进闸门的候选池大小。跟 _MAX_ITEMS（最终展示几条）分开：池子要够大，
+# 才轮得到那些"分数中上但赔率好"的票——它们才是期望值真正的来源。
+_POOL_SIZE = 45
 
 # ---- 仓位与期望值 ----
 #
@@ -55,7 +58,17 @@ _MAX_ITEMS = 8
 # 换句话说，与其去猜"这次能不能对"，不如只做那些"对一次能补三次错"的机会。
 # 这是在胜率未知时唯一数学上站得住的做法，所以下面用 _MIN_RR 卡门槛，
 # 达不到的标的会被标成"盈亏比不足"而不是给一个仓位。
-_MIN_RR = 2.0
+# 盈亏比门槛。2.0 -> 2.5（2026-09-06）。
+#
+# 用户："门槛可以设置的高一点，就算达标的只有一只两只也可以，我们要找最优解"。
+# 这个要求有个独立于偏好的正当理由：胜率目前是"尚未验证"状态，而盈亏比门槛
+# 换算过去就是保本胜率——2:1 要求胜率>33%，2.5:1 只要>28.6%，3:1 只要>25%。
+# 越不知道自己的胜率，就越该要求更高的赔率来兜底。等期望值那套攒够样本、
+# 胜率被真实验证之后，这个数可以降回 2.0。
+#
+# 配合 _rank_candidates 按盈亏比降序排，达标的不设数量上限：宁可某天只有
+# 一两支，也不要为了凑满清单放进赔率不够的票。
+_MIN_RR = 2.5
 
 # 单笔最多亏总资金的百分之几。2% 是仓位管理里的常规值：连错 10 次总回撤
 # 约 18%，账户还活着；用 10% 的话连错 5 次就腰斩，那时候即使策略是对的
@@ -243,7 +256,7 @@ def _target_price(symbol: str, market: str, last: float,
     机构目标价不丢弃，另外单独显示并标注 12 个月口径，让用户知道长期空间
     在哪，但不拿它算短线赔率。
     """
-    hi5 = hi10 = hi20 = None
+    hi5 = hi10 = hi20 = lo20 = None
     try:
         import datetime as _d
         _e = _d.date.today()
@@ -258,6 +271,9 @@ def _target_price(symbol: str, market: str, last: float,
                 hi10 = max(highs[-10:])
             if len(highs) >= 20:
                 hi20 = max(highs[-20:])
+            lowcol = "最低" if "最低" in df.columns else "low"
+            if lowcol in df.columns and len(df) >= 20:
+                lo20 = min(df[lowcol].tolist()[-20:])
     except Exception:
         pass
 
@@ -269,17 +285,52 @@ def _target_price(symbol: str, market: str, last: float,
     # 改成从近到远逐级找第一个还在现价上方的阻力：5日高点（超短线能到的）、
     # 10日高点（一到两周）、20日高点（兜底）。至少高出 0.5% 才算有空间，
     # 否则等于"目标就是现价"。
+    # 阻力位要"够远"才算数：至少高出1倍ATR。原来的门槛是 +0.5%，但典型
+    # ATR是2-4%——一个离现价只有0.6%的高点，一天之内就会被穿过去，它不是
+    # 5-10天的天花板，是日内噪音。当天实测汇丰控股目标只有 +0.6%、花旗
+    # +0.6%、SK海力士 +0.8%，全都是这么来的，算出来的盈亏比 0.1~0.3 毫无
+    # 意义。近处的阻力穿不过去时确实会变成压力，但那属于"进场后跌破止损"
+    # 该处理的事，不该在算目标时就把天花板压到噪音水平。
+    _near = (atr / last) if (atr and last) else 0.005
     pool = {5: (hi5, "5日高点"), 10: (hi10, "10日高点"), 20: (hi20, "20日高点")}
     for d in (windows or (5, 10, 20)):
         lvl, label = pool.get(d, (None, ""))
-        if lvl and lvl > last * 1.005:
+        if lvl and lvl > last * (1 + max(_near, 0.005)):
             return lvl, f"{label}·阻力"
 
-    # 全部突破时按 ATR 外推。倍数跟着周期走：超短线看 1 倍（这只票平常
-    # 一天能走多远），短线看 1.5 倍。
+    # 上方没有有效阻力（已突破近期高点）时，用量度幅度：前期整理区间的
+    # 高度，从突破点往上投影。
+    #
+    # 2026-09-06 系统性审计的完整过程记在这里，因为中间那版是错的：
+    #
+    # 原来这里是"现价 + 1.5倍ATR"。而止损也是 1.5倍ATR，于是盈亏比恒等于
+    # 1.0，永远过不了 2:1 的闸门——当天对分数最高的45支实测，盈亏比中位数
+    # 0.74，只有1支达标，清单天天输出"今天没有机会"。
+    #
+    # 第一版改法是把目标改成 ATR×√持有天数（波动率按时间开方缩放）。方向
+    # 对，结果错：止损和目标都成了 ATR 的倍数，盈亏比 = √N / 1.5 仍然是个
+    # 常数，只是从 1.0 变成了 3.0——12支候选算出来的盈亏比一模一样。闸门
+    # 从"全部拒绝"变成"全部放行"，同样没有鉴别力，而且那个数字是假的。
+    #
+    # 根子在于：ATR目标 ÷ ATR止损，横截面上不含任何信息。要让盈亏比能区分
+    # 标的，目标必须来自这支票自己的价格结构。
+    #
+    # 量度幅度满足这个要求：突破前那段整理区间有多高，突破后就按这个高度
+    # 往上投影。区间窄的票目标近、区间宽的票目标远，逐票不同。这也是技术
+    # 分析里对突破最标准的目标推法，不是为了凑闸门临时发明的。
+    #
+    # 两道约束：区间高度不足1倍ATR时（几乎没整理过就直接拉上来）退回
+    # ATR×√N，否则目标会贴在现价上；上限压在 4倍ATR 以内，防止某只票
+    # 恰好有一段巨大的区间把目标推到不合理的位置。
+    if atr and hi20 and lo20 is not None:
+        span = hi20 - lo20
+        if span >= atr:
+            tgt = last + min(span, 4 * atr)
+            return tgt, f"量度幅度·20日区间高度{span / last * 100:.1f}%投影"
     if atr:
-        mult = 1.0 if (windows and max(windows) <= 5) else 1.5
-        return last + mult * atr, f"现价+{mult}倍ATR·已突破近期高点"
+        days = max(windows) if windows else 10
+        mult = round(days ** 0.5, 1)
+        return last + mult * atr, f"现价+{mult}倍ATR·{days}天波动行程"
     return None, ""
 
 
@@ -431,6 +482,17 @@ def _build_item(rec: dict) -> dict | None:
     }
 
 
+def _rank_candidates(items: list[dict]) -> list[dict]:
+    """达标的全部保留、按盈亏比降序；不达标的只留分数最高的几条作观察。"""
+    ok, weak = [], []
+    for x in items:
+        rr = x.get("盈亏比")
+        (ok if (rr is not None and rr >= _MIN_RR) else weak).append(x)
+    ok.sort(key=lambda x: -(x.get("盈亏比") or 0))
+    weak.sort(key=lambda x: -(x.get("评分") or 0))
+    return ok + weak[:_MAX_ITEMS]
+
+
 def build_plan(email: str | None = None) -> dict:
     email = email or advisor._EMAIL
     today = dt.date.today().isoformat()
@@ -461,7 +523,22 @@ def build_plan(email: str | None = None) -> dict:
     items_watch, items_pos = [], []
     lb_date = None
     try:
-        lb = tracker.get_latest_leaderboard(limit=_MAX_ITEMS, source="watchlist")
+        # 取 _POOL_SIZE 支进来，不是 _MAX_ITEMS 支。
+        #
+        # 2026-09-06 系统性审计查出的致命缺陷：这里原来传的是 _MAX_ITEMS(8)，
+        # 也就是"先按分数砍到前8，再过盈亏比闸门"。而打分是奖励上升趋势中
+        # 的强势股的，强势股必然贴近近期高点、上方空间小——所以分数最高的
+        # 那8支，恰恰是盈亏比最差的8支。
+        #
+        # 当天实测：对分数最高的45支算盈亏比，中位数 0.74，只有1支达到2:1
+        # ——而那1支是携程(2.90:1)，排在第39位，永远进不了前8。清单于是
+        # 天天输出"今天没有盈亏比达标的机会"，用户拿不到任何可执行的东西。
+        #
+        # 这跟用户要的数学期望是直接冲突的：期望 = 胜率×平均盈利 + 败率×
+        # 平均亏损，分数只是胜率的代理，盈亏比是赔率。只按分数排序等于把
+        # 期望公式砍掉了赔率那一半，只留胜率。正确做法是让整个合格池都过
+        # 一遍闸门，再在能做的票里挑分数高的。
+        lb = tracker.get_latest_leaderboard(limit=_POOL_SIZE, source="watchlist")
         # 评分的批次日期。清单要在开盘前推，而产出评分的 advisor 是同一个
         # 早晨才开始跑的（06:30 起，实测整轮要 50 分钟以上）——如果那时
         # watchlist 那一段还没跑完，这里读到的就是昨天的分数。
@@ -504,7 +581,22 @@ def build_plan(email: str | None = None) -> dict:
         "AI状态": ai_status,
         "评分批次": lb_date,
         "评分是否当天": (lb_date == today) if lb_date else None,
-        "关注候选": items_watch[:_MAX_ITEMS],
+        # 排序和截断：达标的全留，不达标的按赔率排序后只留 _MAX_ITEMS 条观察。
+        #
+        # 原来是 items_watch[:_MAX_ITEMS]，而 items_watch 是按分数降序的，
+        # 于是"分数前8"这道砍在闸门之后又砍了一遍——就算池子扩大了，达标
+        # 的票只要分数不在前8，照样会在这里被切掉。
+        #
+        # 达标的不设上限：用户明确说"门槛可以设高一点，就算达标的只有一两只
+        # 也可以，我们要找最优解"。达标的票本来就稀少（当天45支里只有1支），
+        # 稀少的东西没有截断的必要，反倒是漏掉一支就少一个机会。
+        #
+        # 达标组内按盈亏比降序，不按分数：在胜率还没被验证之前（期望值那套
+        # 现在的状态是"尚未验证"），盈亏比是唯一一个跟期望值有确定关系的量
+        # ——赔率2:1时胜率超过33%就是正期望，3:1时25%就够。分数只是胜率的
+        # 代理，而这个代理的有效性恰恰是还没被证明的那件事。拿没验证的代理
+        # 去给已验证的量排序，顺序就反了。
+        "关注候选": _rank_candidates(items_watch),
         "持仓处理": items_pos,
     }
 
@@ -542,7 +634,7 @@ def render_text(plan: dict) -> str:
     if not plan.get("已验证"):
         L.append("[尚未验证] 这套打分的数学期望还在积累样本，第一批可信数据")
         L.append("09-07 之后才有。所以下面每条都卡了盈亏比门槛：只列")
-        L.append(f"盈亏比≥{_MIN_RR:.0f}的机会——赔率够高时，即使胜率只有"
+        L.append(f"盈亏比≥{_MIN_RR:g}的机会——赔率够高时，即使胜率只有"
                  f"{100/(1+_MIN_RR):.0f}%以上期望也是正的。")
         L.append("")
 
@@ -560,7 +652,7 @@ def render_text(plan: dict) -> str:
                 seg.append(f"   买入上限 {x['买入上限']}（不设下沿：均线已高于赔率分界，"
                            f"这个位置本来就不便宜）")
             seg.append(f"     高于 {x['买入上限']} 就别追了——那个价位盈亏比会跌破"
-                       f"{_MIN_RR:.0f}:1，赔率不够")
+                       f"{_MIN_RR:g}:1，赔率不够")
         if x.get("建议股数"):
             seg.append(f"   买入 {x['建议股数']} 股（约 {x['建议金额CNY']:,.0f} 元）"
                        + (f"，每手{x['每手']}股" if x.get("每手", 1) > 1 else ""))
@@ -617,7 +709,7 @@ def render_text(plan: dict) -> str:
             low_rr.append(x)
 
     if tradable:
-        L.append(f"二、可执行候选（{len(tradable)}支，盈亏比≥{_MIN_RR:.0f}）")
+        L.append(f"二、可执行候选（{len(tradable)}支，盈亏比≥{_MIN_RR:g}）")
         for i2, x in enumerate(tradable, 1):
             L += _one(x, i2)
             L.append("")
@@ -658,7 +750,7 @@ def render_text(plan: dict) -> str:
 
     L.append("—— 关于这份清单怎么用 ——")
     L.append(f"买入上限是算出来的不是估的：买得越高，到目标的空间越小、到止损")
-    L.append(f"的距离越大，赔率越差。上限就是盈亏比正好跌到 {_MIN_RR:.0f}:1 的那个价，")
+    L.append(f"的距离越大，赔率越差。上限就是盈亏比正好跌到 {_MIN_RR:g}:1 的那个价，")
     L.append("超过它这笔就不值得做。开盘跳空高开时尤其要看这条线。")
     L.append("")
     L.append(f"仓位是按“单笔最多亏 {_RISK_PER_TRADE_PCT:.0f}% 本金”反推的：止损越远仓位越小，")
