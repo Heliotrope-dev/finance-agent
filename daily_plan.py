@@ -126,25 +126,128 @@ def _fx_to_cny(market: str) -> tuple[float, str]:
         return 0.0, cur
 
 
-def _target_price(symbol: str, market: str, last: float) -> tuple[float | None, str]:
-    """目标价：优先用机构一致预期，取不到就退回52周高点的中间位置。
+def _reality_check(symbol: str, market: str, last: float,
+                   target: float | None) -> str | None:
+    """目标价隐含的市值是多少，这个涨幅到底有多难。
 
-    用机构目标价而不是自己算，理由是它是外部的、可追溯的，而且清单要
-    交给用户去下单——一个"我们自己模型算出来的目标价"没法向他解释凭什么。
+    2026-09-06 用户指出的问题：英伟达目标价 325.23、盈亏比 7.0:1，清单上
+    看着极有吸引力——但他一眼看出现市值已经 5.55 万亿，涨到目标价意味着
+    市值要去 7.84 万亿，也就是**再凭空长出 2.3 万亿**，约等于再造一个
+    台积电加一个特斯拉。
+
+    百分比会隐藏规模。+41% 对一只两百亿市值的公司是平常事，对一只五万亿
+    市值的公司是另一回事——后者需要的绝对增量，可能超过全球能腾出来的
+    增量资金。而盈亏比这个指标只看价格距离，完全不管这段距离背后要发生
+    什么，所以"盈亏比 7:1、胜率超过 12% 就够"这句话对大市值股是有误导性的。
+
+    这里不下"能不能到"的结论——那需要判断 AI 资本开支能不能持续，不是
+    一个脚本该做的事。只把绝对量摆出来，让用户自己掂量。这也正是用户
+    要的"不能坑我"：数字本身不会骗人，但只给百分比就是在选择性呈现。
     """
+    if not target or not last or target <= last:
+        return None
+    # 市值要从富途原始快照取。get_stock_realtime_futu 返回的中文键里没有
+    # 总市值这一项（它只挑了价格相关的几个字段），第一版从那里取，拿到的
+    # 永远是 0，整段规模提示静默消失——没报错，只是不显示。
+    mv = 0.0
+    try:
+        import futu as ft
+        r = ds._futu_call(
+            lambda c: c.get_market_snapshot([ds._futu_code(symbol, market)]),
+            timeout=20, default=None)
+        df = ds._unwrap_futu(r)
+        if df is not None and not df.empty:
+            mv = float(df.iloc[0].get("total_market_val") or 0)
+    except Exception:
+        mv = 0.0
+    if mv <= 0:
+        return None
+
+    implied = mv * (target / last)
+    delta = implied - mv
+    cur_t = mv / 1e12
+    imp_t = implied / 1e12
+    dl_t = delta / 1e12
+
+    # 只在绝对增量大到值得停一下的时候才说。小盘股涨40%不需要这段提醒，
+    # 说了反而是噪音。门槛定在增量5000亿：那已经是一家大公司的全部体量。
+    if delta < 5e11:
+        return None
+
+    unit = "万亿" if cur_t >= 1 else "千亿"
+    if cur_t >= 1:
+        base = f"现市值 {cur_t:.2f} 万亿，到目标价对应 {imp_t:.2f} 万亿"
+        add = f"需要再增加 {dl_t:.2f} 万亿"
+    else:
+        base = f"现市值 {mv/1e8:,.0f} 亿，到目标价对应 {implied/1e8:,.0f} 亿"
+        add = f"需要再增加 {delta/1e8:,.0f} 亿"
+    return f"{base}——{add}。百分比看着不大，绝对量是这个规模，自己掂量。"
+
+
+def _analyst_target(symbol: str, market: str, last: float) -> float | None:
+    """机构一致预期目标价。注意这是 12 个月目标，不是短线目标。"""
     try:
         view = advisor._analyst_view_text(symbol, market, last) or ""
     except Exception:
-        view = ""
+        return None
     import re
     m = re.search(r"目标价均值\s*([\d,.]+)", view)
-    if m:
-        try:
-            v = float(m.group(1).replace(",", ""))
-            if v > 0:
-                return v, "机构一致预期目标价"
-        except Exception:
-            pass
+    if not m:
+        return None
+    try:
+        v = float(m.group(1).replace(",", ""))
+        return v if v > 0 else None
+    except Exception:
+        return None
+
+
+def _target_price(symbol: str, market: str, last: float,
+                  atr: float | None) -> tuple[float | None, str]:
+    """短线目标价：1-4周能摸到的位置。
+
+    2026-09-06 用户指出的口径错配：之前直接用机构一致预期当目标价，但那
+    普遍是 12 个月目标，而他做的是 1-4 周短线。用一年期目标算盈亏比，
+    等于把一年的空间记在四周的账上，赔率被系统性高估。
+
+    英伟达那条是典型：目标价 325.23 隐含市值要从 5.55 万亿涨到 7.84 万亿，
+    也就是四周内凭空多出 2.3 万亿——约等于再造一个台积电加一个特斯拉。
+    这显然不是四周能发生的事，但清单上"盈亏比 7.0:1、胜率超过 12% 就够"
+    让它看起来像个短线好机会。用户一眼看出了这个问题。
+
+    改用技术阻力位，因为短线价格走到哪里由供需决定，不由估值决定：
+
+      优先  近期高点（20日/60日里第一个还在现价上方的）。那是真实成交过
+            的密集区，也是最可能出现抛压的位置。
+      兜底  现价 + 2倍ATR。已经突破所有近期高点时用——这时没有历史阻力
+            可参考，只能按"这只票平常两天能走多远"外推。
+
+    机构目标价不丢弃，另外单独显示并标注 12 个月口径，让用户知道长期空间
+    在哪，但不拿它算短线赔率。
+    """
+    hi20 = hi60 = None
+    try:
+        import datetime as _d
+        _e = _d.date.today()
+        _s = _e - _d.timedelta(days=110)
+        df = ds.get_stock_history(symbol, _s.isoformat(), _e.isoformat(), "d", market)
+        if df is not None and not getattr(df, "empty", True):
+            col = "最高" if "最高" in df.columns else "high"
+            highs = df[col].tolist()
+            if len(highs) >= 20:
+                hi20 = max(highs[-20:])
+            if len(highs) >= 60:
+                hi60 = max(highs[-60:])
+    except Exception:
+        pass
+
+    # 取第一个还在现价上方的阻力位——已经突破的高点不再是阻力。
+    # 至少高出 0.5% 才算有空间，否则等于"目标就是现价"。
+    for lvl, label in ((hi20, "20日高点"), (hi60, "60日高点")):
+        if lvl and lvl > last * 1.005:
+            return lvl, f"{label}·短线阻力"
+
+    if atr:
+        return last + 2 * atr, "现价+2倍ATR·已突破近期高点"
     return None, ""
 
 
@@ -173,7 +276,8 @@ def _build_item(rec: dict) -> dict | None:
         pos_pct = (last - lo52) / (hi52 - lo52) * 100
 
     # ---- 目标价与盈亏比 ----
-    target, t_src = _target_price(symbol, market, last)
+    target, t_src = _target_price(symbol, market, last, atr)
+    analyst_t = _analyst_target(symbol, market, last)
     rr = None
     if target and target > last and stop < last:
         rr = (target - last) / (last - stop)
@@ -246,8 +350,13 @@ def _build_item(rec: dict) -> dict | None:
                        f"{cap_limit:,.0f} 元（本金的{_MAX_POSITION_PCT:.0f}%）")
             rec["_不可执行原因"] = why
 
+    # 规模检查针对机构那个12个月目标——短线目标通常只有几个点的空间，
+    # 算隐含市值没有意义。
+    reality = _reality_check(symbol, market, last, analyst_t)
+
     return {
         "代码": symbol, "市场": market, "名称": rec.get("name") or symbol,
+        "规模提示": reality,
         "方向": rec.get("action"), "评分": rec.get("score"),
         "现价": round(float(last), 3),
         "止损参考": round(float(stop), 3),
@@ -256,6 +365,7 @@ def _build_item(rec: dict) -> dict | None:
         "买入上限": round(float(buy_hi), 3) if buy_hi else None,
         "买入下沿": round(float(buy_lo), 3) if buy_lo else None,
         "目标来源": t_src,
+        "机构12月目标": round(float(analyst_t), 2) if analyst_t else None,
         "盈亏比": round(rr, 2) if rr else None,
         "建议股数": shares,
         "建议金额CNY": amount_cny,
@@ -385,17 +495,19 @@ def render_text(plan: dict) -> str:
             seg.append(f"   目标 {x['目标价']}（+{up:.1f}%，{x['目标来源']}）")
         if x.get("盈亏比"):
             need = 100 / (1 + x["盈亏比"])
-            seg.append(f"   盈亏比 {x['盈亏比']:.1f}:1，胜率超过 {need:.0f}% 就是正期望")
-            if x["盈亏比"] >= 8:
-                # 盈亏比高到这个程度，通常不是"机会特别好"，而是机构目标价
-                # 隐含了一个需要长时间兑现的假设（管线获批、周期反转），
-                # 拿它当短线赔率会高估。宁可提醒一句。
-                seg.append("   注意：赔率高到这个程度，多半是机构目标价押在")
-                seg.append("   长期逻辑上（管线/周期反转），短线未必兑现")
+            seg.append(f"   短线盈亏比 {x['盈亏比']:.1f}:1，胜率超过 {need:.0f}% 就是正期望")
         elif x.get("目标价"):
-            seg.append("   盈亏比不足，不建议这个位置进")
+            seg.append("   算不出盈亏比（目标或止损缺一个）")
         else:
-            seg.append("   没有机构目标价，盈亏比无法计算——只做止损参考")
+            seg.append("   上方没有明确阻力位，只做止损参考")
+        # 机构目标单独一行并标明 12 个月口径。它跟上面的短线目标是两个
+        # 时间尺度，并排放又不标注的话，人会默认它们说的是同一段时间。
+        if x.get("机构12月目标"):
+            up2 = (x["机构12月目标"] - x["现价"]) / x["现价"] * 100
+            seg.append(f"   机构12个月目标 {x['机构12月目标']}（{up2:+.0f}%）"
+                       "——长期空间，不是短线目标")
+        if x.get("规模提示"):
+            seg.append(f"   [规模] {x['规模提示']}")
         if x.get("日均波幅"):
             seg.append(f"   日均波幅 {x['日均波幅']}%"
                        + (f" · 52周分位 {x['52周分位']:.0f}%" if x.get("52周分位") is not None else ""))
@@ -445,10 +557,23 @@ def render_text(plan: dict) -> str:
         L.append("")
 
     if low_rr:
-        L.append(f"四、赔率不足或缺目标价（{len(low_rr)}支，仅供观察）")
+        L.append(f"四、短线赔率不足（{len(low_rr)}支，仅供观察）")
         for x in low_rr:
-            rr = f"盈亏比{x['盈亏比']:.1f}" if x.get("盈亏比") else "无机构目标价"
-            L.append(f"   {x['名称']}（{x['代码']}）{x['评分']}分 现价{x['现价']} {rr}")
+            # 把上方空间和止损距离都摆出来，而不是只说"赔率不够"。
+            # 用户要能自己判断是"位置不好"还是"止损设得太宽"——前者该等，
+            # 后者可以调参数。只给一个结论他没法分辨。
+            if x.get("目标价") and x.get("止损幅度"):
+                up = (x["目标价"] - x["现价"]) / x["现价"] * 100
+                L.append(f"   {x['名称']}（{x['代码']}）{x['评分']}分 现价{x['现价']}")
+                L.append(f"      上方空间 +{up:.1f}%（到{x['目标来源']} {x['目标价']}）"
+                         f" vs 止损 {x['止损幅度']}% → 盈亏比 {x.get('盈亏比') or 0:.1f}:1")
+            else:
+                L.append(f"   {x['名称']}（{x['代码']}）{x['评分']}分 现价{x['现价']} "
+                         "上方无明确阻力位")
+        L.append("")
+        L.append("   这一档不是票不好，是现在这个位置上方空间不够覆盖止损距离。")
+        L.append("   多数是因为股价已经贴近近期高点——评分高恰恰是因为它一路涨上来。")
+        L.append("   等回调到买入区间下沿，同样的票赔率就够了。")
         L.append("")
 
     L.append("—— 关于这份清单怎么用 ——")
