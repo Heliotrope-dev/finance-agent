@@ -178,6 +178,41 @@ def _build_item(rec: dict) -> dict | None:
     if target and target > last and stop < last:
         rr = (target - last) / (last - stop)
 
+    # ---- 买入价位区间 ----
+    #
+    # 用户的问题很实际："开盘有的大升大降，我也不知道该在什么价位买"。
+    # 清单里的现价是昨天收盘的，开盘跳空之后照着它买就错了。
+    #
+    # 上限有个干净的算法：盈亏比是买入价的函数——买得越高，到目标的空间
+    # 越小、到止损的距离越大，盈亏比越差。设买入价 P、目标 T、止损 S，
+    # 要求 (T-P)/(P-S) >= _MIN_RR，解出 P <= (T + _MIN_RR*S)/(1+_MIN_RR)。
+    # 这就是"买到这个价以上，这笔交易的赔率就不值得做了"的分界线，
+    # 不是拍脑袋定的心理价位。
+    #
+    # 下限用 20 日均线，但不低于止损位上方一点：太贴近止损的位置看着
+    # 便宜，实际是买在"再跌一点就该认输"的地方，一个正常回踩就把你扫掉。
+    buy_hi = buy_lo = None
+    if target and stop < last:
+        buy_hi = (target + _MIN_RR * stop) / (1 + _MIN_RR)
+        ma20 = None
+        try:
+            import datetime as _d
+            _e = _d.date.today()
+            _s = _e - _d.timedelta(days=45)
+            _df = ds.get_stock_history(symbol, _s.isoformat(), _e.isoformat(), "d", market)
+            if _df is not None and not getattr(_df, "empty", True):
+                col = "收盘" if "收盘" in _df.columns else "close"
+                cl = _df[col].tolist()
+                if len(cl) >= 20:
+                    ma20 = sum(cl[-20:]) / 20
+        except Exception:
+            ma20 = None
+        floor = stop * 1.02          # 止损上方 2%，留出被扫的余量
+        buy_lo = max(ma20, floor) if ma20 else floor
+        if buy_lo >= buy_hi:
+            # 均线已经高过赔率上限，说明这个位置本来就不便宜了
+            buy_lo = None
+
     # ---- 仓位：按风险预算反推，再受集中度和整手约束 ----
     cap = _capital_cny()
     fx, cur = _fx_to_cny(market)
@@ -218,6 +253,8 @@ def _build_item(rec: dict) -> dict | None:
         "止损参考": round(float(stop), 3),
         "止损幅度": round(stop_pct, 1),
         "目标价": round(float(target), 2) if target else None,
+        "买入上限": round(float(buy_hi), 3) if buy_hi else None,
+        "买入下沿": round(float(buy_lo), 3) if buy_lo else None,
         "目标来源": t_src,
         "盈亏比": round(rr, 2) if rr else None,
         "建议股数": shares,
@@ -324,7 +361,19 @@ def render_text(plan: dict) -> str:
 
     def _one(x, idx):
         seg = [f"{idx}. {x['名称']}（{x['代码']}·{x['市场']}）{x['方向']} {x['评分']}分"]
-        seg.append(f"   现价 {x['现价']}")
+        seg.append(f"   昨收 {x['现价']}")
+        # 买入区间放在最前面。用户开盘时最先要回答的问题是"现在这个价能不能
+        # 下手"，不是"这票多少分"——分数已经在标题行了。
+        if x.get("买入上限"):
+            lo = x.get("买入下沿")
+            if lo:
+                seg.append(f"   买入区间 {lo} ~ {x['买入上限']}")
+                seg.append(f"     低于 {lo} 更好，但那已经贴近止损，跌下去要想想是不是逻辑变了")
+            else:
+                seg.append(f"   买入上限 {x['买入上限']}（不设下沿：均线已高于赔率分界，"
+                           f"这个位置本来就不便宜）")
+            seg.append(f"     高于 {x['买入上限']} 就别追了——那个价位盈亏比会跌破"
+                       f"{_MIN_RR:.0f}:1，赔率不够")
         if x.get("建议股数"):
             seg.append(f"   买入 {x['建议股数']} 股（约 {x['建议金额CNY']:,.0f} 元）"
                        + (f"，每手{x['每手']}股" if x.get("每手", 1) > 1 else ""))
@@ -403,9 +452,16 @@ def render_text(plan: dict) -> str:
         L.append("")
 
     L.append("—— 关于这份清单怎么用 ——")
+    L.append(f"买入上限是算出来的不是估的：买得越高，到目标的空间越小、到止损")
+    L.append(f"的距离越大，赔率越差。上限就是盈亏比正好跌到 {_MIN_RR:.0f}:1 的那个价，")
+    L.append("超过它这笔就不值得做。开盘跳空高开时尤其要看这条线。")
+    L.append("")
     L.append(f"仓位是按“单笔最多亏 {_RISK_PER_TRADE_PCT:.0f}% 本金”反推的：止损越远仓位越小，")
     L.append("所以不同标的的金额不一样，不是随便给的。单笔不超过总资金")
     L.append(f"{_MAX_POSITION_PCT:.0f}%。止损用20日ATR两倍——跌破说明发生的不是日常波动。")
+    L.append("")
+    L.append("注意：上面的价格是昨收，开盘可能跳空。别挂昨收价，看实际开盘价")
+    L.append("落在区间哪个位置再决定。")
     L.append("")
     L.append(plan.get("验证状态", ""))
     return "\n".join(L)
