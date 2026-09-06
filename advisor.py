@@ -1893,37 +1893,9 @@ def _interim_from_web(symbol: str, market: str) -> str:
             "最近一期，网上容易混进去年同期的报道）：\n" + txt[:1500])
 
 
-def _quarterly_text(symbol: str, market: str) -> str:
-    """最近几个季度的营收/毛利/营业利润趋势。
-
-    2026-09-06 接的。这一段回答的是年报回答不了的问题：**最近这几个季度是
-    在加速还是在减速**。扫描时发现原来的财务摘要只有年报，而年报把四个季度
-    揉成一个数字，拐点完全看不见——NVDA 从 Q1 同比 +85.2% 到 Q2 +105.9% 是
-    加速，SK海力士 +198.1% 到 +256.8% 也是加速，这两条在年报里都读不出来。
-
-    对 5-10 天的短线，季度趋势的方向比年报的绝对水平有用得多：市场交易的是
-    预期变化，而不是"这家公司好不好"。
-
-    部分港股中小盘只披露年报（泡泡玛特实测四期全是 FY），这种情况返回空，
-    调用方照常用年报那段，不假装有季度数据。
-    """
-    try:
-        rows = ds.get_quarterly_financials(symbol, market, periods=4)
-    except Exception:
-        return ""
-    # 只保留真正的季度期次。混着年报的话，"环比"在 FY 行上是没有意义的，
-    # 而且会打断季度之间的连续性。
-    qs = [r for r in rows if "Q" in str(r.get("期间", ""))]
-    if not qs:
-        # 富途对部分港股只收录年报（泡泡玛特实测9期全是FY）。但"富途没有"
-        # 不等于"公司没发"——港股是半年报制，泡泡玛特每年8月发中期业绩，
-        # 2026中期营收171.73亿、同比+23.76%，只是没进富途的库。
-        #
-        # 2026-09-06 用户拿 Gemini 的回答指出了这个差别，查证属实：我原来
-        # 说"这支只有年报"，那是从我们数据源看到的，不是事实。数据源缺口
-        # 不该被当成事实告诉用户，能补就补。
-        return _interim_from_web(symbol, market)
-
+def _format_quarters(qs: list) -> str:
+    """把季度数据渲染成几行。抽出来是因为"接口数据够新"和"接口数据过期但
+    仍作为参照"两条路径都要用它。"""
     lines = []
     for r in qs[:4]:
         parts = []
@@ -1944,9 +1916,80 @@ def _quarterly_text(symbol: str, market: str) -> str:
             parts.append(seg)
         if parts:
             lines.append(f"{r['期间']}（期末{r['期末']}）：" + "、".join(parts[:3]))
-    if not lines:
-        return ""
-    return ("最近季度（比年报新，看的是加速还是减速）：\n" + "\n".join(lines))
+    return "\n".join(lines)
+
+
+def _quarterly_text(symbol: str, market: str) -> str:
+    """最近几个季度的营收/毛利/营业利润趋势。
+
+    这一段回答年报回答不了的问题：**最近这几个季度是在加速还是在减速**。
+    年报把四个季度揉成一个数字，拐点完全看不见——NVDA 从 Q1 同比 +85.2%
+    到 Q2 +105.9% 是加速，这条在年报里读不出来。
+
+    2026-09-06 用户要求"最新的财报必须拿到"之后重写了触发逻辑。原来只在
+    "接口完全没有季报"时才走网页兜底，核查发现港股12支里4支漏了最新一期：
+    泡泡玛特/三生制药/思格新能只到2025年报（249天前），国联民生有2026/Q1
+    但那也是159天前的——它们8月都发过中期业绩，接口没收录。
+
+    国联民生那个案例最说明问题：接口"有数据"，所以旧逻辑不触发兜底，但
+    那个数据已经过期两个季度了。**判据必须是时效，不是有没有。**
+    """
+    try:
+        rows = ds.get_quarterly_financials(symbol, market, periods=4)
+    except Exception:
+        rows = []
+    qs = [r for r in rows if "Q" in str(r.get("期间", ""))]
+
+    # 阈值 120 天：港股半年报制，正常节奏下最新一期不会超过这个数
+    # （中期业绩8月发、期末6月底，到9月初是68天）。超了就说明漏了新的一期。
+    _STALE_DAYS = 120
+    fresh = False
+    if qs:
+        try:
+            import datetime as _d
+            age = (_d.date.today() - _d.date.fromisoformat(qs[0]["期末"])).days
+            fresh = age <= _STALE_DAYS
+        except Exception:
+            fresh = True          # 日期解析不了就不判它旧，避免误伤
+
+    if qs and fresh:
+        return "最近季度（比年报新，看的是加速还是减速）：\n" + _format_quarters(qs)
+
+    # 到这里说明：要么没有季报，要么有但已经过期。
+    #
+    # 港股优先走新浪的财报页：它是固定 URL、结构化表格，不经过搜索引擎，
+    # 所以不受 DuckDuckGo 限流影响。2026-09-06 实测这是决定性的差别——
+    # 搜索兜底时三支里两支被限流拿不到，新浪这条五支全部拿到 2026 中报。
+    if market == "HK":
+        try:
+            d = ds.get_hk_interim_sina(symbol)
+        except Exception:
+            d = None
+        if d and d.get("期末") and d.get("营业额"):
+            try:
+                import datetime as _d
+                a = (_d.date.today() - _d.date.fromisoformat(d["期末"])).days
+            except Exception:
+                a = None
+            head = (f"最近一期财报（{d.get('类型') or '期次未标注'}，期末 {d['期末']}"
+                    + (f"，距今 {a} 天" if a is not None else "") + "，来源新浪财经）：")
+            body = f"  营业额 {d['营业额']} 百万、损益额 {d['损益额']} 百万（原币种）"
+            older = ("\n\n（接口能给到的更早期次如下，仅供看趋势）：\n"
+                     + _format_quarters(qs)) if qs else ""
+            return head + "\n" + body + older
+
+    web = _interim_from_web(symbol, market)
+    if web and qs:
+        return (web + "\n\n（接口能给到的最新一期如下，注意它可能已经不是"
+                "最近一期财报）：\n" + _format_quarters(qs))
+    if web:
+        return web
+    # 网页也拿不到（比如被限流）时，有旧季报总比没有强，但要说清楚它旧。
+    if qs:
+        return ("接口最新只到以下期次，可能已不是最近一期财报"
+                "（网页兜底这次也没拿到）：\n" + _format_quarters(qs))
+    return ""
+
 
 
 def _financial_summary_text(symbol: str, market: str) -> str:

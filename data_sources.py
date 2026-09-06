@@ -2846,6 +2846,78 @@ def get_quarterly_financials(symbol: str, market: str, periods: int = 4) -> list
     return out
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_hk_interim_sina(symbol: str) -> dict:
+    """港股最近一期财报（含中期）——从新浪港股财报页读，不经过搜索引擎。
+
+    2026-09-06 用户要求"最新的财报必须拿到"。富途对部分港股只收录年报
+    （泡泡玛特9期全是FY），而网页兜底依赖 DuckDuckGo，一被限流就整条链路
+    失效——实测三支里两支拿不到。
+
+    新浪的港股财报页是固定 URL（stock.finance.sina.com.cn/hkstock/finance/
+    <5位代码>.html），不需要搜索，而且给的是结构化表格：截止日期、**公布
+    日期**、报表类型（中报/年报）、营业额、损益额一行行排开。港股公告日
+    这个东财接口拿不到的字段，这里也有。
+
+    实测泡泡玛特：截止 2026-06-30、公布 2026-08-20、中报、营业额 19771.94
+    （单位是百万港元，即197.7亿）。这正是接口漏掉的那一期。
+
+    返回 {"期间","期末","公布日","类型","营业额","损益额","单位"}，
+    拿不到返回 {}。
+    """
+    code = "".join(ch for ch in str(symbol or "") if ch.isdigit()).zfill(5)
+    if not code.strip("0"):
+        return {}
+    try:
+        import web_research
+        # 12000 而不是 6000："公布日期"那一行排在表格靠后的位置，6000字截断
+        # 后正好落在外面——第一版因此拿到的公布日永远是空的，而其它字段都
+        # 正常，看起来像"新浪没这个字段"。
+        txt = web_research.read_url(
+            f"https://stock.finance.sina.com.cn/hkstock/finance/{code}.html",
+            max_chars=12000)
+    except Exception:
+        return {}
+    if not txt:
+        return {}
+
+    def cells(label):
+        m = re.search(rf"\|\s*{label}\s*\|([^\n]+)", txt)
+        if not m:
+            return []
+        return [c.strip() for c in m.group(1).split("|")]
+
+    ends = cells("截止日期")
+    types = cells("报表类型")
+    pubs = cells("公布日期")
+    revs = cells("营业额")
+    pls = cells("损益额")
+    if not ends:
+        return {}
+
+    # 取第一个**有金额**的列。新浪这张表同一个期末可能出现两列（不同报表
+    # 口径），其中一列的金额是空的——国联民生实测第一列就是空的，直接取
+    # index 0 会得到一份只有日期没有数字的记录。
+    idx = 0
+    for i in range(min(len(ends), len(revs))):
+        if revs[i]:
+            idx = i
+            break
+
+    def at(arr, i):
+        return arr[i] if i < len(arr) and arr[i] else ""
+
+    return {
+        "期末": at(ends, idx),
+        "公布日": at(pubs, idx),
+        "类型": at(types, idx),
+        "营业额": at(revs, idx),
+        "损益额": at(pls, idx),
+        # 新浪这张表的金额单位是百万（原币种），不是元也不是亿。
+        "单位": "百万",
+    }
+
+
 class _EmptyLookup(Exception):
     """查询成功但结果为空。用异常表达是为了绕过 st.cache_data——它不缓存
     抛异常的调用，正好是我们要的"失败不要污染缓存"。
