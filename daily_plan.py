@@ -97,7 +97,12 @@ _HK_LOT_FALLBACK = 100
 # 每档一组 (标签, 止损ATR倍数, 找阻力时优先看几日高点)。
 _HORIZONS = (
     ("超短线1-2天", 1.0, (5,)),
-    ("短线5-10天", 1.5, (10, 20)),
+    # 2026-09-06 二次收缩：用户"我现在不需要五到十天了，我现在想要的是
+    # 五个交易日内，超短线"。主档从5-10天压到3-5天，止损倍数跟着从1.5降到
+    # 1.25——持有期短一半，能容忍的回撤也该更小，否则止损宽度相对于目标
+    # 距离过大，赔率会被结构性压低。阻力窗口从(10,20)收到(5,10)：20日高点
+    # 是四周才可能摸到的位置，拿它给五天的交易当目标就是老错误的重演。
+    ("短线3-5天", 1.25, (5, 10)),
 )
 
 
@@ -232,10 +237,32 @@ def _analyst_target(symbol: str, market: str, last: float) -> float | None:
         return None
 
 
+def _ma20_falling(symbol: str, market: str) -> bool | None:
+    """20日均线是不是在往下走。拿不到数据返回 None（不当成"在跌"）。
+
+    方向用"今天的MA20 vs 5个交易日前的MA20"，跟 advisor._recent_structure_text
+    同一套口径，两边对同一支票的结论必须一致。
+    """
+    try:
+        import datetime as _d
+        _e = _d.date.today()
+        _s = _e - _d.timedelta(days=90)
+        df = ds.get_stock_history(symbol, _s.isoformat(), _e.isoformat(), "d", market)
+        if df is None or getattr(df, "empty", True):
+            return None
+        col = "收盘" if "收盘" in df.columns else "close"
+        closes = df[col].astype(float).tolist()
+        if len(closes) < 25:
+            return None
+        return (sum(closes[-20:]) / 20) < (sum(closes[-25:-5]) / 20)
+    except Exception:
+        return None
+
+
 def _target_price(symbol: str, market: str, last: float,
                   atr: float | None,
                   windows: tuple[int, ...] | None = None) -> tuple[float | None, str]:
-    """短线目标价：5-10天能摸到的位置。
+    """短线目标价：5个交易日内能摸到的位置。
 
     2026-09-06 用户指出的口径错配：之前直接用机构一致预期当目标价，但那
     普遍是 12 个月目标，而他做的是 1-4 周短线。用一年期目标算盈亏比，
@@ -325,7 +352,12 @@ def _target_price(symbol: str, market: str, last: float,
     if atr and hi20 and lo20 is not None:
         span = hi20 - lo20
         if span >= atr:
-            tgt = last + min(span, 4 * atr)
+            # 上限跟着持有期走，不再写死4倍。随机游走下N天的合理行程约
+            # ATR×√N：5天≈2.2倍，2天≈1.4倍。持有期缩到5天以内之后还留着
+            # 4倍上限，等于允许目标定在十几天才够得着的位置。
+            _days = max(windows) if windows else 5
+            _cap = max(_days ** 0.5, 1.4) * atr
+            tgt = last + min(span, _cap)
             return tgt, f"量度幅度·20日区间高度{span / last * 100:.1f}%投影"
     if atr:
         days = max(windows) if windows else 10
@@ -452,6 +484,60 @@ def _build_item(rec: dict) -> dict | None:
                        f"{cap_limit:,.0f} 元（本金的{_MAX_POSITION_PCT:.0f}%）")
             rec["_不可执行原因"] = why
 
+    # 趋势闸门：20日均线向下就不做多头进场。
+    #
+    # 2026-09-06 用户问"为什么携程是跨过门槛的独苗"，查出来的答案很难看：
+    # 携程之所以唯一达标，正因为它跌得最惨——20日均线向下、现价低于均线
+    # 7.2%、处在20日区间1%分位、近5个交易日 -9.4%。而目标价取的是上方最近
+    # 的高点，一支票只有先跌下来、头顶才会留下一个"很远的高点"当目标，于是
+    # 算出 2.90:1 的漂亮赔率。同期贴着高点走的小米，10日高点只在 +2.5% 处，
+    # 赔率 0.43。
+    #
+    # 也就是说这道"盈亏比≥2.5"的闸门，实质上是一台"谁刚崩过"的筛选器——
+    # 穿着风控的外衣干抄底的活，而且跟打分那边的方向正好相反：打分刚改成
+    # 惩罚下跌趋势（均线向下最高10分），携程只拿70分，闸门却把它推成第一。
+    # 系统的两半在选相反的东西。
+    #
+    # 换成量度幅度目标也挡不住：携程区间宽、ATR大，算出来照样 2.67。所以
+    # 这件事不能靠调目标算法解决，得是一条独立的规则——5-10天的多头窗口里
+    # 不接下落的刀。想抄底要等止跌证据（放量企稳、跌破后快速收回），那是
+    # 另一套判断，不该混在"赔率够不够"里。
+    #
+    # 不是直接删掉，而是标成不可执行并说明原因：用户仍然能在观察档看到它，
+    # 知道系统看见了这支票、也知道为什么没推。
+    _falling = _ma20_falling(symbol, market)
+    _trigger = None
+    if _falling:
+        # 不禁掉，单独分档并给出触发条件。
+        #
+        # 第一版我直接标成"不可执行、赔率再好也不接刀"，用户反问"抄底不是
+        # 挺好的吗，你在担心什么"——他是对的，抄底是正当策略，我不该单方面
+        # 把它整个关掉。担心的应该是三件具体的事，不是这个想法本身：
+        #
+        # 1) 那个赔率是循环论证出来的。分子来自"回到10日高点366"，而这个
+        #    高点是崩盘之前留下的——跌得越狠，头顶的高点越远，赔率越漂亮。
+        #    赔率是由下跌本身制造的，不是由任何"会涨回去"的证据支撑的。
+        # 2) 时间窗口对不上。均值回归可能发生，但没有理由恰好在5-10天内
+        #    发生，而系统对"什么时候"没有任何判断。
+        # 3) 真正的问题是进场时点：清单会让用户当下按现价买，而抄底的正确
+        #    做法是等止跌证据，不是在下落途中接。
+        #
+        # 所以给触发价：收盘重新站上5日高点，才算跌势暂停。在那之前这支票
+        # 留在单独一档里，用户看得见、也知道等什么。触发价用5日高点而不是
+        # MA20：MA20在下跌趋势里往往还在很上方（携程的MA20比现价高7.2%），
+        # 等到那里赔率早就变了；5日高点是"最近这几天的卖压被吃掉了"这个
+        # 事实的最低门槛。
+        try:
+            import datetime as _d
+            _e2 = _d.date.today()
+            df2 = ds.get_stock_history(symbol, (_e2 - _d.timedelta(days=30)).isoformat(),
+                                       _e2.isoformat(), "d", market)
+            if df2 is not None and not getattr(df2, "empty", True):
+                hcol = "最高" if "最高" in df2.columns else "high"
+                _trigger = round(float(max(df2[hcol].tolist()[-5:])), 2)
+        except Exception:
+            _trigger = None
+
     # 规模检查针对机构那个12个月目标——短线目标通常只有几个点的空间，
     # 算隐含市值没有意义。
     reality = _reality_check(symbol, market, last, analyst_t)
@@ -473,6 +559,8 @@ def _build_item(rec: dict) -> dict | None:
         "建议股数": shares,
         "建议金额CNY": amount_cny,
         "不可执行原因": rec.get("_不可执行原因"),
+        "下跌趋势": bool(_falling),
+        "止跌触发价": _trigger,
         "最小单位金额CNY": round(lot * last * fx, 0) if fx > 0 else None,
         "每手": lot,
         "ATR20": round(float(atr), 3) if atr else None,
@@ -696,10 +784,13 @@ def render_text(plan: dict) -> str:
         L.append("")
 
     watch = plan.get("关注候选") or []
-    tradable, unaffordable, low_rr = [], [], []
+    tradable, unaffordable, low_rr, dip = [], [], [], []
     for x in watch:
         rr_ok = (x.get("盈亏比") or 0) >= _MIN_RR
-        if x.get("建议股数") and rr_ok:
+        if rr_ok and x.get("下跌趋势"):
+            # 赔率够但处在下跌趋势——单独一档，等止跌信号，不混进可直接下单的
+            dip.append(x)
+        elif x.get("建议股数") and rr_ok:
             tradable.append(x)
         elif rr_ok and x.get("不可执行原因"):
             # 赔率够但本金不够。这类要单独列——它是"资金规模的约束"，
@@ -726,6 +817,22 @@ def render_text(plan: dict) -> str:
             L.append(f"      {x['不可执行原因']}")
         L.append("   这几支不是不该买，是被本金规模或集中度上限挡住了。")
         L.append("   资金加上去之后它们会自动进第二档。")
+        L.append("")
+
+    if dip:
+        L.append(f"三点五、抄底候选（{len(dip)}支，赔率够但还在下跌趋势里）")
+        for x in dip:
+            L.append(f"   {x['名称']}（{x['代码']}）{x['评分']}分 现价{x['现价']} "
+                     f"盈亏比{x.get('盈亏比') or 0:.1f}")
+            if x.get("止跌触发价"):
+                up = (x["止跌触发价"] - x["现价"]) / x["现价"] * 100
+                L.append(f"      触发价 {x['止跌触发价']}（+{up:.1f}%）：收盘站上5日高点"
+                         f"才算跌势暂停，在那之前不进")
+            else:
+                L.append("      20日均线向下，等站稳再说")
+        L.append("   这一档的赔率是跌出来的——跌得越狠，头顶那个高点越远，")
+        L.append("   算出来的赔率越漂亮，但那不是\"会涨回去\"的证据。抄底可以做，")
+        L.append("   要等止跌信号再进，别在下落途中接。")
         L.append("")
 
     if low_rr:

@@ -29,6 +29,9 @@
     python3 sim_health_check.py                 # 总是输出（健康时也报一句平安）
     python3 sim_health_check.py --only-problems # 没问题就什么都不输出
 """
+import os
+import time
+import hashlib
 import json
 import sqlite3
 import sys
@@ -152,10 +155,15 @@ def check(db_path: Path = _DB) -> list[str]:
                 worst = (streak_key, streak)
         if worst:
             (sym, reason), n = worst
+            # 文案不再断言"额度口径对不上"。2026-09-06这条告警连推了几个小时，
+            # 而真实原因不是口径不一致（预算文案和拦截逻辑在09-04已经对齐成
+            # min(预算剩余,现金)）：是虚拟现金只剩 HK$3,541，而美光一股约
+            # HK$7,929，AI 连最小单位都买不起，却仍然在候选清单里看到它。
+            # 写死一个可能不成立的原因会把排查往错的方向带，只报事实。
             problems.append(
                 f"[反复空转] {sym} 连续{n}轮因为「{reason}」被拦截未成交——"
-                f"喂给AI的可用额度跟代码实际拦截的口径很可能对不上，AI在按一个不成立的数字反复下注，"
-                f"每轮都白烧一次AI调用"
+                f"AI 在反复开一笔开不成的单，每轮白烧一次调用。"
+                f"先看这支票的最小可买单位是不是已经超过本轮可用额度"
             )
 
         # 3) 连续失败
@@ -243,9 +251,51 @@ def check(db_path: Path = _DB) -> list[str]:
     return problems
 
 
+# 同一条告警的静默期。体检每30分钟跑一次，而"反复空转"这类问题在人去修它
+# 之前会一直成立——2026-09-06 用户收到的是18:51/19:21/19:51 三条一字不差的
+# 微信推送，问"open claw这边一直在给我发啥"。重复推送不增加任何信息，只会
+# 让真正的新问题淹没在噪音里，久了用户就不看了。
+#
+# 按问题内容做指纹，同一条在静默期内只推一次；内容变了（比如连续轮数从5变
+# 成9、或者换了一支票）算新问题，立即推。修好之后指纹自然消失，下次再出现
+# 也会正常推。
+_ALERT_SILENCE_HOURS = 6
+_ALERT_STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "health_alert_state.json")
+
+
+def _filter_repeats(problems: list[str]) -> list[str]:
+    """滤掉静默期内重复的告警，返回这次真正要推的那些。"""
+    now = time.time()
+    try:
+        with open(_ALERT_STATE, encoding="utf-8") as f:
+            seen = json.load(f)
+    except Exception:
+        seen = {}
+    if not isinstance(seen, dict):
+        seen = {}
+
+    fresh, cutoff = [], now - _ALERT_SILENCE_HOURS * 3600
+    for p in problems:
+        fp = hashlib.md5(p.encode("utf-8")).hexdigest()[:16]
+        if seen.get(fp, 0) < cutoff:
+            fresh.append(p)
+        seen[fp] = now
+    # 过期指纹清掉，文件不会无限长
+    seen = {k: v for k, v in seen.items() if v >= cutoff}
+    try:
+        os.makedirs(os.path.dirname(_ALERT_STATE), exist_ok=True)
+        with open(_ALERT_STATE, "w", encoding="utf-8") as f:
+            json.dump(seen, f)
+    except Exception:
+        pass
+    return fresh
+
+
 def main():
     only_problems = "--only-problems" in sys.argv
     problems = check()
+    if problems and "--no-dedup" not in sys.argv:
+        problems = _filter_repeats(problems)
     if problems:
         print("AI模拟盘体检发现问题：")
         for p in problems:

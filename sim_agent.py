@@ -918,7 +918,33 @@ def _run_cycle_locked(email: str) -> dict:
         tag = f"[{asset_class}] " if asset_class and asset_class != "个股" else ""
         return f"- {tag}{c['name']}（{c['symbol']}·{c['market']}）：" + "，".join(parts)
 
-    candidates_text = "\n".join(_fmt_candidate(c) for c in candidates) if candidates else "（当前开盘市场暂时没有可用的候选股行情）"
+    # 买不起的候选要标出来。2026-09-06真实故障：虚拟现金只剩 HK$3,541，而
+    # 美光(MU)一股 1016.59 美元 ≈ HK$7,929——AI 连开 5 轮"买入 MU 1股"，
+    # 每轮都被预算闸拦掉，体检脚本每30分钟往微信推一次同样的告警。
+    #
+    # AI 并没有算错账，是我们让它做了一道它没有条件做对的题：候选清单里
+    # 摆着 MU，价格是美元、额度是港币，要它自己换算完再逐个比对最小可买
+    # 单位——1股已经是最小单位了，它想买就只能开这一笔，然后必然被拦。
+    # 不该把买不起的东西摆在货架上再罚它伸手。
+    #
+    # 所以在清单里就地标注"本轮买不起"，而不是直接删掉：删掉的话 AI 不知道
+    # 这支票存在，也就无从判断"它值得关注但现在没钱"；标注出来它可以照常
+    # 做卖出/观望的判断，只是不会再往这上面开买单。
+    _usd_hkd, _cny_hkd = _fx_rates()
+
+    def _min_unit_hkd(c: dict) -> float:
+        lot = c.get("lot_size") or 1
+        rate = {"US": _usd_hkd, "CC": _usd_hkd, "A": _cny_hkd}.get(c.get("market"), 1.0)
+        return (c.get("price") or 0) * lot * rate
+
+    def _fmt_candidate_afford(c: dict) -> str:
+        line = _fmt_candidate(c)
+        need = _min_unit_hkd(c)
+        if need > spendable_hkd > 0:
+            line += f"　【本轮买不起：最小可买单位约 HK${need:,.0f}，超过本轮可用 HK${spendable_hkd:,.0f}，不要对它开买入】"
+        return line
+
+    candidates_text = "\n".join(_fmt_candidate_afford(c) for c in candidates) if candidates else "（当前开盘市场暂时没有可用的候选股行情）"
 
     # 粗粒度市场情绪——候选股本身就是当天热门/活跃股，涨跌比例能大致反映
     # "今天这个市场整体是risk-on还是risk-off"，不用额外接指数数据源。只是
