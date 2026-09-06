@@ -1497,6 +1497,25 @@ def _analyst_view_text(symbol: str, market: str, price: float | None = None) -> 
 
     consensus = _analyst_consensus_text(symbol, market)
     if consensus:
+        # 目标价相对现价的涨跌幅由代码算好，不让模型自己算。
+        #
+        # 2026-09-06 一天之内三次算错这个数：三生制药写"目标价隐含144%上行"
+        # （36.43/16.24 实际是 +124%）；加拿大鹅写"目标价均值9.04隐含下行
+        # 空间"，而 9.04 比现价 8.14 高 11%，方向都反了；耐克那次倒是算对了。
+        #
+        # 这类错误对用户是有实际后果的：他要照着这份判断决定买不买，"隐含
+        # 下行"和"隐含上行11%"是相反的结论。而这是一次除法，规则算永远比
+        # 模型算可靠——凡是代码能确定的量就不要留给模型推断，跟内部人交易
+        # 那条同一个原则。
+        try:
+            c = ds.get_analyst_consensus(symbol, market)
+            avg = float((c or {}).get("average") or 0)
+        except Exception:
+            avg = 0.0
+        if avg > 0 and price and price > 0:
+            pct = (avg - price) / price * 100
+            consensus += (f"（目标价均值较现价{price:.2f}"
+                          f"{'高' if pct >= 0 else '低'}{abs(pct):.1f}%）")
         parts.append("一致预期：" + consensus)
 
     # 评级变动：接口返回的是全市场近期变动，按代码过滤出这一支
