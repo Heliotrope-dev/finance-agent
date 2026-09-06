@@ -1416,6 +1416,84 @@ _BENCH = {"HK": ("HK.800000", "恒生指数"), "US": ("US.SPY", "标普500(SPY)"
           "A": ("SH.000001", "上证指数")}
 
 
+def _flow_and_rivals_text(symbol: str, market: str, name: str) -> str:
+    """接口拿不到、但会直接改变结论的三块：个股南向资金、卖空异动、竞品动向。
+
+    2026-09-06 让 AI 列缺口时它排了8条，其中"南向资金细分流向""行业竞争
+    动态""高频经营数据"富途都没有现成接口。接了 Serper 之后能补上，而且
+    实测出来的东西直接改判断：
+
+      泡泡玛特港股通持股 6月19日 2.32亿股 -> 8月18日 1.99亿股（占比17%
+      降到14.83%），同期卖空股数激增超5倍，交银国际降评级至中性、目标价
+      下调至174.8。
+
+    这些都是原有数据块里完全没有的：项目的南向资金是全市场汇总数（"今日
+    净流出100亿"），看不出具体到这一支是被买还是被卖；而个股层面的持续
+    减持配上卖空激增，是比任何技术指标都硬的抛压证据。
+
+    刻意只取搜索摘要不抓正文：这类信息的价值在于"有没有发生"，摘要里
+    的一句话就够了，抓正文只会把提示词撑爆。
+    """
+    if not name:
+        return ""
+    try:
+        import datetime as _d
+        import web_research
+        _y = _d.date.today().year
+    except Exception:
+        return ""
+
+    parts = []
+    queries = []
+    if market == "HK":
+        queries.append(("资金与沽空",
+                        f"{name} {symbol} 港股通 南向资金 持股 变动 沽空 {_y}"))
+    queries.append(("经营与竞争", f"{name} {_y} 销售 数据 竞争 行业 最新"))
+
+    for label, q in queries:
+        try:
+            hits = web_research.search(q, limit=4)
+        except Exception:
+            continue
+        segs = []
+        for h in hits:
+            sn = (h.get("snippet") or "").strip()
+            if not sn or not any(c.isdigit() for c in sn):
+                continue
+            # 挡掉导航页。这类页面的摘要是"用XX查看某股票的价格、即时报价、
+            # 历史走势图"，含数字但没有任何事实，混进去只是噪音。
+            if any(k in sn for k in ("即時報價", "即时报价", "历史走势图",
+                                     "歷史走勢圖", "行情走势", "查看")):
+                continue
+            # 时效过滤：搜索引擎给了日期的，超过90天的丢掉——这一段要的是
+            # "最近发生了什么"，半年前的报道会把判断带偏。没给日期的保留，
+            # 但提示词里已经要求AI核对时间。
+            d = h.get("date") or ""
+            if d:
+                import re as _re
+                m = _re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", d)
+                if m:
+                    try:
+                        import datetime as _dd
+                        age = (_dd.date.today() - _dd.date(int(m.group(1)),
+                               int(m.group(2)), int(m.group(3)))).days
+                        if age > 90:
+                            continue
+                    except Exception:
+                        pass
+            tag = f"，{d}" if d else ""
+            segs.append(f"- {sn[:170]}（{h.get('domain','')}{tag}）")
+            if len(segs) >= 3:
+                break
+        if segs:
+            parts.append(f"【{label}】\n" + "\n".join(segs))
+
+    if not parts:
+        return ""
+    return ("以下来自公开网页（接口没有这类数据，可靠性低一档，"
+            "引用时注明出处并核对时间）：\n" + "\n".join(parts))
+
+
 def _corporate_actions_text(symbol: str, market: str) -> str:
     """公司行为：大股东增减持、回购、人效。
 
@@ -2479,6 +2557,12 @@ def _judge_one(item: dict, source: str) -> dict | None:
     _act = _corporate_actions_text(symbol, market)
     if _act:
         chips = (chips + "\n\n" if chips else "") + _act
+    # 个股资金流向、沽空异动、竞品动向。只在持仓判断这条路径上取——
+    # 它要两次搜索调用，候选池初筛几十上百支跑不起这个开销。
+    if holding:
+        _flow = _flow_and_rivals_text(symbol, market, name)
+        if _flow:
+            chips = (chips + "\n\n" if chips else "") + _flow
 
     # 市场环境（2026-09-06）。放在最后拼进去，因为它是所有个股数据的
     # 背景板——先读完个股再看环境，跟人的判断顺序一致。
