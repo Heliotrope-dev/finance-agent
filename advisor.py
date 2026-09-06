@@ -1845,36 +1845,52 @@ def _fmt_money(v) -> str:
 def _interim_from_web(symbol: str, market: str) -> str:
     """接口没有季报/中期报告时，去公开网页找最近一期业绩。
 
-    只取搜索结果的标题，不抓正文。财经媒体的标题在这类新闻上信息密度极高
-    ——"泡泡玛特发布2026财年中期业绩：总营业额171.73亿人民币，同比增长
-    23.76%；归母净利润50.38亿人民币，同比增长10.14%"，一句话把要点都给全了，
-    而抓正文要多花十几倍时间还容易撞上登录墙。
+    2026-09-06 第一版只搜代码、只取标题，结果比没有数据更糟：泡泡玛特搜到
+    的三条标题里，两条没有具体数字，第三条是"上半年净利大增近4倍"——那是
+    **2025年**的中期数据。而 2026 中期实际是营收+23.76%、净利+10.14%，
+    增速已经从上一年的+184.7%断崖式回落。喂一条旧的乐观标题进去，等于在
+    强化一个已经过时的判断，比留空危险得多。
 
-    明确标注来源是网页而不是接口。这类数据没有经过接口的结构化校验，AI
-    引用时要知道它的可靠性低一档。
+    用户凭记忆指出"POP mart 上个月刚发财报，跌了不少"，才发现这个洞。
+
+    三处改动：
+      搜索词用公司名 + 当前年份，不用股票代码——搜索引擎对代码的匹配质量
+      明显差一档，而年份能把去年的同期新闻挡掉大半。
+      抓一条正文。标题的信息密度虽高，但正文才能确认年份和完整数字。
+      要求内容里同时出现当前年份和百分比，否则宁可返回空——留空会让 AI
+      在"数据确定性"上扣分，那是正确的反应；给一条时效不明的材料，它反而
+      会当成事实用。
     """
     try:
+        import datetime as _d
         import web_research
-        name_hint = {"HK": "港股", "US": "美股"}.get(market, "")
-        hits = web_research.search(
-            f"{symbol} {name_hint} 最新 中期业绩 半年报 营收 净利润", limit=6)
+
+        # 公司名比代码好搜。拿不到就退回代码，总比不搜强。
+        name = ""
+        try:
+            prof = ds.get_company_profile_text(symbol, market) or ""
+            import re as _re
+            m = _re.search(r"公司名称：([^；]+)", prof)
+            if m:
+                name = m.group(1).strip()
+        except Exception:
+            pass
+        key = name or symbol
+        year = _d.date.today().year
+        txt = web_research.research(
+            f"{key} {year} 中期业绩 半年报 营收 同比 净利润",
+            read_top=1, limit=6, max_chars=2000)
     except Exception:
         return ""
-    if not hits:
+    if not txt:
         return ""
-    # 只留看起来真的在报业绩的标题：含数字且含营收/净利这类词。
-    keep = []
-    for h in hits:
-        t = str(h.get("title") or "")
-        if any(k in t for k in ("营收", "营业额", "净利", "业绩", "中报", "半年报")) \
-                and any(c.isdigit() for c in t):
-            keep.append(f"- {t[:110]}（{h.get('domain','')}）")
-        if len(keep) >= 3:
-            break
-    if not keep:
+
+    # 时效性和具体性两道闸门。少了任何一道，这段材料的价值都是负的。
+    if str(year) not in txt or "%" not in txt:
         return ""
-    return ("接口没有季度/中期财报，以下来自公开网页报道（可靠性低于接口数据，"
-            "引用时说明出处）：\n" + "\n".join(keep))
+    return (f"接口没有季度/中期财报，以下来自公开网页报道（{year}年，"
+            "可靠性低于接口数据，引用时说明出处；注意核对期间是否真的是"
+            "最近一期，网上容易混进去年同期的报道）：\n" + txt[:1500])
 
 
 def _quarterly_text(symbol: str, market: str) -> str:
