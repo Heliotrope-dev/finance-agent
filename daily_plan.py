@@ -69,6 +69,24 @@ _MAX_POSITION_PCT = 30.0
 # 港股每手股数。仓位要按手取整，不然算出来的股数根本下不了单。
 _HK_LOT_FALLBACK = 100
 
+# ---- 两档持有周期 ----
+#
+# 2026-09-06 用户把周期从"1-4周"缩到"5-10天，甚至再加1-2天的超短期"。
+# 周期一变，止损和目标位都必须跟着变，否则会算出系统性偏差的赔率：
+#
+#   止损距离要跟持有时间匹配。2倍ATR 是给四周持有用的——那个窗口里价格
+#   有足够时间在噪音里来回，需要宽止损才不会被扫。压到5-10天之后同样的
+#   宽度就成了纯粹的浪费：既承担了四周的下行，又只吃一周的上行，赔率
+#   天然算不出来。
+#
+#   目标位同理，从"20日高点"缩到"5日/10日高点"。
+#
+# 每档一组 (标签, 止损ATR倍数, 找阻力时优先看几日高点)。
+_HORIZONS = (
+    ("超短线1-2天", 1.0, (5,)),
+    ("短线5-10天", 1.5, (10, 20)),
+)
+
 
 def _atr(symbol: str, market: str, days: int = 20) -> float | None:
     """20日平均真实波幅。止损距离的客观标尺。"""
@@ -202,8 +220,9 @@ def _analyst_target(symbol: str, market: str, last: float) -> float | None:
 
 
 def _target_price(symbol: str, market: str, last: float,
-                  atr: float | None) -> tuple[float | None, str]:
-    """短线目标价：1-4周能摸到的位置。
+                  atr: float | None,
+                  windows: tuple[int, ...] | None = None) -> tuple[float | None, str]:
+    """短线目标价：5-10天能摸到的位置。
 
     2026-09-06 用户指出的口径错配：之前直接用机构一致预期当目标价，但那
     普遍是 12 个月目标，而他做的是 1-4 周短线。用一年期目标算盈亏比，
@@ -224,30 +243,43 @@ def _target_price(symbol: str, market: str, last: float,
     机构目标价不丢弃，另外单独显示并标注 12 个月口径，让用户知道长期空间
     在哪，但不拿它算短线赔率。
     """
-    hi20 = hi60 = None
+    hi5 = hi10 = hi20 = None
     try:
         import datetime as _d
         _e = _d.date.today()
-        _s = _e - _d.timedelta(days=110)
+        _s = _e - _d.timedelta(days=60)
         df = ds.get_stock_history(symbol, _s.isoformat(), _e.isoformat(), "d", market)
         if df is not None and not getattr(df, "empty", True):
             col = "最高" if "最高" in df.columns else "high"
             highs = df[col].tolist()
+            if len(highs) >= 5:
+                hi5 = max(highs[-5:])
+            if len(highs) >= 10:
+                hi10 = max(highs[-10:])
             if len(highs) >= 20:
                 hi20 = max(highs[-20:])
-            if len(highs) >= 60:
-                hi60 = max(highs[-60:])
     except Exception:
         pass
 
-    # 取第一个还在现价上方的阻力位——已经突破的高点不再是阻力。
-    # 至少高出 0.5% 才算有空间，否则等于"目标就是现价"。
-    for lvl, label in ((hi20, "20日高点"), (hi60, "60日高点")):
+    # 2026-09-06 用户把持有周期从"1-4周"缩到"5-10天，甚至1-2天超短期"。
+    # 阻力位的选择要跟着缩：20日高点是四周才可能摸到的位置，用它给一周的
+    # 交易算目标，等于把四周的空间记在一周的账上——跟之前拿12个月机构目标
+    # 算短线赔率是同一类错误，只是尺度小一些。
+    #
+    # 改成从近到远逐级找第一个还在现价上方的阻力：5日高点（超短线能到的）、
+    # 10日高点（一到两周）、20日高点（兜底）。至少高出 0.5% 才算有空间，
+    # 否则等于"目标就是现价"。
+    pool = {5: (hi5, "5日高点"), 10: (hi10, "10日高点"), 20: (hi20, "20日高点")}
+    for d in (windows or (5, 10, 20)):
+        lvl, label = pool.get(d, (None, ""))
         if lvl and lvl > last * 1.005:
-            return lvl, f"{label}·短线阻力"
+            return lvl, f"{label}·阻力"
 
+    # 全部突破时按 ATR 外推。倍数跟着周期走：超短线看 1 倍（这只票平常
+    # 一天能走多远），短线看 1.5 倍。
     if atr:
-        return last + 2 * atr, "现价+2倍ATR·已突破近期高点"
+        mult = 1.0 if (windows and max(windows) <= 5) else 1.5
+        return last + mult * atr, f"现价+{mult}倍ATR·已突破近期高点"
     return None, ""
 
 
@@ -265,10 +297,29 @@ def _build_item(rec: dict) -> dict | None:
         return None
 
     atr = _atr(symbol, market)
-    # 止损：2倍ATR。拿不到ATR时退回8%——那是个明确标注为兜底的粗略值，
-    # 不假装它跟ATR一样有依据。
-    stop = last - 2 * atr if atr else last * 0.92
-    stop_pct = (stop - last) / last * 100
+
+    # 两档周期各算一组止损/目标/盈亏比/仓位。同一支票在不同持有周期下
+    # 结论可以完全不同——刚冲高的票超短线该等回踩，但一周维度上趋势没坏，
+    # 给一个模糊的中间答案不如把两档都摆出来让用户按自己的时间安排选。
+    plans = []
+    for label, atr_mult, wins in _HORIZONS:
+        h_stop = last - atr_mult * atr if atr else last * 0.95
+        h_stop_pct = (h_stop - last) / last * 100
+        h_tgt, h_src = _target_price(symbol, market, last, atr, windows=wins)
+        h_rr = ((h_tgt - last) / (last - h_stop)) if (h_tgt and h_stop < last) else None
+        plans.append({
+            "周期": label, "止损": round(float(h_stop), 3),
+            "止损幅度": round(h_stop_pct, 1),
+            "目标": round(float(h_tgt), 3) if h_tgt else None,
+            "目标来源": h_src,
+            "盈亏比": round(h_rr, 2) if h_rr else None,
+        })
+
+    # 主口径仍用短线档（5-10天），清单的仓位和买入区间按它算——那是用户
+    # 的默认周期。超短线档作为附加信息展示。
+    main = plans[-1]
+    stop = main["止损"]
+    stop_pct = main["止损幅度"]
 
     hi52, lo52 = q.get("52周最高"), q.get("52周最低")
     pos_pct = None
@@ -276,7 +327,7 @@ def _build_item(rec: dict) -> dict | None:
         pos_pct = (last - lo52) / (hi52 - lo52) * 100
 
     # ---- 目标价与盈亏比 ----
-    target, t_src = _target_price(symbol, market, last, atr)
+    target, t_src = main["目标"], main["目标来源"]
     analyst_t = _analyst_target(symbol, market, last)
     rr = None
     if target and target > last and stop < last:
@@ -357,6 +408,7 @@ def _build_item(rec: dict) -> dict | None:
     return {
         "代码": symbol, "市场": market, "名称": rec.get("name") or symbol,
         "规模提示": reality,
+        "两档": plans,
         "方向": rec.get("action"), "评分": rec.get("score"),
         "现价": round(float(last), 3),
         "止损参考": round(float(stop), 3),
@@ -514,17 +566,20 @@ def render_text(plan: dict) -> str:
                        + (f"，每手{x['每手']}股" if x.get("每手", 1) > 1 else ""))
         else:
             seg.append("   仓位：算不出（缺资金规模或汇率），先不下单")
-        seg.append(f"   止损 {x['止损参考']}（{x['止损幅度']}%）")
-        if x.get("目标价"):
-            up = (x["目标价"] - x["现价"]) / x["现价"] * 100
-            seg.append(f"   目标 {x['目标价']}（+{up:.1f}%，{x['目标来源']}）")
-        if x.get("盈亏比"):
-            need = 100 / (1 + x["盈亏比"])
-            seg.append(f"   短线盈亏比 {x['盈亏比']:.1f}:1，胜率超过 {need:.0f}% 就是正期望")
-        elif x.get("目标价"):
-            seg.append("   算不出盈亏比（目标或止损缺一个）")
-        else:
-            seg.append("   上方没有明确阻力位，只做止损参考")
+
+        # 两档周期并排。同一支票超短线和短线的赔率经常差很多——刚冲高的
+        # 票超短线上方没空间，但一周维度上还有一段，分开看才知道该不该等。
+        for h in (x.get("两档") or []):
+            if h.get("盈亏比"):
+                need = 100 / (1 + h["盈亏比"])
+                seg.append(f"   [{h['周期']}] 止损 {h['止损']}（{h['止损幅度']}%）"
+                           f" 目标 {h['目标']}（{h['目标来源']}）"
+                           f" 盈亏比 {h['盈亏比']:.1f}:1，胜率>{need:.0f}%即正期望")
+            elif h.get("目标"):
+                seg.append(f"   [{h['周期']}] 止损 {h['止损']}（{h['止损幅度']}%）"
+                           f" 目标 {h['目标']} — 赔率不足")
+            else:
+                seg.append(f"   [{h['周期']}] 上方无明确阻力，只做止损参考")
         # 机构目标单独一行并标明 12 个月口径。它跟上面的短线目标是两个
         # 时间尺度，并排放又不标注的话，人会默认它们说的是同一段时间。
         if x.get("机构12月目标"):
