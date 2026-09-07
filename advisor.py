@@ -266,7 +266,8 @@ def _load_secrets_into_env():
     # SiliconFlow 时踩到——只要环境里已经有 QWEN_API_KEY 就整个跳过加载，
     # 新加的 SILICONFLOW_API_KEY 永远读不进来，兜底供应商等于没配。
     # 每加一家供应商都要把它的key加进这个判断。
-    if all(os.environ.get(k) for k in ("QWEN_API_KEY", "ZHIPU_API_KEY", "SILICONFLOW_API_KEY")):
+    if all(os.environ.get(k) for k in ("QWEN_API_KEY", "ZHIPU_API_KEY",
+                                       "SILICONFLOW_API_KEY", "ARK_API_KEY")):
         return
     try:
         secrets = toml.load(_SECRETS_PATH)
@@ -355,6 +356,30 @@ _SF_MODEL = "deepseek-ai/DeepSeek-V3"
 _SF_BASE = "https://api.siliconflow.cn/v1"
 
 
+_ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3"
+# 火山方舟上的 GLM-5.2。2026-09-07 接入，起因是三家供应商同一天全部欠费：
+# 千问周套餐烧穿（09-08 22:43 才恢复）、智谱余额不足、SiliconFlow 402。
+# 整条判断链停摆，当天的清单只能用前一天的评分。
+#
+# 选方舟而不是再充一家的理由：它一个账号下挂着字节、DeepSeek、月之暗面、
+# 智谱四家的模型，同一个 key、同一个余额、同一套接口。以前是维护三套配置、
+# 三个账号的余额，现在多一家反而让"全挂"更难发生。
+#
+# 具体选 glm-5-2-260617：用户在方舟的"协作者奖励计划"里已授权它，每天
+# 200 万 tokens 免费额度，够跑一轮完整观察池（136支约需200万）。
+_ARK_MODEL = "glm-5-2-260617"
+
+
+def _ark_client() -> OpenAI | None:
+    key = os.environ.get("ARK_API_KEY", "")
+    if not key:
+        return None
+    try:
+        return OpenAI(api_key=key, base_url=_ARK_BASE, max_retries=1, timeout=60)
+    except Exception:
+        return None
+
+
 def _siliconflow_client() -> OpenAI | None:
     key = os.environ.get("SILICONFLOW_API_KEY", "")
     if not key:
@@ -386,8 +411,19 @@ def _is_failover_worthy(err: Exception) -> bool:
     转过去只是白白再烧一次，还会掩盖真正的配置问题。
     """
     txt = f"{type(err).__name__} {err}".lower()
+    # 402 / 余额不足 也必须转移。2026-09-07 真实故障：SiliconFlow 欠费后返回
+    #   APIStatusError: Error code: 402 - {'code': 30001,
+    #                   'message': 'Sorry, your account balance is insufficient'}
+    # 这串里没有 429、没有 quota、没有 rate limit，于是被判成"换谁都一样"，
+    # 直接抛出，链条上排在它后面的供应商根本没被调用。
+    #
+    # 这个漏判在只有三家、SiliconFlow 排最后的时候看不出来（后面本来就没人了）；
+    # 加了第四家之后才暴露出来——新供应商明明是好的，却因为前一家的欠费错误
+    # 中断了整条链。余额不足跟配额耗尽是同一类"这家暂时不能用、换一家还有希望"，
+    # 理应一起转移。
     if any(k in txt for k in ("insufficient_quota", "quota", "rate limit", "ratelimit",
-                              "too many requests", "429")):
+                              "too many requests", "429", "402", "balance is insufficient",
+                              "余额不足", "arrearage", "billing")):
         return True
     if any(k in txt for k in ("timeout", "timed out", "connection", "apiconnection",
                               "internalserver", "500", "502", "503", "504",
@@ -418,7 +454,7 @@ def _healthy_provider_count() -> int:
     至少返回1——一家都不健康时并发降到最低，让它慢慢跑而不是直接不跑。
     """
     now = time.time()
-    healthy = sum(1 for who in ("千问", "智谱", "SiliconFlow")
+    healthy = sum(1 for who in ("千问", "智谱", "SiliconFlow", "方舟GLM")
                   if _PROVIDER_COOLDOWN.get(who, 0) <= now)
     return max(healthy, 1)
 _COOLDOWN_SEC = 900
@@ -432,8 +468,10 @@ def _is_quota_or_ratelimit_error(err: Exception) -> bool:
     配额和限流——超时和5xx多半是一次性抖动，熔断掉是误伤。
     """
     txt = f"{type(err).__name__} {err}".lower()
+    # 402/余额不足同样要熔断：欠费不会在一轮运行内自己好，继续试只是浪费时间。
     return ("429" in txt or "quota" in txt or "rate limit" in txt
-            or "ratelimit" in txt or "insufficient_quota" in txt or "arrearage" in txt)
+            or "ratelimit" in txt or "insufficient_quota" in txt or "arrearage" in txt
+            or "402" in txt or "balance is insufficient" in txt or "余额不足" in txt)
 
 
 def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: float = 0.3,
@@ -467,6 +505,11 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
         (_zhipu_client, _ZHIPU_MODEL, "智谱", 2.0),
         # DeepSeek-V3 不是推理模型，没有隐藏思考链抢预算的问题，倍数用1.0。
         (_siliconflow_client, _SF_MODEL, "SiliconFlow", 1.0),
+        # 火山方舟 GLM-5.2。倍数给 2.5：它是推理模型，而且实测比智谱那版更能
+        # "想"——一句"什么是市盈率"的问题，输入25 tokens、输出517 tokens，
+        # 绝大部分是思考链。判断任务的正文本来就长，预算不放宽会被思考链烧穿、
+        # 返回空内容（这个坑千问和智谱都踩过，见上面两条注释）。
+        (_ark_client, _ARK_MODEL, "方舟GLM", 2.5),
     ]
     # prefer 只调整起点，不裁剪链条：把指定的那家转到队首，其余顺序不变。
     # 这是给多空辩论用的——辩论的价值建立在"两方由互相独立的模型给出"之上，
