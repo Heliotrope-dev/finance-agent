@@ -455,7 +455,19 @@ def _build_item(rec: dict) -> dict | None:
     cap = _capital_cny()
     fx, cur = _fx_to_cny(market)
     shares = amount_cny = None
-    lot = int(rec.get("lot_size") or 0) or (_HK_LOT_FALLBACK if market == "HK" else 1)
+    # 每手股数先查真实值，查不到才退回默认。
+    # 2026-09-07：原来直接用 _HK_LOT_FALLBACK(100)，而港股每手从1到10000都有，
+    # 实测六支里四支是错的（MINIMAX 20股、携程 50股、小米和泡泡玛特 200股）。
+    # 错的后果不是差一点：当天清单让用户"买入小米500股"，而小米每手200股，
+    # 500不是整数倍，这个单在券商那边根本下不出去。
+    lot = int(rec.get("lot_size") or 0)
+    if not lot and market == "HK":
+        try:
+            lot = ds.get_hk_lot_size(symbol) or 0
+        except Exception:
+            lot = 0
+    if not lot:
+        lot = _HK_LOT_FALLBACK if market == "HK" else 1
     if cap > 0 and fx > 0 and stop_pct < 0:
         risk_budget = cap * _RISK_PER_TRADE_PCT / 100          # 这笔最多亏多少人民币
         raw_amount = risk_budget / (abs(stop_pct) / 100)        # 反推仓位金额

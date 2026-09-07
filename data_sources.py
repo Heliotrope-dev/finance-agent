@@ -1712,6 +1712,40 @@ def _futu_snapshot_row_to_dict(symbol: str, row) -> dict:
     }
 
 
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def get_hk_lot_size(symbol: str) -> int | None:
+    """港股每手股数。取不到返回 None，调用方自己决定怎么办——不要用默认值糊过去。
+
+    2026-09-07 真实故障：daily_plan.py 里写死 _HK_LOT_FALLBACK = 100，而港股
+    每手从 1 股到 10,000 股都有。实测同一批标的：
+
+        MINIMAX-W(00100)  20股      小米(01810)     200股
+        携程(09961)       50股      泡泡玛特(09992)  200股
+        智谱(02513)      100股      思格新能(06656)  100股
+
+    六支里四支是错的。后果有两层：一是仓位算错（当天清单让用户"买入小米
+    500股"，而小米每手200股，500不是整数倍，这个单下不出去）；二是"买不起"
+    的判断跟着错——携程被判成"每手100股约27,872元买不起"，真实每手50股、
+    只要13,936元。
+
+    每手股数一天之内不会变，缓存24小时。
+    """
+    code = _futu_code(symbol, "HK")
+    if not code:
+        return None
+    r = _futu_call(
+        lambda c: c.get_stock_basicinfo(ft.Market.HK, ft.SecurityType.STOCK, [code]),
+        timeout=20, default=None)
+    df = _unwrap_futu(r)
+    if df is None or df.empty:
+        return None
+    try:
+        v = int(df.iloc[0].get("lot_size") or 0)
+        return v if v > 0 else None
+    except Exception:
+        return None
+
+
 def get_stock_realtime_futu(symbol: str, market: str) -> dict:
     """走本地 Futu OpenD 网关拿真实时快照，支持港股/美股/虚拟货币（A股无权限）。
 
