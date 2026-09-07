@@ -114,15 +114,25 @@ def check() -> dict:
     fired = st.get("fired") or {}
     levels = _plan_levels()
 
-    # 要盯的：真实持仓 + 清单里的候选
+    # 要盯的：真实持仓 + 清单里的候选 + 用户自选
     watch: list[tuple[str, str, bool]] = []
     seen = set()
+    # positions 表里 shares=0 的行就是"只关注不持仓"的自选（见 tracker.add_watch_only），
+    # 原来这里写的是 if shares > 0，正好把自选整个过滤掉了。
+    #
+    # 2026-09-07 用户说"关注一下智谱、小米、思格新能这几支票到大动作"，查下来
+    # 他点名的三支里只有小米在当日清单里，智谱和思格新能根本不在监控范围内。
+    # 而当天思格新能盘中一度 -9.75%、智谱从 +0.65% 走到 -2.88%，正是他想第一
+    # 时间知道的那种动作。
+    #
+    # 持仓和自选都要盯，但性质不同：持仓关心"要不要减/清"（第三个字段 True），
+    # 自选关心"要不要进"（False），下游按这个区分告警措辞。
     for p in tracker.get_positions(email):
-        if (p.get("shares") or 0) > 0:
-            k = (str(p["symbol"]), p["market"])
-            if k not in seen:
-                seen.add(k)
-                watch.append((k[0], k[1], True))
+        k = (str(p["symbol"]), p["market"])
+        if k in seen:
+            continue
+        seen.add(k)
+        watch.append((k[0], k[1], (p.get("shares") or 0) > 0))
     for key, v in levels.items():
         mkt, sym = key.split(":", 1)
         if (sym, mkt) not in seen:
@@ -130,7 +140,7 @@ def check() -> dict:
             watch.append((sym, mkt, False))
 
     if not watch:
-        return {"状态": "跳过", "说明": "没有持仓也没有清单候选"}
+        return {"状态": "跳过", "说明": "没有持仓、清单候选，也没有自选"}
 
     # 只盯正在交易的市场。港股收盘后还在拉美股行情没有意义，反过来也一样。
     import sim_agent
