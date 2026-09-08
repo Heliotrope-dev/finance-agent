@@ -475,7 +475,8 @@ def _is_quota_or_ratelimit_error(err: Exception) -> bool:
 
 
 def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: float = 0.3,
-                       timeout: float = 120, tag: str = "", prefer: str = "") -> str:
+                       timeout: float = 120, tag: str = "", prefer: str = "",
+                       max_length_budget: int | None = None) -> str:
     """所有非流式AI调用的统一入口：千问顶不住就自动换智谱。
 
     2026-09-04真实故障催生的：千问的周额度在当天下午耗尽
@@ -550,15 +551,20 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
             # ——这不是这家供应商不可用，换一家也是同样的坑，唯一的解法就是给
             # 更多预算。2026-09-04模拟盘决策就是这么连续停摆的，光靠调大调用点
             # 的常量不够稳（prompt长度会随持仓和候选数量浮动），所以在这里兜一层。
-            # 只重试一次：还不够说明预算设定本身有问题，该去改调用点，无限翻倍
-            # 只会把一次失败变成一次昂贵的失败。
-            if not text and resp.choices[0].finish_reason == "length":
+            # 长研报式个股判断的提示词会随着可得资料而波动。空正文且被长度截断
+            # 时，继续扩预算直到调用点设定的上限，而不是让一只材料较多的股票
+            # 直接从排行榜消失。仍保留显式上限，避免供应商异常时无限烧费。
+            length_budget = max_length_budget or budget * 2
+            while (not text and resp.choices[0].finish_reason == "length"
+                   and budget < length_budget):
+                next_budget = min(budget * 2, length_budget)
                 print(f"[failover{('/' + tag) if tag else ''}] {who}预算{budget}被思考链烧穿，"
-                      f"加倍到{budget * 2}重试一次")
+                      f"扩到{next_budget}重试")
                 resp = client.with_options(max_retries=0, timeout=timeout).chat.completions.create(
                     model=model, messages=messages,
-                    max_tokens=budget * 2, temperature=temperature, stream=False,
+                    max_tokens=next_budget, temperature=temperature, stream=False,
                 )
+                budget = next_budget
                 text = (resp.choices[0].message.content or "").strip()
             if not text:
                 raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
@@ -2240,8 +2246,10 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
         # DeepSeek隐藏的reasoning_content跟正式回答共用同一个max_tokens预算，
         # 这个项目反复踩过的老坑（README"AI分析概率性返回空内容"）。这个判断
         # 要求综合基本面+成长性+负债+估值+技术面五项给结论，思考链容易变长，
-        # 实测4000时仍有41%概率返回空内容，调到8000。
-        max_tokens=8000, temperature=0.3, timeout=210, tag="judge",
+        # 实测4000时仍有41%概率返回空内容。完整港股排行要求宁可慢一点也不能
+        # 因一份长资料被截断而漏票：基础12k，长度截断的空输出最多扩到48k。
+        max_tokens=12000, temperature=0.3, timeout=300, tag="judge",
+        max_length_budget=48000,
     )
     action = _extract_action(text)
     return {"action": action, "score": _extract_score(text), "fundamental_verdict": text}
