@@ -1,4 +1,8 @@
 {
+  "starting_capital": {
+    "amount": 12000,
+    "currency": "HKD"
+  },
   "max_risk_per_trade_pct": 1.0,
   "max_position_pct": 10.0,
   "max_daily_loss_pct": 3.0,

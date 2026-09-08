@@ -137,8 +137,29 @@ def _atr(symbol: str, market: str, days: int = 20) -> float | None:
 
 
 def _capital_cny() -> float:
-    """用户设定的最大资金投入量。取不到时返回0——0会让下游明确显示
-    "未设置资金规模，无法给出仓位"，而不是拿一个假设的数字去算。"""
+    """风险档案中的起始资金，统一换算成人民币。
+
+    风险档案优先于历史页面里的资金输入：前者是用户明确确认的执行边界，
+    后者可能是旧值。汇率每次生成清单时实时查询，绝不把港币金额当人民币。
+    """
+    profile = risk_policy.load_profile()
+    capital = (profile or {}).get("starting_capital") or {}
+    try:
+        amount = float(capital.get("amount") or 0)
+        currency = str(capital.get("currency") or "").upper()
+    except (TypeError, ValueError):
+        amount, currency = 0.0, ""
+    if amount > 0 and currency:
+        if currency == "CNY":
+            return amount
+        try:
+            rate, _note = ds.get_fx_rate(currency, "CNY")
+            return amount * float(rate) if rate else 0.0
+        except Exception:
+            # A stale or guessed conversion is worse than no position size.
+            return 0.0
+
+    # Backward-compatible fallback for users who have not set the new profile.
     try:
         import sqlite3
         from pathlib import Path
