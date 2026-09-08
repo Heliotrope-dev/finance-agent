@@ -833,7 +833,17 @@ def log_ipo_brief(symbol: str, name: str, list_date: str, apply_end: str,
 
 def get_latest_ipo_briefs(limit: int = 6) -> list[dict]:
     """每只新股最新的一条，按上市日期正序——先上市的排前面，因为申购截止
-    也更早，用户要先处理那一只。已经上市的不再显示（打新窗口已经过了）。"""
+    也更早，用户要先处理那一只。已经上市的不再显示（打新窗口已经过了）。
+
+    2026-09-08修的两处真实bug：
+    1) 过滤条件原来是 list_date >= today（含等号），上市当天一整天还会
+       被当成"即将上市"显示——用户当天亲自打新过一支，收盘后还看到它
+       挂在这个专区才发现的。上市日当天认购窗口早就关了，应该严格用 >。
+    2) "today"原来拿的是UTC日期，这个项目其它地方判断"今天"统一用北京
+       时间（_CN_TZ），这里单独用UTC会在每天0-8点北京时间产生一天的
+       偏差——UTC还没翻到当天时，北京已经是新的一天，会把"今天上市"的
+       新股在真正的上市当天早上误判成"明天上市"继续展示。
+    """
     init_db()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
@@ -842,8 +852,8 @@ def get_latest_ipo_briefs(limit: int = 6) -> list[dict]:
             "(SELECT MAX(id) FROM ipo_briefs GROUP BY symbol) "
             "ORDER BY list_date ASC LIMIT ?", (limit * 3,),
         ).fetchall()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    out = [dict(r) for r in rows if (r["list_date"] or "9999") >= today]
+    today = datetime.now(_CN_TZ).strftime("%Y-%m-%d")
+    out = [dict(r) for r in rows if (r["list_date"] or "9999") > today]
     return out[:limit]
 
 
