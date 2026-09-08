@@ -39,6 +39,17 @@ import tracker
 _UNDO = Path(__file__).resolve().parent / "data" / "last_record.json"
 
 
+def _cny_amount_text(amount: float, currency: str) -> str:
+    """把原币金额换成可核对的人民币参考值，不改变数据库的成交原币事实。"""
+    try:
+        cny, note = ds.to_cny(amount, currency)
+    except Exception:
+        cny, note = None, "汇率获取失败"
+    if cny is None:
+        return f"人民币折算不可用（{note}）"
+    return f"约人民币 {cny:,.2f} 元（{note}）"
+
+
 def _resolve(text: str) -> tuple[str, str, str] | None:
     """把用户/AI给的代码或名字解析成 (代码, 市场, 名称)。解析不出返回 None。"""
     t = (text or "").strip()
@@ -78,8 +89,10 @@ def _show() -> str:
         shares = float(p.get("shares") or 0)
         cost = float(p.get("cost_total") or 0)
         avg = cost / shares if shares else 0
+        currency = str(p.get("currency") or {"HK": "HKD", "US": "USD"}.get(p.get("market"), "CNY"))
         L.append(f"  {p.get('name') or p['symbol']}（{p['symbol']}·{p['market']}）"
-                 f"{shares:.0f}股 成本均价 {avg:.3f}")
+                 f"{shares:.0f}股 原币成本均价 {avg:.3f} {currency}")
+        L.append(f"    原币成本 {cost:,.2f} {currency}，{_cny_amount_text(cost, currency)}")
     return "\n".join(L)
 
 
@@ -139,6 +152,7 @@ def main() -> int:
         return 1
     sym, mkt, name = got
     amount = args.shares * args.price
+    currency = {"HK": "HKD", "US": "USD", "A": "CNY"}.get(mkt, "CNY")
 
     try:
         if args.buy:
@@ -163,7 +177,8 @@ def main() -> int:
     # 回显完整结果。AI 读截图会出错——数字看错一位、认错股票都可能，
     # 而这些错误会一路污染止损计算和收益结算。打回去让用户扫一眼。
     print(f"已记录：{act} {name}（{sym}·{mkt}）{args.shares:.0f}股 "
-          f"成交价 {args.price} 金额 {amount:,.2f}")
+          f"成交价 {args.price} {currency}，原币金额 {amount:,.2f} {currency}")
+    print(f"人民币参考：{_cny_amount_text(amount, currency)}")
     print()
     print(_show())
     print()

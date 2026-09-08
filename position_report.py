@@ -78,13 +78,16 @@ def build(session: str) -> tuple[str, bool]:
     L.append("")
     urgent = []
     total_cost = total_value = 0.0
-    fx, _cur = 1.0, "CNY"
+    fx, fx_note = 1.0, "实时"
+    native_currency = "CNY"
     try:
         if market in ("HK", "US"):
-            rate, _ = ds.get_fx_rate("HKD" if market == "HK" else "USD", "CNY")
+            native_currency = "HKD" if market == "HK" else "USD"
+            rate, fx_note = ds.get_fx_rate(native_currency, "CNY")
             fx = float(rate) if rate else 0.0
     except Exception:
         fx = 0.0
+        fx_note = "汇率获取失败"
 
     for p in holdings:
         sym, mkt = p["symbol"], p["market"]
@@ -118,8 +121,14 @@ def build(session: str) -> tuple[str, bool]:
         act = verdict.get("action") or "—"
         score = verdict.get("score")
         L.append(f"{p.get('name') or sym}（{sym}·{mkt}）")
-        L.append(f"  持{shares:.0f}股 成本{cost_avg:.3f} 现价{last} "
-                 f"盈亏{pnl:+,.0f}（{pnl_pct:+.1f}%）")
+        L.append(f"  持{shares:.0f}股 · 原币成本{cost_avg:.3f} {native_currency} "
+                 f"· 原币现价{last} {native_currency} "
+                 f"· 原币盈亏{pnl:+,.0f} {native_currency}（{pnl_pct:+.1f}%）")
+        if fx > 0:
+            L.append(f"  人民币参考：成本¥{cost_total * fx:,.0f} · 市值¥{value * fx:,.0f} "
+                     f"· 浮动盈亏¥{pnl * fx:+,.0f}（1 {native_currency}≈¥{fx:.4f}，{fx_note}）")
+        else:
+            L.append(f"  人民币折算不可用（{fx_note}）；以上金额均为 {native_currency}")
         L.append(f"  AI判断：{act}" + (f" {score}分" if score else ""))
         reason = (verdict.get("fundamental_verdict") or "").strip()
         if reason:
@@ -131,11 +140,16 @@ def build(session: str) -> tuple[str, bool]:
 
     if total_cost > 0:
         tp = total_value - total_cost
-        L.append(f"{market} 持仓合计：成本{total_cost:,.0f} 市值{total_value:,.0f} "
-                 f"盈亏{tp:+,.0f}（{tp/total_cost*100:+.1f}%）")
         if fx > 0:
-            L.append(f"  折合人民币约 {total_value * fx:,.0f} 元，"
-                     f"浮动盈亏 {tp * fx:+,.0f} 元")
+            L.append(f"{market} 持仓合计（人民币）：成本¥{total_cost * fx:,.0f} "
+                     f"市值¥{total_value * fx:,.0f} 浮动盈亏¥{tp * fx:+,.0f} "
+                     f"（{tp/total_cost*100:+.1f}%；{fx_note}）")
+            L.append(f"  原币核对：成本{total_cost:,.0f} {native_currency} "
+                     f"市值{total_value:,.0f} {native_currency} 盈亏{tp:+,.0f} {native_currency}")
+        else:
+            L.append(f"{market} 持仓合计（原币）：成本{total_cost:,.0f} {native_currency} "
+                     f"市值{total_value:,.0f} {native_currency} 盈亏{tp:+,.0f} {native_currency} "
+                     f"（{tp/total_cost*100:+.1f}%；人民币折算不可用：{fx_note}）")
 
     if urgent:
         L.insert(1, "")

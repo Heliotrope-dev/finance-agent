@@ -2570,18 +2570,20 @@ def _save_fx_cache(cache: dict):
         pass
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_fx_rate(currency: str, quote: str = "CNY") -> tuple[float | None, str]:
     """currency兑quote的汇率，目前只支持quote="CNY"（HKD/USD → CNY，A股本身
-    就是CNY不用转）。1800秒缓存——汇率日内波动幅度远小于股价，不需要像行情
-    那样3秒刷新，全塞进热路径纯粹浪费还会把限流风险引到最热的路径上。
+    就是CNY不用转）。缓存最多60秒：成交回显和持仓盈亏都以人民币展示时，30分钟
+    前的汇率不能再标成“实时”；但逐秒刷新对汇率没有决策价值，只会把第三方数据
+    源的限流风险引入最热路径。
 
-    返回 (汇率, 数据时间说明)——第二个值不是摆设：两条实时源都失败时会退回
+    返回 (汇率, 数据时间说明)——第二个值不是摆设：正常路径也明确写“报价刷新
+    不超过60秒”；两条实时源都失败时会退回
     本地缓存的上一次成功值，这时候必须让调用方能告诉用户"这个汇率不是实时的、
     是XX时候取的"，不能悄悄拿一个过期数字充当实时数据用。
     """
     if currency == quote:
-        return 1.0, "实时"
+        return 1.0, "CNY 无需换汇"
     if currency not in _MARKET_CURRENCY.values():
         return None, "不支持的币种"
 
@@ -2594,7 +2596,7 @@ def get_fx_rate(currency: str, quote: str = "CNY") -> tuple[float | None, str]:
             cache = _load_fx_cache()
             cache[currency] = {"rate": rate, "fetched_at": cn_now().strftime("%Y-%m-%d %H:%M")}
             _save_fx_cache(cache)
-            return rate, "实时"
+            return rate, "报价刷新不超过60秒"
 
     # 两条实时源都失败——读本地缓存的上一次成功值，不编一个常数糊弄
     cached = _load_fx_cache().get(currency)
