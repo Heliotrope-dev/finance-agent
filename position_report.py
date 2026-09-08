@@ -23,16 +23,12 @@
 """
 import argparse
 import datetime as dt
-import subprocess
 import sys
 
 import advisor
 import data_sources as ds
 import tracker
-
-_WECHAT_TARGET = "o9cq80_APBq3j8dLdECzrOB0opJs@im.wechat"
-_WECHAT_ACCOUNT = "b329c51975ab-im-bot"
-_CHANNEL = "openclaw-weixin"
+import wechat_delivery
 
 _SESSIONS = {
     "hk-mid": ("HK", "港股午盘", False),
@@ -43,19 +39,7 @@ _SESSIONS = {
 
 
 def _send(message: str) -> bool:
-    try:
-        r = subprocess.run(
-            ["openclaw", "message", "send", "--channel", _CHANNEL,
-             "--target", _WECHAT_TARGET, "--account", _WECHAT_ACCOUNT,
-             "--message", message],
-            capture_output=True, text=True, timeout=120)
-    except Exception as e:
-        print(f"发送异常: {e}")
-        return False
-    if r.returncode != 0:
-        print(f"发送失败(exit={r.returncode}): {(r.stderr or r.stdout or '')[:250]}")
-        return False
-    return True
+    return wechat_delivery.send_text(message)
 
 
 def build(session: str) -> tuple[str, bool]:

@@ -16,16 +16,12 @@
 """
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 import advisor
 import tracker
-
-_WECHAT_TARGET = "o9cq80_APBq3j8dLdECzrOB0opJs@im.wechat"
-_WECHAT_ACCOUNT = "b329c51975ab-im-bot"
-_CHANNEL = "openclaw-weixin"
+import wechat_delivery
 _RUN_LOG = Path(__file__).resolve().parent / "data" / "last_sim_agent_run.log"
 
 
@@ -75,23 +71,7 @@ def _build_message(orders: list[dict]) -> str:
 
 
 def _send(message: str) -> bool:
-    try:
-        r = subprocess.run(
-            ["openclaw", "message", "send",
-             "--channel", _CHANNEL,
-             "--target", _WECHAT_TARGET,
-             "--account", _WECHAT_ACCOUNT,
-             "--message", message],
-            capture_output=True, text=True, timeout=120,
-        )
-    except Exception as e:
-        print(f"发送异常，本轮不销账，下一轮重试: {e}")
-        return False
-    if r.returncode != 0:
-        print(f"发送失败(exit={r.returncode})，本轮不销账，下一轮重试: "
-              f"{(r.stderr or r.stdout or '').strip()[:300]}")
-        return False
-    return True
+    return wechat_delivery.send_text(message)
 
 
 def main() -> int:

@@ -15,15 +15,11 @@
 失败处理跟成交推送一致：发送失败就报非零退出码，让 cron 的日志留痕，
 不静默吞掉。清单晚到一次可以接受，不知道它没到不行。
 """
-import subprocess
 import sys
 
 import advisor
 import daily_plan
-
-_WECHAT_TARGET = "o9cq80_APBq3j8dLdECzrOB0opJs@im.wechat"
-_WECHAT_ACCOUNT = "b329c51975ab-im-bot"
-_CHANNEL = "openclaw-weixin"
+import wechat_delivery
 
 # 微信单条消息过长会被截断，清单又是"截断了就少几条标的"的性质，
 # 所以超长时分段发而不是硬截。
@@ -31,22 +27,7 @@ _MAX_CHARS = 1800
 
 
 def _send(message: str) -> bool:
-    try:
-        r = subprocess.run(
-            ["openclaw", "message", "send",
-             "--channel", _CHANNEL,
-             "--target", _WECHAT_TARGET,
-             "--account", _WECHAT_ACCOUNT,
-             "--message", message],
-            capture_output=True, text=True, timeout=120,
-        )
-    except Exception as e:
-        print(f"发送异常: {e}")
-        return False
-    if r.returncode != 0:
-        print(f"发送失败(exit={r.returncode}): {(r.stderr or r.stdout or '').strip()[:300]}")
-        return False
-    return True
+    return wechat_delivery.send_text(message)
 
 
 def _split(text: str) -> list[str]:

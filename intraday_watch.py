@@ -29,17 +29,13 @@
 """
 import datetime as dt
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 import advisor
 import data_sources as ds
 import tracker
-
-_WECHAT_TARGET = "o9cq80_APBq3j8dLdECzrOB0opJs@im.wechat"
-_WECHAT_ACCOUNT = "b329c51975ab-im-bot"
-_CHANNEL = "openclaw-weixin"
+import wechat_delivery
 
 _STATE = Path(__file__).resolve().parent / "data" / "intraday_watch_state.json"
 _PLAN = Path(__file__).resolve().parent / "data" / "daily_plan.json"
@@ -55,16 +51,7 @@ _ENTRY_NEAR_PCT = 3.0
 
 
 def _send(msg: str) -> bool:
-    try:
-        r = subprocess.run(
-            ["openclaw", "message", "send", "--channel", _CHANNEL,
-             "--target", _WECHAT_TARGET, "--account", _WECHAT_ACCOUNT,
-             "--message", msg],
-            capture_output=True, text=True, timeout=90)
-        return r.returncode == 0
-    except Exception as e:
-        print(f"发送异常: {e}")
-        return False
+    return wechat_delivery.send_text(msg)
 
 
 def _load_state() -> dict:
