@@ -66,7 +66,11 @@ _SECRETS_PATH = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.t
 # 而且实测不需要靠堆高max_tokens才能避免空内容(2000 tokens就能给出完整
 # 回答)，没有DeepSeek那个"隐藏思考链吃预算"的老毛病。math-agent那边继续用
 # DeepSeek，没有一起切，是用户单独决定的，不要顺手改过去。
-_MODEL = "qwen3.8-flash"
+# Trading-plan selection, position reviews, and the final arbitration in the
+# bull/bear workflow are decision-critical. Keep routine OpenClaw work on
+# Flash, but use the account's flagship model for this investment-analysis
+# boundary. Price, sizing, stops, and risk/reward remain deterministic code.
+_MODEL = "qwen3.8-max"
 # 2026-09-01切到百炼Token Plan订阅套餐专属端点——之前用的是DashScope通用
 # 端点+账户级按量付费余额，账户余额一旦欠费(哪怕只差几毛钱)所有调用直接
 # 403，跟买没买套餐无关；套餐本身有独立的Credits额度和专属Base URL/API Key，

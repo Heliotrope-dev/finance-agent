@@ -9,7 +9,9 @@ from openai import OpenAI
 # 详细对比记录见advisor.py同一处改动的注释，这里不重复。
 # 2026-09-01切到百炼Token Plan套餐专属端点，理由同advisor.py同一处改动。
 _QWEN_BASE = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-_MODEL = "qwen3.8-flash"
+# This layer reconciles news with financial and market facts for the user.
+# It is a substantive investment-analysis path, not a background formatter.
+_MODEL = "qwen3.8-max"
 
 
 def get_secret(key: str) -> str:

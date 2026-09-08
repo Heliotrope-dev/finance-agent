@@ -17,6 +17,9 @@ from openai import OpenAI
 
 # 2026-09-01切到百炼Token Plan套餐专属端点，理由同advisor.py同一处改动。
 _QWEN_BASE = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+# The chat window primarily handles repeated questions, navigation help, and
+# presentation of already-computed facts. The decision-critical advisor and
+# analysis layers use Max; keep this high-frequency path on Flash.
 _MODEL = "qwen3.8-flash"
 
 
