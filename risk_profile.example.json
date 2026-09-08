@@ -1,0 +1,7 @@
+{
+  "max_risk_per_trade_pct": 1.0,
+  "max_position_pct": 10.0,
+  "max_daily_loss_pct": 3.0,
+  "min_reward_risk": 2.5,
+  "allowed_markets": ["HK", "US"]
+}

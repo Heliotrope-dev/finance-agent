@@ -88,8 +88,12 @@ def interpret_events(events: list[dict]) -> str:
         tag = e.get("紧急度", "")
         try:
             body = interpret(e)
-        except Exception as ex:
-            body = f"（解读生成失败：{ex}，原始事件：{e.get('类型')} {e.get('名称')} 现价{e.get('现价')}）"
+        except Exception:
+            # Provider details are operational diagnostics, not investment
+            # evidence.  Leaking them to WeChat both looks broken and can make
+            # an AI outage sound like a market fact.
+            body = (f"事实：{e.get('类型')}，现价 {e.get('现价')}，当日"
+                    f"{e.get('当日涨跌')}%。AI解读暂不可用；请按早盘既定风险线复核。")
         parts.append(f"[{tag}] {e.get('名称')}（{e.get('代码')}）\n{body}")
     parts.append("仅供参考，不构成投资建议，请自行判断。")
     return "\n\n".join(parts)

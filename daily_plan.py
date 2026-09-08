@@ -32,6 +32,7 @@ import sys
 import advisor
 import data_sources as ds
 import expectancy
+import risk_policy
 import tracker
 
 # 只有分数达到这条线的标的才进清单。65 分不是拍脑袋：低于它的判断在文本里
@@ -455,6 +456,13 @@ def _build_item(rec: dict) -> dict | None:
     cap = _capital_cny()
     fx, cur = _fx_to_cny(market)
     shares = amount_cny = None
+    execution_reason = None
+    is_new_buy = rec.get("action") == "买入" and not (rec.get("shares") or 0)
+    decision = risk_policy.validate_new_position(
+        market=market, entry=last, stop=stop, target=target, reward_risk=rr,
+    ) if is_new_buy else None
+    if decision and not decision.allowed:
+        execution_reason = "；".join(decision.reasons)
     # 每手股数先查真实值，查不到才退回默认。
     # 2026-09-07：原来直接用 _HK_LOT_FALLBACK(100)，而港股每手从1到10000都有，
     # 实测六支里四支是错的（MINIMAX 20股、携程 50股、小米和泡泡玛特 200股）。
@@ -468,10 +476,14 @@ def _build_item(rec: dict) -> dict | None:
             lot = 0
     if not lot:
         lot = _HK_LOT_FALLBACK if market == "HK" else 1
-    if cap > 0 and fx > 0 and stop_pct < 0:
-        risk_budget = cap * _RISK_PER_TRADE_PCT / 100          # 这笔最多亏多少人民币
+    if cap > 0 and fx > 0 and stop_pct < 0 and (not decision or decision.allowed):
+        # A new-buy size uses only an explicit risk profile.  Existing holding
+        # reports retain their historical sizing display, but are not orders.
+        risk_pct = decision.max_risk_per_trade_pct if decision else _RISK_PER_TRADE_PCT
+        max_position_pct = decision.max_position_pct if decision else _MAX_POSITION_PCT
+        risk_budget = cap * risk_pct / 100                     # 这笔最多亏多少人民币
         raw_amount = risk_budget / (abs(stop_pct) / 100)        # 反推仓位金额
-        capped = min(raw_amount, cap * _MAX_POSITION_PCT / 100)  # 集中度上限
+        capped = min(raw_amount, cap * max_position_pct / 100)  # 集中度上限
         local_amount = capped / fx                              # 换成标的货币
         n = int(local_amount / last)
         if lot > 1:
@@ -486,15 +498,15 @@ def _build_item(rec: dict) -> dict | None:
             # 但买不起"，混在一起说会让他以为系统在拒绝一个好机会。
             one_unit_cny = lot * last * fx
             unit_label = f"每手{lot}股" if lot > 1 else "1股"
-            cap_limit = cap * _MAX_POSITION_PCT / 100
+            cap_limit = cap * max_position_pct / 100
             if one_unit_cny > cap:
                 why = f"总资金不够（{unit_label} 约 {one_unit_cny:,.0f} 元 > 本金 {cap:,.0f} 元）"
             else:
                 # 买得起，但一个最小单位就突破了单笔集中度上限。这跟"买不起"
                 # 是两回事，说反了用户会以为自己钱不够——他钱够，是风控在拦。
                 why = (f"{unit_label} 约 {one_unit_cny:,.0f} 元，超过单笔上限 "
-                       f"{cap_limit:,.0f} 元（本金的{_MAX_POSITION_PCT:.0f}%）")
-            rec["_不可执行原因"] = why
+                       f"{cap_limit:,.0f} 元（本金的{max_position_pct:.0f}%）")
+            execution_reason = why
 
     # 趋势闸门：20日均线向下就不做多头进场。
     #
@@ -554,7 +566,7 @@ def _build_item(rec: dict) -> dict | None:
     # 算隐含市值没有意义。
     reality = _reality_check(symbol, market, last, analyst_t)
 
-    return {
+    item = {
         "代码": symbol, "市场": market, "名称": rec.get("name") or symbol,
         "规模提示": reality,
         "两档": plans,
@@ -570,7 +582,8 @@ def _build_item(rec: dict) -> dict | None:
         "盈亏比": round(rr, 2) if rr else None,
         "建议股数": shares,
         "建议金额CNY": amount_cny,
-        "不可执行原因": rec.get("_不可执行原因"),
+        "不可执行原因": execution_reason,
+        "新开仓状态": "仅观察" if decision and not decision.allowed else "可执行",
         "下跌趋势": bool(_falling),
         "止跌触发价": _trigger,
         "最小单位金额CNY": round(lot * last * fx, 0) if fx > 0 else None,
@@ -580,6 +593,7 @@ def _build_item(rec: dict) -> dict | None:
         "52周分位": round(pos_pct, 0) if pos_pct is not None else None,
         "依据": (rec.get("fundamental_verdict") or "")[:400],
     }
+    return item
 
 
 def _rank_candidates(items: list[dict]) -> list[dict]:
@@ -761,7 +775,8 @@ def build_market_plan(market: str, email: str | None = None, top_n: int = 3) -> 
     # 拼在一起的列表；达标组数量可能是0、可能远超top_n。Top3只从达标组里切，
     # 不达标的即使排在ranked前面也不算——但ranked本身就是达标组在前，所以
     # 直接切片，同时保留是不是"凑够了"这个信息给渲染层用。
-    qualifying = [x for x in ranked if (x.get("盈亏比") or 0) >= _MIN_RR]
+    qualifying = [x for x in ranked if (x.get("盈亏比") or 0) >= _MIN_RR
+                  and x.get("新开仓状态") == "可执行"]
     top3 = qualifying[:top_n]
 
     return {
@@ -823,8 +838,13 @@ def render_market_text(plan: dict, top_n: int = 3) -> str:
             L += _render_item_lines(it, i)
             L.append("")
     else:
-        L.append(f"今天{market}没有盈亏比达标的机会（候选池{候选池}支，达标0支）——"
-                  f"不是没有票，是没有票同时满足盈亏比≥{_MIN_RR:g}这个门槛，宁可没有也不硬凑。")
+        blocked = [x for x in (plan.get("关注候选") or []) if x.get("新开仓状态") != "可执行"]
+        if blocked:
+            L.append(f"今天{market}不输出新开仓指令：风险档案尚未完整配置。候选仍在观察池，"
+                     "但系统不会替你假定单笔风险或仓位上限。")
+        else:
+            L.append(f"今天{market}没有盈亏比达标的机会（候选池{候选池}支，达标0支）——"
+                     f"不是没有票，是没有票同时满足盈亏比≥{_MIN_RR:g}这个门槛，宁可没有也不硬凑。")
     L.append("")
     L.append("仅供参考，不构成投资建议，请自行判断。")
     return "\n".join(L)
@@ -855,6 +875,8 @@ def _render_item_lines(x: dict, idx: int) -> list[str]:
     if x.get("建议股数"):
         seg.append(f"   买入 {x['建议股数']} 股（约 {x['建议金额CNY']:,.0f} 元）"
                    + (f"，每手{x['每手']}股" if x.get("每手", 1) > 1 else ""))
+    elif x.get("不可执行原因"):
+        seg.append(f"   新开仓：仅观察。{x['不可执行原因']}")
     else:
         seg.append("   仓位：算不出（缺资金规模或汇率），先不下单")
 

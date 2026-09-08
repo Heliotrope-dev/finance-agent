@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 import advisor
+import alert_queue
 import data_sources as ds
 import tracker
 import wechat_delivery
@@ -101,6 +102,11 @@ def check() -> dict:
     fired = st.get("fired") or {}
     levels = _plan_levels()
 
+    # First retry any earlier accepted-for-delivery failure.  This runs before
+    # looking at the market so an alert is not abandoned merely because the
+    # market has since closed.
+    retried = alert_queue.flush(_send)
+
     # 要盯的：真实持仓 + 清单里的候选 + 用户自选
     watch: list[tuple[str, str, bool]] = []
     seen = set()
@@ -154,54 +160,60 @@ def check() -> dict:
         stop, target = lv.get("止损"), lv.get("目标")
 
         def once(kind: str) -> bool:
-            """同一支票同一类事件每天只推一次。"""
+            """同一支票同一类事件每天只推一次。
+
+            Do not mutate ``fired`` here: detection is not delivery.  The old
+            implementation wrote this state before Weixin had accepted the
+            message, so a transient bridge failure suppressed a real alert for
+            the rest of the trading day.
+            """
             k = f"{key}:{kind}"
-            if fired.get(k):
-                return False
-            fired[k] = dt.datetime.now().strftime("%H:%M")
-            return True
+            return not fired.get(k)
 
         if is_held:
             if stop and last <= stop and once("止损"):
                 alerts.append(("紧急", f"{name}（{sym}）跌破止损 {stop}，现价 {last}"
-                                      f"（当日{day_pct:+.1f}%）。早上设的线到了。"))
+                                      f"（当日{day_pct:+.1f}%）。早上设的线到了。", f"{key}:止损"))
             elif target and last >= target and once("目标"):
                 alerts.append(("止盈", f"{name}（{sym}）触及目标价 {target}，现价 {last}"
-                                      f"（当日{day_pct:+.1f}%）。可以考虑分批兑现。"))
+                                      f"（当日{day_pct:+.1f}%）。可以考虑分批兑现。", f"{key}:目标"))
             elif day_pct <= -_DROP_ALERT_PCT and once("急跌"):
                 alerts.append(("预警", f"{name}（{sym}）当日{day_pct:+.1f}%，现价 {last}"
                                       + (f"，止损位 {stop}" if stop else "")
-                                      + "。还没到止损，但值得看一眼有没有消息。"))
+                                      + "。还没到止损，但值得看一眼有没有消息。", f"{key}:急跌"))
             elif day_pct >= _RISE_ALERT_PCT and once("急涨"):
                 alerts.append(("异动", f"{name}（{sym}）当日{day_pct:+.1f}%，现价 {last}"
                                       + (f"，目标价 {target}" if target else "")
-                                      + "。急涨常有消息面，看一眼再决定拿不拿。"))
+                                      + "。急涨常有消息面，看一眼再决定拿不拿。", f"{key}:急涨"))
         else:
             # 候选股：跌到止损位附近意味着更好的介入价，但也可能是逻辑变了。
             # 只报"到位置了"，不说"可以买"。
             if stop and last <= stop * (1 + _ENTRY_NEAR_PCT / 100) and once("买点"):
                 alerts.append(("机会", f"{name}（{sym}）跌到 {last}，接近早上清单里的"
                                       f"止损位 {stop}（当日{day_pct:+.1f}%）。"
-                                      "这个位置进场性价比更高，但先确认跌的原因。"))
-
-    st["fired"] = fired
-    _save_state(st)
+                                      "这个位置进场性价比更高，但先确认跌的原因。", f"{key}:买点"))
 
     if not alerts:
-        return {"状态": "静默", "盯盘": len(watch), "说明": "没有触发任何条件"}
+        return {"状态": "静默", "盯盘": len(watch), "重试": retried, "说明": "没有触发任何条件"}
 
     order = {"紧急": 0, "止盈": 1, "预警": 2, "异动": 3, "机会": 4}
     alerts.sort(key=lambda x: order.get(x[0], 9))
     now = dt.datetime.now(dt.timezone.utc).astimezone().strftime("%H:%M")
-    lines = [f"投研站 · 盘中提醒 {now}", ""]
-    for tag, text in alerts:
-        lines.append(f"[{tag}] {text}")
-    lines.append("")
-    lines.append("这条只报你早上设的线到了，怎么做由你定。")
-    msg = "\n".join(lines)
-    ok = _send(msg)
-    print(msg)
-    return {"状态": "已推送" if ok else "推送失败", "条数": len(alerts)}
+    for tag, body, event_key in alerts:
+        msg = "\n".join((f"投研站 · 盘中提醒 {now}", "", f"[{tag}] {body}", "", "这条只报你早上设的线到了，怎么做由你定。"))
+        alert_queue.enqueue(event_key, msg, order[tag])
+
+    delivery = alert_queue.flush(_send)
+    # The queue is the delivery source of truth.  Only now is daily de-dupe
+    # committed, and only for events whose bridge receipt was accepted.
+    for _, _, event_key in alerts:
+        if alert_queue.status(event_key) == "delivered":
+            fired[event_key] = dt.datetime.now().strftime("%H:%M")
+    st["fired"] = fired
+    _save_state(st)
+    print(f"盘中提醒：新增{len(alerts)}条，送达{delivery['delivered']}条，失败{delivery['failed']}条")
+    return {"状态": "已推送" if delivery["failed"] == 0 else "待重试", "条数": len(alerts),
+            "送达": delivery["delivered"], "重试": retried}
 
 
 if __name__ == "__main__":
