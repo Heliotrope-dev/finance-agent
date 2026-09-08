@@ -197,3 +197,9 @@ python3 quick_record.py --buy --symbol 00700 --shares 100 --price 442.8
 - **只做语法检查发现不了跨模块的名字错误**：把两个函数名加进了错误模块的 import 块，`py_compile` 全部通过（它只做语法检查，不解析跨模块名字），部署后整站 ImportError 白屏。正确做法是静态解析所有 from-import 的名字，去目标模块里确认存在——直接 `import app` 不行，那会把整个页面也执行一遍，报的错跟导入无关。
 
 MIT License
+
+## Creators
+
+- Heliotrope
+- Claude Code
+- Codex
