@@ -3053,103 +3053,96 @@ def _render_advice_section():
         "</style>",
         unsafe_allow_html=True,
     )
-    try:
-        # source="watchlist"：2026-08-28改用固定规模但每天用真实热度/涨跌幅
-        # 榜重新取一遍的观察池（美股20/港股20/A股10，见advisor.py的
-        # _build_watchlist），取代原来"全市场量化初筛"的screen——用户明确
-        # 要求首页这块要能天天复现、事后可核对，不是每天看着完全不一样的
-        # 候选。原来的screen_candidates()仍然在跑，只是不再喂首页，继续
-        # 只进私人微信简报。
-        # market_quota={"US":3,"HK":2}：2026-09-02用户明确反馈"五个全是
-        # 港股"，要求"港美都有、美股占大头"——见tracker.get_latest_
-        # leaderboard的market_quota参数说明。
-        data = get_latest_leaderboard(limit=5, source="watchlist", market_quota={"US": 3, "HK": 2})
-    except Exception:
-        st.caption("候选数据暂时读取失败。")
-        return
+    # 2026-09-08：港股/美股分开出榜，不再混排——跟微信那边09:00/21:00分市场
+    # Top3推荐是同一次改造，网页首页也要跟着改，不能一边港美股分开一边
+    # 网页还是大杂烩。source改成watchlist_hk/watchlist_us（advisor.py的
+    # judge_market_watchlist写的独立批次），不再需要market_quota凑配额——
+    # 每个市场本来就是独立池子，不存在"被另一个市场挤占名额"这回事。
+    # 老的source="watchlist"（三市场混排）不删，advisor.py主流程仍然在写，
+    # 只是首页不再读它。
+    _market_label = {"US": "美股", "HK": "港股", "A": "A股"}
 
-    if not data.get("run_date"):
+    def _render_board_rows(board):
+        for rank, row in enumerate(board, 1):
+            market_key = row.get("market", "A")
+            _vtext = _clean_ai_markdown(row.get("fundamental_verdict", ""))
+            parts = _parse_advice_text(_vtext)
+            action = row.get("action", "观望")
+            color = _ADVICE_ACTION_COLOR.get(action, NEUTRAL_COLOR)
+            price = row.get("price_at_advice")
+            price_text = f"{price:.2f}" if price else "—"
+            score = row.get("score")
+            href = (
+                f"?open_symbol={urllib.parse.quote(row.get('symbol',''))}"
+                f"&open_market={urllib.parse.quote(market_key)}"
+                f"&open_name={urllib.parse.quote(row.get('name',''))}"
+                f"{_auth_qs()}"
+            )
+            # 跟持仓/自选列表同一个处理：不再用 border=True 的卡片。原来每一条是
+            # 一张带边框的卡片，卡片里又套一个带边框的"基本面/技术面/价格位置"
+            # 折叠框，五条就是五组方框套方框。改成发丝线分隔的平铺条目。
+            with st.container(key=f"lb_row_{market_key}_{row.get('symbol','')}"):
+                st.markdown(
+                    f"<a class='pos-card-link' href='{href}' target='_self'>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+                    f"<span style='font-weight:600;letter-spacing:-.01em'>"
+                    f"<span style='color:var(--fa-faint);font-weight:500'>{rank}</span>&nbsp;&nbsp;{_esc(row.get('name',''))}"
+                    f"<span style='font-weight:400;color:var(--fa-faint);font-size:0.78rem'> · {_market_label.get(market_key, market_key)}</span></span>"
+                    f"<span style='display:flex;align-items:center;gap:9px'>"
+                    + (f"<span style='font-size:0.8rem;color:var(--fa-muted)'>{score}</span>" if score is not None else "")
+                    # 结论徽标从实色块改成同色系淡底彩字，跟涨跌幅那边同一套处理。
+                    + f"<span style='background:color-mix(in srgb, {color} 12%, transparent);"
+                    f"color:{color};border-radius:5px;padding:2px 9px;"
+                    f"font-size:0.74rem;font-weight:600;letter-spacing:.02em'>{_esc(action)}</span></span></div>"
+                    f"<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:3px'>{_esc(row.get('symbol',''))} · 现价{price_text}"
+                    f" · 置信度{_esc(parts.get('置信度','—'))}"
+                    # 目标价和投资期限是研报格式里最该被一眼看到的两项——"买入"
+                    # 如果不带目标价和时间尺度，就是一句没有可检验内容的话。
+                    + (f" · 目标价{_esc(parts['目标价'])}" if parts.get("目标价") else "")
+                    + (f" · {_esc(parts['投资期限'])}" if parts.get("投资期限") else "")
+                    + "</div>"
+                    # 每张卡末尾那句"仅供参考，不构成投资建议"是advisor的prompt里
+                    # 硬性要求AI附上的，落在数据里。榜单一屏十几张卡，同一句重复
+                    # 十几遍，占地方，而且重复到一定次数人眼就自动跳过了，反而不如
+                    # 只说一次有效。渲染时剥掉，改成榜单末尾统一出现一次。
+                    f"<div style='margin-top:8px'>{_esc(_strip_disclaimer(parts.get('理由', '')))}</div>"
+                    f"</a>",
+                    unsafe_allow_html=True,
+                )
+                # 展开区按研报的读法排序：先多空两边的论点，再是三个基础面，
+                # 最后是假设/催化剂/证伪这三条"这个判断怎么才算错"的内容。
+                _detail_secs = [
+                    "多头逻辑", "空头逻辑", "基本面", "技术面", "价格位置",
+                    "关键假设与催化剂", "证伪条件",
+                ]
+                if any(parts.get(sec) for sec in _detail_secs):
+                    with st.expander("多空逻辑 / 基本面 / 催化剂与证伪"):
+                        for sec in _detail_secs:
+                            if parts.get(sec):
+                                st.markdown(_labeled_line(sec, parts[sec]), unsafe_allow_html=True)
+
+    # 港股/美股各自独立取一份，不再用market_quota从混合池里配额分配。
+    _any_board = False
+    for _mk, _label in (("HK", "港股"), ("US", "美股")):
+        try:
+            _data = get_latest_leaderboard(limit=5, source=f"watchlist_{_mk.lower()}")
+        except Exception:
+            continue
+        _board = _data.get("leaderboard") or []
+        if not _data.get("run_date") or not _board:
+            continue
+        _any_board = True
+        st.markdown(f"**{_label}**")
+        st.markdown(
+            f"<div style='font-size:0.74rem;color:var(--fa-faint);margin:-4px 0 14px'>"
+            f"更新于 {_data['run_date']}</div>",
+            unsafe_allow_html=True,
+        )
+        _render_board_rows(_board)
+
+    if not _any_board:
         st.caption("还没有生成过推荐股排行榜")
         return
-
-    # 2026-09-04：整块"说明"折叠面板按用户要求删掉。里面原来有四段——模块用途
-    # 的长篇解释、更新时间、历史方向一致率、打分分档回测。前者是纯说明文字；
-    # 后两组虽然是真实统计，但埋在一个叫"说明"的折叠面板里本来也没人看得到。
-    # 免责声明不会因此丢失：榜单末尾已经有一条统一的（见 _DISCLAIMER_SENTENCE
-    # 那处），合规意图仍然在页面上可见。这里只保留更新日期——榜单是每个工作日
-    # 更新一次的数据，"这份是哪天的"属于数据本身的一部分，不是说明。
-    st.markdown(
-        f"<div style='font-size:0.74rem;color:var(--fa-faint);margin:-4px 0 14px'>"
-        f"更新于 {data['run_date']}</div>",
-        unsafe_allow_html=True,
-    )
-
-    # 2026-08-25从"每个市场固定Top3"改成三市场混排的综合得分排行榜——用户
-    # 明确要求数量不用锁死、好的自然上榜、某个市场这次没有靠谱标的就不必
-    # 硬凑。单列纵向排布（不是并排的列），排行榜这种"有先后名次"的内容
-    # 天然适合从上到下读，并排列反而弱化了排名信息。
-    _market_label = {"US": "美股", "HK": "港股", "A": "A股"}
-    board = data.get("leaderboard") or []
-    if not board:
-        st.caption("这一批还没有可排名的结果。")
-        return
-    for rank, row in enumerate(board, 1):
-        market_key = row.get("market", "A")
-        _vtext = _clean_ai_markdown(row.get("fundamental_verdict", ""))
-        parts = _parse_advice_text(_vtext)
-        action = row.get("action", "观望")
-        color = _ADVICE_ACTION_COLOR.get(action, NEUTRAL_COLOR)
-        price = row.get("price_at_advice")
-        price_text = f"{price:.2f}" if price else "—"
-        score = row.get("score")
-        href = (
-            f"?open_symbol={urllib.parse.quote(row.get('symbol',''))}"
-            f"&open_market={urllib.parse.quote(market_key)}"
-            f"&open_name={urllib.parse.quote(row.get('name',''))}"
-            f"{_auth_qs()}"
-        )
-        # 跟持仓/自选列表同一个处理：不再用 border=True 的卡片。原来每一条是
-        # 一张带边框的卡片，卡片里又套一个带边框的"基本面/技术面/价格位置"
-        # 折叠框，五条就是五组方框套方框。改成发丝线分隔的平铺条目。
-        with st.container(key=f"lb_row_{market_key}_{row.get('symbol','')}"):
-            st.markdown(
-                f"<a class='pos-card-link' href='{href}' target='_self'>"
-                f"<div style='display:flex;justify-content:space-between;align-items:center'>"
-                f"<span style='font-weight:600;letter-spacing:-.01em'>"
-                f"<span style='color:var(--fa-faint);font-weight:500'>{rank}</span>&nbsp;&nbsp;{_esc(row.get('name',''))}"
-                f"<span style='font-weight:400;color:var(--fa-faint);font-size:0.78rem'> · {_market_label.get(market_key, market_key)}</span></span>"
-                f"<span style='display:flex;align-items:center;gap:9px'>"
-                + (f"<span style='font-size:0.8rem;color:var(--fa-muted)'>{score}</span>" if score is not None else "")
-                # 结论徽标从实色块改成同色系淡底彩字，跟涨跌幅那边同一套处理。
-                + f"<span style='background:color-mix(in srgb, {color} 12%, transparent);"
-                f"color:{color};border-radius:5px;padding:2px 9px;"
-                f"font-size:0.74rem;font-weight:600;letter-spacing:.02em'>{_esc(action)}</span></span></div>"
-                f"<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:3px'>{_esc(row.get('symbol',''))} · 现价{price_text}"
-                f" · 置信度{_esc(parts.get('置信度','—'))}"
-                # 目标价和投资期限是研报格式里最该被一眼看到的两项——"买入"
-                # 如果不带目标价和时间尺度，就是一句没有可检验内容的话。
-                + (f" · 目标价{_esc(parts['目标价'])}" if parts.get("目标价") else "")
-                + (f" · {_esc(parts['投资期限'])}" if parts.get("投资期限") else "")
-                + "</div>"
-                # 每张卡末尾那句"仅供参考，不构成投资建议"是advisor的prompt里
-                # 硬性要求AI附上的，落在数据里。榜单一屏十几张卡，同一句重复
-                # 十几遍，占地方，而且重复到一定次数人眼就自动跳过了，反而不如
-                # 只说一次有效。渲染时剥掉，改成榜单末尾统一出现一次。
-                f"<div style='margin-top:8px'>{_esc(_strip_disclaimer(parts.get('理由', '')))}</div>"
-                f"</a>",
-                unsafe_allow_html=True,
-            )
-            # 展开区按研报的读法排序：先多空两边的论点，再是三个基础面，
-            # 最后是假设/催化剂/证伪这三条"这个判断怎么才算错"的内容。
-            _detail_secs = [
-                "多头逻辑", "空头逻辑", "基本面", "技术面", "价格位置",
-                "关键假设与催化剂", "证伪条件",
-            ]
-            if any(parts.get(sec) for sec in _detail_secs):
-                with st.expander("多空逻辑 / 基本面 / 催化剂与证伪"):
-                    for sec in _detail_secs:
-                        if parts.get(sec):
-                            st.markdown(_labeled_line(sec, parts[sec]), unsafe_allow_html=True)
 
     # 免责声明统一放在榜单末尾说一次——上面每张卡里的那句已经剥掉了。
     st.markdown(

@@ -224,6 +224,78 @@ def _build_watchlist() -> list[dict]:
     return items
 
 
+def build_market_watchlist(market: str, target_size: int = 50) -> list[dict]:
+    """单市场版的_build_watchlist，给09:00/21:00盘前Top3推荐用——推荐要
+    港股/美股分开出榜，不能像_build_watchlist那样把三个市场混在一个池子
+    里判断再拆开看，那样每个市场实际参与打分的样本数不可控。
+
+    2026-09-08新增，跟老函数是平行关系，不改_build_watchlist本身、不影响
+    首页/老简报链路。
+
+    自选（仅该市场）无条件进池，不受target_size限制——这条沿用
+    _build_watchlist已经踩过的教训：用户真正关心的是他自己在跟的票，
+    不是"今天恰好上热门榜"的票，自选被砍掉过一次（详见_build_watchlist
+    的docstring），这里从设计上就不让它被热门榜挤掉。热门榜只负责把
+    池子补到target_size，不足target_size时如实用实际数量，不跨市场借用
+    别的市场的票来凑数。
+    """
+    items: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    try:
+        for p in tracker.get_positions(_EMAIL):
+            if p.get("market") != market:
+                continue
+            key = (str(p.get("symbol")), market)
+            if key[0] and key not in seen:
+                seen.add(key)
+                items.append({"symbol": key[0], "market": market,
+                              "name": p.get("name") or key[0]})
+    except Exception as e:
+        print(f"（{market}自选并入候选池失败，本轮只用热门榜：{e}）")
+
+    try:
+        df = ds.get_index_top_movers(market, limit=target_size)
+    except Exception as e:
+        df = None
+        print(f"（{market}热门榜拉取失败：{e}）")
+    if df is not None and not df.empty:
+        for _, r in df.iterrows():
+            if len(items) >= target_size:
+                break
+            key = (str(r["代码"]), market)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"symbol": key[0], "market": market,
+                          "name": r.get("名称", "") or ""})
+    return items
+
+
+def judge_market_watchlist(market: str) -> list[dict]:
+    """build_market_watchlist的AI判断版本，跟judge_watchlist同一套并发/
+    超时/供应商健康度处理逻辑，只是候选池换成单市场版。结果落库到
+    source=f"watchlist_{market.lower()}"（watchlist_hk/watchlist_us），
+    跟原有source="watchlist"（三市场混排，首页/老简报用）是独立批次，
+    互不干扰，daily_plan.py的市场专属Top3从这个新source读。
+    """
+    watchlist = build_market_watchlist(market)
+    print(f"（{market}候选池取到{len(watchlist)}支，开始逐支AI判断…）")
+    results = _run_concurrent_with_deadline(
+        watchlist, lambda it: _judge_one(it, f"watchlist_{market.lower()}"), timeout=1500,
+        max_workers=7 * _healthy_provider_count(),
+        progress_label=f"{market}候选池AI判断进度",
+    )
+    judged = [results[i] for i in sorted(results) if results[i] and "error" not in results[i]]
+    for e in judged:
+        tracker.log_advice(
+            _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
+            e["technical_signal"], e["action"], e["market"], e["name"],
+            source=f"watchlist_{market.lower()}", score=e.get("score"),
+        )
+    return judged
+
+
 # 首页排行榜只展示前5——用户明确要求"十个太多了就五个好了"，跟_LEADERBOARD_
 # SIZE（私人WeChat简报里全市场扫描那份榜单，仍然是10）分开维护，不共用一个
 # 常量，两份榜单的受众和取舍标准不一样。

@@ -701,6 +701,190 @@ def build_plan(email: str | None = None) -> dict:
     }
 
 
+def build_market_plan(market: str, email: str | None = None, top_n: int = 3) -> dict:
+    """单市场版的build_plan，给09:00/21:00盘前Top3推荐用——港股/美股分开出
+    报告，不是从三市场混排的清单里各挑几支凑数。
+
+    2026-09-08新增。不改build_plan本身，跟它是平行入口：读的leaderboard
+    source是advisor.judge_market_watchlist()写的source=f"watchlist_
+    {market.lower()}"，跟老的source="watchlist"（三市场混排）是独立批次。
+
+    _MIN_RR门槛、_rank_candidates的排序/分组逻辑原样复用，不为了凑够
+    top_n支就降低盈亏比标准——达标不足top_n支时，Top3就只列实际达标的
+    数量，不能把不达标的标的伪装成正式推荐。
+    """
+    email = email or advisor._EMAIL
+    today = dt.date.today().isoformat()
+
+    ai_status = "正常"
+    try:
+        advisor.chat_with_failover(
+            [{"role": "user", "content": "ok"}],
+            max_tokens=4, temperature=0, timeout=25, tag="plan-probe")
+    except Exception as e:
+        msg = str(e)
+        if "quota" in msg.lower() or "balance" in msg.lower() or "余额" in msg or "配额" in msg:
+            ai_status = "AI 供应商额度用尽，今天的判断跑不出来（需要充值）"
+        else:
+            ai_status = f"AI 调用失败：{type(e).__name__}"
+
+    items_watch, items_pos = [], []
+    lb_date = None
+    try:
+        lb = tracker.get_latest_leaderboard(limit=_POOL_SIZE, source=f"watchlist_{market.lower()}")
+        lb_date = (lb or {}).get("run_date")
+        for r in (lb or {}).get("leaderboard", []):
+            if (r.get("score") or 0) >= _MIN_SCORE:
+                it = _build_item(r)
+                if it:
+                    items_watch.append(it)
+    except Exception as e:
+        print(f"[plan/{market}] 候选池读取失败: {e}")
+
+    try:
+        advs = tracker.get_position_advice(email)
+        for p in tracker.get_positions(email):
+            if p.get("market") != market or (p.get("shares") or 0) <= 0:
+                continue
+            adv = advs.get(p["symbol"])
+            if not adv:
+                continue
+            it = _build_item({**p, **adv})
+            if it:
+                it["持仓中"] = True
+                items_pos.append(it)
+    except Exception as e:
+        print(f"[plan/{market}] 持仓判断读取失败: {e}")
+
+    ranked = _rank_candidates(items_watch)
+    # ranked已经是"达标组(按盈亏比降序)+不达标观察组(按分数降序,最多_MAX_ITEMS条)"
+    # 拼在一起的列表；达标组数量可能是0、可能远超top_n。Top3只从达标组里切，
+    # 不达标的即使排在ranked前面也不算——但ranked本身就是达标组在前，所以
+    # 直接切片，同时保留是不是"凑够了"这个信息给渲染层用。
+    qualifying = [x for x in ranked if (x.get("盈亏比") or 0) >= _MIN_RR]
+    top3 = qualifying[:top_n]
+
+    return {
+        "市场": market,
+        "日期": today,
+        "生成时间": dt.datetime.now(dt.timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M"),
+        "资金规模": _capital_cny(),
+        "AI状态": ai_status,
+        "评分批次": lb_date,
+        "评分是否当天": (lb_date == today) if lb_date else None,
+        "候选池规模": len(items_watch),
+        "达标数量": len(qualifying),
+        f"{market}Top{top_n}": top3,
+        "关注候选": ranked,
+        "持仓处理": items_pos,
+        # 完整候选池明细（不像"关注候选"那样把不达标的截到_MAX_ITEMS条），
+        # 给mentor_scan.py盘中扫描用——它要盯的是整个50支候选池有没有
+        # 谁重新回到买入区间/放量异动，不是只盯render_market_text展示的
+        # 那几条，被截掉的候选一样可能在盘中冒出机会。
+        "候选池明细": items_watch,
+    }
+
+
+def render_market_text(plan: dict, top_n: int = 3) -> str:
+    """render_text的单市场简化版，专给09:00/21:00盘前Top3推送用——只讲
+    这个市场的达标Top3+持仓，不重复render_text里三市场混排清单的完整
+    分档说明（那份留给daily_plan.py原有的推送场景用）。
+    """
+    market = plan.get("市场", "")
+    L = []
+    L.append(f"{market}盘前推荐 · {plan.get('日期')}")
+    L.append(f"资金规模 {plan.get('资金规模')} 元")
+    L.append("")
+
+    if plan.get("AI状态") != "正常":
+        L.append(f"[注意] {plan['AI状态']}")
+        L.append("")
+    elif plan.get("评分是否当天") is False:
+        L.append(f"[注意] 评分来自 {plan.get('评分批次')} 那一批，不是今早算的。")
+        L.append("")
+
+    pos = plan.get("持仓处理") or []
+    if pos:
+        L.append(f"持仓处理（{len(pos)}支）：")
+        for i2, it in enumerate(pos, 1):
+            L += _render_item_lines(it, i2)
+            L.append("")
+    else:
+        L.append("持仓处理：当前空仓")
+        L.append("")
+
+    top_key = f"{market}Top{top_n}"
+    top3 = plan.get(top_key) or []
+    达标数 = plan.get("达标数量", 0)
+    候选池 = plan.get("候选池规模", 0)
+    if top3:
+        L.append(f"{market}Top{len(top3)}（候选池{候选池}支，达标{达标数}支，盈亏比≥{_MIN_RR:g}）：")
+        for i, it in enumerate(top3, 1):
+            L += _render_item_lines(it, i)
+            L.append("")
+    else:
+        L.append(f"今天{market}没有盈亏比达标的机会（候选池{候选池}支，达标0支）——"
+                  f"不是没有票，是没有票同时满足盈亏比≥{_MIN_RR:g}这个门槛，宁可没有也不硬凑。")
+    L.append("")
+    L.append("仅供参考，不构成投资建议，请自行判断。")
+    return "\n".join(L)
+
+
+def _render_item_lines(x: dict, idx: int) -> list[str]:
+    """单个候选/持仓条目的完整多行呈现——买入区间/仓位/两档止损目标/机构
+    目标/规模提示/日均波幅，"能直接照着下单"那套格式。
+
+    2026-09-08从render_text内部的_one闭包提取成模块级函数，好让
+    render_market_text（市场专属Top3推送）复用同一套格式，不用维护
+    两份重复的呈现逻辑。提取前后行为完全一致，只是不再是闭包。
+    """
+    seg = [f"{idx}. {x['名称']}（{x['代码']}·{x['市场']}）{x['方向']} {x['评分']}分"]
+    seg.append(f"   昨收 {x['现价']}")
+    # 买入区间放在最前面。用户开盘时最先要回答的问题是"现在这个价能不能
+    # 下手"，不是"这票多少分"——分数已经在标题行了。
+    if x.get("买入上限"):
+        lo = x.get("买入下沿")
+        if lo:
+            seg.append(f"   买入区间 {lo} ~ {x['买入上限']}")
+            seg.append(f"     低于 {lo} 更好，但那已经贴近止损，跌下去要想想是不是逻辑变了")
+        else:
+            seg.append(f"   买入上限 {x['买入上限']}（不设下沿：均线已高于赔率分界，"
+                       f"这个位置本来就不便宜）")
+        seg.append(f"     高于 {x['买入上限']} 就别追了——那个价位盈亏比会跌破"
+                   f"{_MIN_RR:g}:1，赔率不够")
+    if x.get("建议股数"):
+        seg.append(f"   买入 {x['建议股数']} 股（约 {x['建议金额CNY']:,.0f} 元）"
+                   + (f"，每手{x['每手']}股" if x.get("每手", 1) > 1 else ""))
+    else:
+        seg.append("   仓位：算不出（缺资金规模或汇率），先不下单")
+
+    # 两档周期并排。同一支票超短线和短线的赔率经常差很多——刚冲高的
+    # 票超短线上方没空间，但一周维度上还有一段，分开看才知道该不该等。
+    for h in (x.get("两档") or []):
+        if h.get("盈亏比"):
+            need = 100 / (1 + h["盈亏比"])
+            seg.append(f"   [{h['周期']}] 止损 {h['止损']}（{h['止损幅度']}%）"
+                       f" 目标 {h['目标']}（{h['目标来源']}）"
+                       f" 盈亏比 {h['盈亏比']:.1f}:1，胜率>{need:.0f}%即正期望")
+        elif h.get("目标"):
+            seg.append(f"   [{h['周期']}] 止损 {h['止损']}（{h['止损幅度']}%）"
+                       f" 目标 {h['目标']} — 赔率不足")
+        else:
+            seg.append(f"   [{h['周期']}] 上方无明确阻力，只做止损参考")
+    # 机构目标单独一行并标明 12 个月口径。它跟上面的短线目标是两个
+    # 时间尺度，并排放又不标注的话，人会默认它们说的是同一段时间。
+    if x.get("机构12月目标"):
+        up2 = (x["机构12月目标"] - x["现价"]) / x["现价"] * 100
+        seg.append(f"   机构12个月目标 {x['机构12月目标']}（{up2:+.0f}%）"
+                   "——长期空间，不是短线目标")
+    if x.get("规模提示"):
+        seg.append(f"   [规模] {x['规模提示']}")
+    if x.get("日均波幅"):
+        seg.append(f"   日均波幅 {x['日均波幅']}%"
+                   + (f" · 52周分位 {x['52周分位']:.0f}%" if x.get("52周分位") is not None else ""))
+    return seg
+
+
 def render_text(plan: dict) -> str:
     """渲染成适合微信推送的纯文本。
 
@@ -738,58 +922,11 @@ def render_text(plan: dict) -> str:
                  f"{100/(1+_MIN_RR):.0f}%以上期望也是正的。")
         L.append("")
 
-    def _one(x, idx):
-        seg = [f"{idx}. {x['名称']}（{x['代码']}·{x['市场']}）{x['方向']} {x['评分']}分"]
-        seg.append(f"   昨收 {x['现价']}")
-        # 买入区间放在最前面。用户开盘时最先要回答的问题是"现在这个价能不能
-        # 下手"，不是"这票多少分"——分数已经在标题行了。
-        if x.get("买入上限"):
-            lo = x.get("买入下沿")
-            if lo:
-                seg.append(f"   买入区间 {lo} ~ {x['买入上限']}")
-                seg.append(f"     低于 {lo} 更好，但那已经贴近止损，跌下去要想想是不是逻辑变了")
-            else:
-                seg.append(f"   买入上限 {x['买入上限']}（不设下沿：均线已高于赔率分界，"
-                           f"这个位置本来就不便宜）")
-            seg.append(f"     高于 {x['买入上限']} 就别追了——那个价位盈亏比会跌破"
-                       f"{_MIN_RR:g}:1，赔率不够")
-        if x.get("建议股数"):
-            seg.append(f"   买入 {x['建议股数']} 股（约 {x['建议金额CNY']:,.0f} 元）"
-                       + (f"，每手{x['每手']}股" if x.get("每手", 1) > 1 else ""))
-        else:
-            seg.append("   仓位：算不出（缺资金规模或汇率），先不下单")
-
-        # 两档周期并排。同一支票超短线和短线的赔率经常差很多——刚冲高的
-        # 票超短线上方没空间，但一周维度上还有一段，分开看才知道该不该等。
-        for h in (x.get("两档") or []):
-            if h.get("盈亏比"):
-                need = 100 / (1 + h["盈亏比"])
-                seg.append(f"   [{h['周期']}] 止损 {h['止损']}（{h['止损幅度']}%）"
-                           f" 目标 {h['目标']}（{h['目标来源']}）"
-                           f" 盈亏比 {h['盈亏比']:.1f}:1，胜率>{need:.0f}%即正期望")
-            elif h.get("目标"):
-                seg.append(f"   [{h['周期']}] 止损 {h['止损']}（{h['止损幅度']}%）"
-                           f" 目标 {h['目标']} — 赔率不足")
-            else:
-                seg.append(f"   [{h['周期']}] 上方无明确阻力，只做止损参考")
-        # 机构目标单独一行并标明 12 个月口径。它跟上面的短线目标是两个
-        # 时间尺度，并排放又不标注的话，人会默认它们说的是同一段时间。
-        if x.get("机构12月目标"):
-            up2 = (x["机构12月目标"] - x["现价"]) / x["现价"] * 100
-            seg.append(f"   机构12个月目标 {x['机构12月目标']}（{up2:+.0f}%）"
-                       "——长期空间，不是短线目标")
-        if x.get("规模提示"):
-            seg.append(f"   [规模] {x['规模提示']}")
-        if x.get("日均波幅"):
-            seg.append(f"   日均波幅 {x['日均波幅']}%"
-                       + (f" · 52周分位 {x['52周分位']:.0f}%" if x.get("52周分位") is not None else ""))
-        return seg
-
     pos = plan.get("持仓处理") or []
     if pos:
         L.append(f"一、持仓处理（{len(pos)}支）")
         for i2, x in enumerate(pos, 1):
-            L += _one(x, i2)
+            L += _render_item_lines(x, i2)
             L.append("")
     else:
         L.append("一、持仓处理：当前空仓")
@@ -814,7 +951,7 @@ def render_text(plan: dict) -> str:
     if tradable:
         L.append(f"二、可执行候选（{len(tradable)}支，盈亏比≥{_MIN_RR:g}）")
         for i2, x in enumerate(tradable, 1):
-            L += _one(x, i2)
+            L += _render_item_lines(x, i2)
             L.append("")
     else:
         L.append("二、可执行候选：今天没有盈亏比达标的机会")
@@ -897,8 +1034,37 @@ def main() -> int:
     return 0
 
 
+def main_market(market: str) -> int:
+    """09:00/21:00盘前Top3推荐的CLI入口。跟main()是平行关系，不改main()
+    本身——落盘到独立文件（data/daily_plan_hk.json / daily_plan_us.json），
+    给mentor_scan.py盘中扫描读，不跟三市场混排的data/daily_plan.json混用，
+    两份快照各自独立更新、互不覆盖。
+    """
+    advisor._load_secrets_into_env()
+    plan = build_market_plan(market)
+    text = render_market_text(plan)
+    print(text)
+    out = (__import__("pathlib").Path(__file__).resolve().parent / "data"
+           / f"daily_plan_{market.lower()}.json")
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(plan, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        print(f"[plan/{market}] 落盘失败: {e}")
+    return 0
+
+
 if __name__ == "__main__":
-    code = main()
+    if "--market" in sys.argv:
+        _mi = sys.argv.index("--market")
+        _market = sys.argv[_mi + 1].upper() if _mi + 1 < len(sys.argv) else ""
+        if _market not in ("HK", "US"):
+            print(f"[plan] --market 只支持 HK/US，收到: {_market!r}")
+            code = 1
+        else:
+            code = main_market(_market)
+    else:
+        code = main()
     # 富途SDK线程不是daemon线程，不强制退出会挂住；os._exit 跳过stdout
     # 缓冲刷新，管道输出会丢，所以必须先flush（项目老坑）。
     sys.stdout.flush()
