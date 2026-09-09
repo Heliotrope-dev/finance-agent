@@ -278,12 +278,10 @@ def main() -> int:
     except Exception as e:
         print(f"取新股清单失败：{e}")
         return 1
-    if not ipos:
-        print("当前没有待上市的港股新股")
-        return 0
 
     # 先算近期已上市新股的首日表现。放在最前面是因为它不依赖AI，就算后面
-    # AI调用全挂了，这块统计仍然能更新——而这块恰恰是打新判断里最硬的依据。
+    # AI调用全挂了、甚至当天没有待上市新股，这块统计仍然能更新——而这块
+    # 恰恰是打新判断里最硬的依据，也是首页“暂无可申购新股”状态的更新时间来源。
     try:
         perf = ds.get_recent_ipo_performance(days=120, max_count=60)
         if perf.get("items"):
@@ -296,6 +294,10 @@ def main() -> int:
             print("没有算出新股首日表现（可能是接口没返回）")
     except Exception as e:
         print(f"首日表现统计失败（不影响后面的单只简报）：{e}")
+
+    if not ipos:
+        print("当前没有待上市的港股新股")
+        return 0
 
     ok = 0
     for ipo in ipos:

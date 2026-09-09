@@ -3719,8 +3719,6 @@ def _render_ipo_briefs():
         briefs = get_latest_ipo_briefs(limit=6)
     except Exception:
         briefs = []
-    if not briefs:
-        return
 
     import datetime as _d
     today = _d.date.today()
@@ -3735,6 +3733,20 @@ def _render_ipo_briefs():
         perf = get_latest_ipo_performance()
     except Exception:
         perf = {}
+    if not briefs:
+        updated_at = (perf or {}).get("created_at")
+        updated_text = ""
+        if updated_at:
+            try:
+                updated_text = _d.datetime.fromisoformat(updated_at).astimezone().strftime("%Y-%m-%d %H:%M")
+            except (TypeError, ValueError):
+                updated_text = ""
+        st.caption(
+            "当前没有处于认购期、且尚未上市的港股新股。"
+            + (f" 最近一次数据更新：{updated_text}。" if updated_text else "")
+        )
+        return
+
     _st = (perf or {}).get("stats") or {}
     if _st.get("count"):
         st.markdown(
@@ -6677,4 +6689,3 @@ else:
             _render_my_page()
 
         _render_ai_assistant()
-
