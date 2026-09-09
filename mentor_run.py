@@ -2,12 +2,10 @@
 """盘中导师式推荐——把mentor_scan(机械盯盘)和mentor_interpret(AI解读)串起来
 的CLI入口，给OpenClaw cron的exec步骤调用。
 
-跟trade_alert_push.py/老版intraday_watch.py不一样：这里不直接调用微信
-接口发送，只是打印结果——没有事件时打印"NO_REPLY"（复用error_watch.py
-already established的"约定关键词"模式），有事件时打印导师解读正文。
-OpenClaw的agentTurn读这个脚本的stdout，只有不是NO_REPLY时才用announce
-把内容发到微信，这样脚本本身没有绕开delivery配置的能力，跟今天
-trade_alert_push.py踩过的坑是同一类问题、这次从设计上就避免。
+默认只打印结果——没有事件时打印"NO_REPLY"。加 ``--deliver`` 时，真实
+事件直接通过已验证回执的微信桥投递，不再让 OpenClaw 的 agentTurn 先读
+stdout 再决定是否发送。机械盯盘每 15 分钟都会运行，若每次都唤醒模型，
+安静时也会浪费额度；现在只有 mentor_interpret 真正解释事件时才调用 AI。
 
 平静期（scan返回"静默"）：不调用mentor_interpret，零AI调用，打印NO_REPLY。
 """
@@ -39,6 +37,11 @@ if __name__ == "__main__":
     if _market not in ("HK", "US"):
         print(f"--market 只支持 HK/US，收到: {_market!r}")
         sys.exit(2)
-    print(run(_market))
+    result = run(_market)
+    print(result)
+    if "--deliver" in sys.argv and result != "NO_REPLY":
+        import wechat_delivery
+        if not wechat_delivery.send_text(result):
+            sys.exit(1)
     sys.stdout.flush()
     __import__("os")._exit(0)
