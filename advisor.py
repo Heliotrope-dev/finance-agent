@@ -70,14 +70,14 @@ _SECRETS_PATH = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.t
 # bull/bear workflow are decision-critical. Keep routine OpenClaw work on
 # Flash, but use the account's flagship model for this investment-analysis
 # boundary. Price, sizing, stops, and risk/reward remain deterministic code.
-_MODEL = "qwen3.8-max"
+_MODEL = "gemini-3.5-flash-lite"
 # 2026-09-01切到百炼Token Plan订阅套餐专属端点——之前用的是DashScope通用
 # 端点+账户级按量付费余额，账户余额一旦欠费(哪怕只差几毛钱)所有调用直接
 # 403，跟买没买套餐无关；套餐本身有独立的Credits额度和专属Base URL/API Key，
 # 走这个端点消耗的是套餐额度，不再受账户级欠费影响（前提是套餐本身没到期/
 # 没用完）。qwen3.7-flash在这个套餐的可用模型列表里已经没有了，换成
 # qwen3.8-flash（套餐列表里现在有的flash档位）。
-_QWEN_BASE = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 # 多空辩论跨供应商（2026-08-25）：用户要求辩论的多空双方不能是同一个模型
 # 自己扮演两个角色，换成阿里千问（多头）+ 智谱（空头）两家真正独立的供应商，
@@ -342,8 +342,7 @@ def _load_secrets_into_env():
     # SiliconFlow 时踩到——只要环境里已经有 QWEN_API_KEY 就整个跳过加载，
     # 新加的 SILICONFLOW_API_KEY 永远读不进来，兜底供应商等于没配。
     # 每加一家供应商都要把它的key加进这个判断。
-    if all(os.environ.get(k) for k in ("QWEN_API_KEY", "ZHIPU_API_KEY",
-                                       "SILICONFLOW_API_KEY", "ARK_API_KEY")):
+    if os.environ.get("GEMINI_API_KEY"):
         return
     try:
         secrets = toml.load(_SECRETS_PATH)
@@ -370,7 +369,7 @@ def _is_insufficient_balance_error(exc: Exception) -> bool:
     return "Arrearage" in text or "Insufficient Balance" in text or "insufficient_quota" in text.lower()
 
 
-def _check_qwen_balance():
+def _check_gemini_available():
     """开跑前确认"至少还有一家AI供应商能用"，一家都没有就早停。
 
     这个脚本几乎每一步都要调AI（候选初筛、逐支判断、组合分析）。一家都不通
@@ -407,15 +406,15 @@ def _check_qwen_balance():
 
 
 def _client() -> OpenAI:
-    key = os.environ.get("QWEN_API_KEY", "")
+    key = os.environ.get("GEMINI_API_KEY", "")
     if not key:
-        raise RuntimeError("未配置 QWEN_API_KEY。")
+        raise RuntimeError("未配置 GEMINI_API_KEY。")
     # 踩坑记录（DeepSeek时期留下的，千问目前没复现过，但保留这层超时保护
     # 不吃亏）：没设timeout时，账号余额不足这类快速失败的错误在openai SDK
     # 默认重试逻辑下可能会挂很久不返回——不是真的在处理，是客户端卡在某个
     # 没有时间上限的等待/重试循环里。显式给60秒超时，快速失败好过整批
     # 候选全部在同一个坑里陪跑到_run_concurrent_with_deadline的400秒外层超时。
-    return OpenAI(api_key=key, base_url=_QWEN_BASE, max_retries=2, timeout=60)
+    return OpenAI(api_key=key, base_url=_GEMINI_BASE, max_retries=2, timeout=60)
 
 
 # 第三家供应商（2026-09-05新增）。千问周额度耗尽的同一天，智谱的资源包也
@@ -530,9 +529,7 @@ def _healthy_provider_count() -> int:
     至少返回1——一家都不健康时并发降到最低，让它慢慢跑而不是直接不跑。
     """
     now = time.time()
-    healthy = sum(1 for who in ("千问", "智谱", "SiliconFlow", "方舟GLM")
-                  if _PROVIDER_COOLDOWN.get(who, 0) <= now)
-    return max(healthy, 1)
+    return 1
 _COOLDOWN_SEC = 900
 
 
@@ -577,17 +574,7 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
     # 踩过的坑是同一个。按调用点原样的预算转过去，思考链很容易把额度吃光、
     # 正文返回空——那就等于兜底了个寂寞。给智谱放宽到2倍，账号里air那包有
     # 1199万tokens，放宽这点量完全够烧。
-    _chain = [
-        (_client, _MODEL, "千问", 1.0),
-        (_zhipu_client, _ZHIPU_MODEL, "智谱", 2.0),
-        # DeepSeek-V3 不是推理模型，没有隐藏思考链抢预算的问题，倍数用1.0。
-        (_siliconflow_client, _SF_MODEL, "SiliconFlow", 1.0),
-        # 火山方舟 GLM-5.2。倍数给 2.5：它是推理模型，而且实测比智谱那版更能
-        # "想"——一句"什么是市盈率"的问题，输入25 tokens、输出517 tokens，
-        # 绝大部分是思考链。判断任务的正文本来就长，预算不放宽会被思考链烧穿、
-        # 返回空内容（这个坑千问和智谱都踩过，见上面两条注释）。
-        (_ark_client, _ARK_MODEL, "方舟GLM", 2.5),
-    ]
+    _chain = [(_client, _MODEL, "Gemini", 1.0)]
     # prefer 只调整起点，不裁剪链条：把指定的那家转到队首，其余顺序不变。
     # 这是给多空辩论用的——辩论的价值建立在"两方由互相独立的模型给出"之上，
     # 双方都从千问开始就退化成同一个模型的左右手互搏了。让空头从智谱起步，
@@ -3507,7 +3494,7 @@ def run_positions_advice():
     彻底不互相占用时间，17:30那条从此只需要专心跑"发现新机会"这一件事。
     """
     _load_secrets_into_env()
-    _check_qwen_balance()
+    _check_gemini_available()
 
     position_results = advise_positions()
     for e in position_results:
@@ -3532,7 +3519,7 @@ def run_positions_advice():
 
 def main():
     _load_secrets_into_env()
-    _check_qwen_balance()
+    _check_gemini_available()
 
     backfilled = _backfill_due_advice()
     print(f"（已回填 {backfilled} 条到期的历史建议价格）\n")

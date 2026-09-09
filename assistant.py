@@ -16,11 +16,11 @@ import streamlit as st
 from openai import OpenAI
 
 # 2026-09-01切到百炼Token Plan套餐专属端点，理由同advisor.py同一处改动。
-_QWEN_BASE = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # The chat window primarily handles repeated questions, navigation help, and
 # presentation of already-computed facts. The decision-critical advisor and
 # analysis layers use Max; keep this high-frequency path on Flash.
-_MODEL = "qwen3.8-flash"
+_MODEL = "gemini-3.5-flash-lite"
 
 
 def get_secret(key: str) -> str:
@@ -44,9 +44,9 @@ def _client() -> OpenAI:
     OpenAI/httpx客户端本身是线程安全、可并发复用的，缓存成单例没有
     每次话请求状态互相污染的风险。
     """
-    key = get_secret("QWEN_API_KEY")
+    key = get_secret("GEMINI_API_KEY")
     if not key:
-        raise RuntimeError("未配置 QWEN_API_KEY。")
+        raise RuntimeError("未配置 GEMINI_API_KEY。")
     # timeout=60/max_retries=0：2026-09-02排查advisor.py那边"千问对特定
     # 持仓票的内容会挂住不返回，一等能等120秒以上"的真实故障时顺带查到，
     # 这个客户端之前也没配超时，只靠SDK默认的600秒兜底——这里是用户直接
@@ -57,7 +57,7 @@ def _client() -> OpenAI:
     # SDK自己的重试，一次60秒的挂起会被原样重试2次，用户实际要等接近
     # 180秒才会看到"回答失败"，这里一并关掉，卡住了就快速失败，好过让
     # 用户对着"思考中"干等三倍时间。
-    return OpenAI(api_key=key, base_url=_QWEN_BASE, max_retries=0, timeout=60)
+    return OpenAI(api_key=key, base_url=_GEMINI_BASE, max_retries=0, timeout=60)
 
 
 _SYSTEM_PROMPT_TEMPLATE = """你是"投研站"网站里的AI助手，一个小圆形按钮，用户点开
@@ -621,38 +621,7 @@ def _create_stream_with_failover(**kwargs):
 
     转移条件复用advisor._is_failover_worthy，跟其余调用点保持同一套判断。
     """
-    import advisor
-
-    primary_err = None
-    errors: list[tuple[str, Exception]] = []
-    for client_fn, model, who in (
-        (_client, _MODEL, "千问"),
-        (advisor._zhipu_client, advisor._ZHIPU_MODEL, "智谱"),
-        (advisor._siliconflow_client, advisor._SF_MODEL, "SiliconFlow"),
-    ):
-        try:
-            client = client_fn()
-        except Exception as e:
-            primary_err = primary_err or e
-            continue
-        if client is None:
-            continue
-        try:
-            stream = client.chat.completions.create(model=model, **kwargs)
-            if who != "千问":
-                print(f"[failover/assistant] 千问不可用，已改用{who}")
-            return stream
-        except Exception as e:
-            primary_err = primary_err or e
-            errors.append((who, e))
-            if not advisor._is_failover_worthy(e):
-                raise
-            print(f"[failover/assistant] {who}失败({type(e).__name__})，尝试下一家")
-            continue
-    if errors:
-        detail = "；".join(f"{w}: {type(e).__name__} {e}" for w, e in errors)
-        raise RuntimeError(f"所有AI供应商都失败了 —— {detail}") from errors[0][1]
-    raise primary_err if primary_err else RuntimeError("没有任何可用的AI供应商")
+    return _client().chat.completions.create(model=_MODEL, **kwargs)
 
 
 def _execute_tool(name: str, args: dict) -> str:
@@ -725,6 +694,26 @@ def _execute_tool(name: str, args: dict) -> str:
         return f"查询失败：{e}"
 
 
+def _tool_call_extra_content(tool_call) -> dict | None:
+    """Return Gemini's OpenAI-compatibility extension without altering it.
+
+    ``extra_content`` is deliberately not part of OpenAI's typed tool-call
+    schema.  Depending on the installed SDK/Pydantic version it is therefore
+    exposed either as an attribute or in ``model_extra``.  Reading only the
+    attribute silently drops Gemini 3's thought signature on versions which
+    keep unknown response fields in ``model_extra``; the following request
+    then fails validation before the tool result can be processed.
+    """
+    value = getattr(tool_call, "extra_content", None)
+    if value is None:
+        extras = getattr(tool_call, "model_extra", None)
+        if not extras:
+            extras = getattr(tool_call, "__pydantic_extra__", None)
+        if isinstance(extras, dict):
+            value = extras.get("extra_content")
+    return value if isinstance(value, dict) else None
+
+
 def _stream_and_collect(messages: list[dict], max_tokens: int):
     """跑一次流式请求，边收边yield文字增量，同时把可能出现的tool_calls
     分片累积起来，生成器结束时return——调用方用`result = yield from
@@ -752,7 +741,10 @@ def _stream_and_collect(messages: list[dict], max_tokens: int):
         # 这是OpenAI兼容协议流式工具调用的标准形状，不是千问特有行为。
         if delta.tool_calls:
             for tc in delta.tool_calls:
-                slot = tool_calls_acc.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
+                slot = tool_calls_acc.setdefault(
+                    tc.index,
+                    {"id": "", "name": "", "arguments": "", "extra_content": None},
+                )
                 if tc.id:
                     slot["id"] = tc.id
                 if tc.function:
@@ -760,6 +752,15 @@ def _stream_and_collect(messages: list[dict], max_tokens: int):
                         slot["name"] += tc.function.name
                     if tc.function.arguments:
                         slot["arguments"] += tc.function.arguments
+                # Gemini 3 thinking models attach an encrypted thought
+                # signature to the function-call part.  It must be returned
+                # unchanged with that same part before sending tool results.
+                # ``extra_content`` can live in Pydantic's ``model_extra``
+                # instead of a normal attribute; preserve the mapping exactly
+                # as Gemini sent it (including google.thought_signature).
+                extra_content = _tool_call_extra_content(tc)
+                if extra_content:
+                    slot["extra_content"] = extra_content
     return {"content": content_acc, "tool_calls": tool_calls_acc}
 
 
@@ -784,10 +785,16 @@ def stream_reply(messages: list[dict], context: str, max_tokens: int = 1200):
         return
 
     # tool_calls_acc是按index累积的分片字典，转成发请求要用的标准格式。
-    tool_calls_list = [
-        {"id": slot["id"], "type": "function", "function": {"name": slot["name"], "arguments": slot["arguments"]}}
-        for slot in first["tool_calls"].values()
-    ]
+    tool_calls_list = []
+    for slot in first["tool_calls"].values():
+        call = {
+            "id": slot["id"],
+            "type": "function",
+            "function": {"name": slot["name"], "arguments": slot["arguments"]},
+        }
+        if slot["extra_content"]:
+            call["extra_content"] = slot["extra_content"]
+        tool_calls_list.append(call)
     tool_msgs = [{"role": "assistant", "content": first["content"] or "", "tool_calls": tool_calls_list}]
     for call in tool_calls_list[:4]:  # 单轮最多执行4个工具调用，避免模型一次申请一大堆查询拖慢响应
         try:

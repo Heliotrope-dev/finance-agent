@@ -8,10 +8,10 @@ from openai import OpenAI
 # 2026-08-22从DeepSeek切到千问——五个维度真实同题测过千问全面不输且更便宜，
 # 详细对比记录见advisor.py同一处改动的注释，这里不重复。
 # 2026-09-01切到百炼Token Plan套餐专属端点，理由同advisor.py同一处改动。
-_QWEN_BASE = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # This layer reconciles news with financial and market facts for the user.
 # It is a substantive investment-analysis path, not a background formatter.
-_MODEL = "qwen3.8-max"
+_MODEL = "gemini-3.5-flash-lite"
 
 
 def get_secret(key: str) -> str:
@@ -22,10 +22,10 @@ def get_secret(key: str) -> str:
 
 
 def _client() -> OpenAI:
-    key = get_secret("QWEN_API_KEY")
+    key = get_secret("GEMINI_API_KEY")
     if not key:
-        raise RuntimeError("未配置 QWEN_API_KEY。")
-    return OpenAI(api_key=key, base_url=_QWEN_BASE, max_retries=2)
+        raise RuntimeError("未配置 GEMINI_API_KEY。")
+    return OpenAI(api_key=key, base_url=_GEMINI_BASE, max_retries=2)
 
 
 def _create_stream_with_failover(**kwargs):
@@ -36,38 +36,7 @@ def _create_stream_with_failover(**kwargs):
     抽出去就要把客户端当参数传进传出，反而绕。转移判据复用
     advisor._is_failover_worthy，保证全项目一套标准。
     """
-    import advisor
-
-    primary_err = None
-    errors: list[tuple[str, Exception]] = []
-    for client_fn, model, who in (
-        (_client, _MODEL, "千问"),
-        (advisor._zhipu_client, advisor._ZHIPU_MODEL, "智谱"),
-        (advisor._siliconflow_client, advisor._SF_MODEL, "SiliconFlow"),
-    ):
-        try:
-            client = client_fn()
-        except Exception as e:
-            primary_err = primary_err or e
-            continue
-        if client is None:
-            continue
-        try:
-            stream = client.chat.completions.create(model=model, **kwargs)
-            if who != "千问":
-                print(f"[failover/analysis] 千问不可用，已改用{who}")
-            return stream
-        except Exception as e:
-            primary_err = primary_err or e
-            errors.append((who, e))
-            if not advisor._is_failover_worthy(e):
-                raise
-            print(f"[failover/analysis] {who}失败({type(e).__name__})，尝试下一家")
-            continue
-    if errors:
-        detail = "；".join(f"{w}: {type(e).__name__} {e}" for w, e in errors)
-        raise RuntimeError(f"所有AI供应商都失败了 —— {detail}") from errors[0][1]
-    raise primary_err if primary_err else RuntimeError("没有任何可用的AI供应商")
+    return _client().chat.completions.create(model=_MODEL, **kwargs)
 
 
 def _stream_chat(system_prompt: str, user_content: str, max_tokens: int = 2000):
