@@ -795,14 +795,27 @@ def stream_reply(messages: list[dict], context: str, max_tokens: int = 1200):
         if slot["extra_content"]:
             call["extra_content"] = slot["extra_content"]
         tool_calls_list.append(call)
-    tool_msgs = [{"role": "assistant", "content": first["content"] or "", "tool_calls": tool_calls_list}]
+    # Gemini's OpenAI-compatible endpoint rejects a synthetic empty text part
+    # alongside function calls.  Keep text only when the model actually sent
+    # it, so the signed function-call part retains its original shape.
+    assistant_tool_msg = {"role": "assistant", "tool_calls": tool_calls_list}
+    if first["content"]:
+        assistant_tool_msg["content"] = first["content"]
+    tool_msgs = [assistant_tool_msg]
     for call in tool_calls_list[:4]:  # 单轮最多执行4个工具调用，避免模型一次申请一大堆查询拖慢响应
         try:
             args = json.loads(call["function"]["arguments"] or "{}")
         except Exception:
             args = {}
         result = _execute_tool(call["function"]["name"], args)
-        tool_msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result})
+        # Gemini requires the function name on each tool-result message in
+        # addition to tool_call_id (the OpenAI API accepts it without name).
+        tool_msgs.append({
+            "role": "tool",
+            "name": call["function"]["name"],
+            "tool_call_id": call["id"],
+            "content": result,
+        })
 
     stream = _create_stream_with_failover(
         messages=base_messages + tool_msgs,
