@@ -37,6 +37,7 @@ function locatePluginRoot() {
 
   const projectsRoot = "/root/.openclaw/npm/projects";
   try {
+    const candidates = [];
     for (const entry of fs.readdirSync(projectsRoot)) {
       if (!entry.startsWith("tencent-weixin-openclaw-weixin-")) continue;
       const candidate = path.join(
@@ -47,8 +48,23 @@ function locatePluginRoot() {
         "openclaw-weixin",
       );
       if (fs.existsSync(path.join(candidate, "dist", "src", "messaging", "send.js"))) {
-        return candidate;
+        try {
+          const version = String(JSON.parse(
+            fs.readFileSync(path.join(candidate, "package.json"), "utf8"),
+          ).version || "0.0.0");
+          candidates.push({ candidate, version });
+        } catch {
+          // Ignore incomplete plugin directories left behind by an interrupted update.
+        }
       }
+    }
+    if (candidates.length) {
+      // Plugin updates leave the old generation on disk.  Do not let directory
+      // iteration silently keep the sender on an obsolete implementation.
+      candidates.sort((a, b) => a.version.localeCompare(b.version, undefined, {
+        numeric: true,
+      }));
+      return candidates.at(-1).candidate;
     }
   } catch {
     // The explicit error below tells the operator which dependency is absent.
