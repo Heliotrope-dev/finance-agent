@@ -7,6 +7,7 @@ import re
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, wait as _futures_wait
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as _cv1
@@ -2378,10 +2379,7 @@ def _render_hot_sectors(market: str):
     except Exception:
         sectors = None
     if sectors is None or sectors.empty:
-        if market == "A":
-            st.caption("暂时获取不到板块数据。")
-        else:
-            st.caption("需要 Futu OpenD 连接，暂不可用")
+        st.caption("暂时获取不到板块数据；指数和个股行情仍可独立正常更新。")
         return
 
     expand_key = f"_sectors_expand_{market}"
@@ -3034,6 +3032,27 @@ def _parse_advice_text(text: str) -> dict:
     return parts
 
 
+def _load_order_ready_items(market: str) -> list[dict]:
+    """Read the current pre-market plan without running external data or an AI call."""
+    path = Path(__file__).resolve().parent / "data" / f"daily_plan_{market.lower()}.json"
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    if plan.get("日期") != cn_now().date().isoformat() or plan.get("AI状态") != "正常":
+        return []
+    return [
+        item for item in (plan.get("关注候选") or [])
+        if item.get("方向") == "买入"
+        and item.get("新开仓状态") == "可执行"
+        and item.get("建议股数")
+        and item.get("买入区间")
+        and item.get("止损") is not None
+        and item.get("目标") is not None
+        and (item.get("盈亏比") or 0) > 0
+    ]
+
+
 def _render_advice_section():
     """首页"AI投研候选"——跟其它模块（世界地图/今日资讯）唯一的本质区别：
     这里明确给买入/卖出/持有/观望结论，其它模块刻意"只摆事实不下结论"。
@@ -3043,7 +3062,27 @@ def _render_advice_section():
     结果，首页访问不现场重新跑——重新跑一次要几分钟、几十次AI调用，公开页面
     每次访问都触发一遍完全不现实，也没必要（这类基本面判断一天一次足够新）。
     """
-    st.markdown("**推荐股排行榜**")
+    st.markdown("**今日可执行清单**")
+    st.caption("只显示当天已通过买入区间、股数、止损、目标和盈亏比校验的标的；没有就是今天不下新单。")
+    _order_ready = [item for _market in ("HK", "US") for item in _load_order_ready_items(_market)]
+    if not _order_ready:
+        st.caption("今天暂无可直接下单的标的。研究评分或“买入”观点不会在这里替代交易清单。")
+    else:
+        for item in _order_ready:
+            price_range = item.get("买入区间") or {}
+            low, high = price_range.get("下限"), price_range.get("上限")
+            range_text = f"{low:.2f}–{high:.2f}" if isinstance(low, (int, float)) and isinstance(high, (int, float)) else "—"
+            st.markdown(
+                f"<div style='padding:9px 0;border-bottom:1px solid var(--fa-border)'>"
+                f"<strong>{_esc(item.get('名称', ''))}</strong>"
+                f"<span style='color:var(--fa-faint);font-size:.78rem'> · {_esc(str(item.get('市场', '')))} · {_esc(str(item.get('代码', '')))}</span><br>"
+                f"<span style='font-size:.8rem;color:var(--fa-muted)'>买入区间 {range_text} · 买入 {int(item['建议股数'])} 股 · "
+                f"止损 {item['止损']:.2f} · 目标 {item['目标']:.2f} · 盈亏比 {item['盈亏比']:.2f}:1</span></div>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("**投研观察排行榜**")
+    st.caption("这是基本面和技术面的研究排序，不是下单指令；实际操作只以上方“今日可执行清单”为准。")
     # 卡片可点击跳转详情页——复用持仓列表卡片验证过的方案（见
     # _render_position_rows 的踩坑记录：JS/CSS猜DOM结构点不动，最后用最朴素
     # 的<a href="?open_symbol=...">整页导航才可靠）。那段CSS只在持仓tab渲染
@@ -3073,7 +3112,6 @@ def _render_advice_section():
             _vtext = _clean_ai_markdown(row.get("fundamental_verdict", ""))
             parts = _parse_advice_text(_vtext)
             action = row.get("action", "观望")
-            color = _ADVICE_ACTION_COLOR.get(action, NEUTRAL_COLOR)
             price = row.get("price_at_advice")
             price_text = f"{price:.2f}" if price else "—"
             score = row.get("score")
@@ -3095,10 +3133,8 @@ def _render_advice_section():
                     f"<span style='font-weight:400;color:var(--fa-faint);font-size:0.78rem'> · {_market_label.get(market_key, market_key)}</span></span>"
                     f"<span style='display:flex;align-items:center;gap:9px'>"
                     + (f"<span style='font-size:0.8rem;color:var(--fa-muted)'>{score}</span>" if score is not None else "")
-                    # 结论徽标从实色块改成同色系淡底彩字，跟涨跌幅那边同一套处理。
-                    + f"<span style='background:color-mix(in srgb, {color} 12%, transparent);"
-                    f"color:{color};border-radius:5px;padding:2px 9px;"
-                    f"font-size:0.74rem;font-weight:600;letter-spacing:.02em'>{_esc(action)}</span></span></div>"
+                    + f"<span style='color:var(--fa-muted);border-radius:5px;padding:2px 9px;"
+                    f"font-size:0.74rem;font-weight:600;letter-spacing:.02em'>研究观点：{_esc(action)}</span></span></div>"
                     f"<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:3px'>{_esc(row.get('symbol',''))} · 现价{price_text}"
                     f" · 置信度{_esc(parts.get('置信度','—'))}"
                     # 目标价和投资期限是研报格式里最该被一眼看到的两项——"买入"
@@ -3146,7 +3182,7 @@ def _render_advice_section():
         _render_board_rows(_board)
 
     if not _any_board:
-        st.caption("还没有生成过推荐股排行榜")
+        st.caption("还没有生成过投研观察排行榜")
         return
 
     # 免责声明统一放在榜单末尾说一次——上面每张卡里的那句已经剥掉了。
