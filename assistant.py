@@ -810,11 +810,14 @@ def stream_reply(messages: list[dict], context: str, max_tokens: int = 1200):
         result = _execute_tool(call["function"]["name"], args)
         # Gemini requires the function name on each tool-result message in
         # addition to tool_call_id (the OpenAI API accepts it without name).
+        # Its compatibility layer also maps this field to functionResponse,
+        # whose response payload must be a JSON object rather than arbitrary
+        # display text.  Keep the tool's text losslessly under ``result``.
         tool_msgs.append({
             "role": "tool",
             "name": call["function"]["name"],
             "tool_call_id": call["id"],
-            "content": result,
+            "content": json.dumps({"result": result}, ensure_ascii=False),
         })
 
     stream = _create_stream_with_failover(
