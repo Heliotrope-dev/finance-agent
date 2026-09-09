@@ -69,6 +69,9 @@ _POOL_SIZE = 45
 #
 # 配合 _rank_candidates 按盈亏比降序排，达标的不设数量上限：宁可某天只有
 # 一两支，也不要为了凑满清单放进赔率不够的票。
+# 仅在风险档案缺失时用于展示观察池。所有可执行的新开仓都必须服从
+# risk_profile.json 中用户明确设定的 min_reward_risk，不能在推荐层另设一条
+# 更低的门槛。
 _MIN_RR = 2.5
 
 # 单笔最多亏总资金的百分之几。2% 是仓位管理里的常规值：连错 10 次总回撤
@@ -105,6 +108,27 @@ _HORIZONS = (
     # 是四周才可能摸到的位置，拿它给五天的交易当目标就是老错误的重演。
     ("短线3-5天", 1.25, (5, 10)),
 )
+
+
+def _min_reward_risk() -> float:
+    """Return the user's current reward/risk floor, with a safe display fallback."""
+    profile = risk_policy.load_profile() or {}
+    try:
+        value = float(profile.get("min_reward_risk"))
+        return value if value > 0 else _MIN_RR
+    except (TypeError, ValueError):
+        return _MIN_RR
+
+
+def _is_executable_new_buy(item: dict, min_rr: float | None = None) -> bool:
+    """A top recommendation must be an order-ready setup, not merely a high score."""
+    threshold = _min_reward_risk() if min_rr is None else min_rr
+    return bool(
+        item.get("方向") == "买入"
+        and item.get("新开仓状态") == "可执行"
+        and item.get("建议股数")
+        and (item.get("盈亏比") or 0) >= threshold
+    )
 
 
 def _atr(symbol: str, market: str, days: int = 20) -> float | None:
@@ -452,8 +476,9 @@ def _build_item(rec: dict) -> dict | None:
     # 下限用 20 日均线，但不低于止损位上方一点：太贴近止损的位置看着
     # 便宜，实际是买在"再跌一点就该认输"的地方，一个正常回踩就把你扫掉。
     buy_hi = buy_lo = None
+    min_rr = _min_reward_risk()
     if target and stop < last:
-        buy_hi = (target + _MIN_RR * stop) / (1 + _MIN_RR)
+        buy_hi = (target + min_rr * stop) / (1 + min_rr)
         ma20 = None
         try:
             import datetime as _d
@@ -477,13 +502,13 @@ def _build_item(rec: dict) -> dict | None:
     cap = _capital_cny()
     fx, cur = _fx_to_cny(market)
     shares = amount_cny = None
-    execution_reason = None
+    execution_reasons: list[str] = []
     is_new_buy = rec.get("action") == "买入" and not (rec.get("shares") or 0)
     decision = risk_policy.validate_new_position(
         market=market, entry=last, stop=stop, target=target, reward_risk=rr,
     ) if is_new_buy else None
     if decision and not decision.allowed:
-        execution_reason = "；".join(decision.reasons)
+        execution_reasons.extend(decision.reasons)
     # 每手股数先查真实值，查不到才退回默认。
     # 2026-09-07：原来直接用 _HK_LOT_FALLBACK(100)，而港股每手从1到10000都有，
     # 实测六支里四支是错的（MINIMAX 20股、携程 50股、小米和泡泡玛特 200股）。
@@ -527,7 +552,7 @@ def _build_item(rec: dict) -> dict | None:
                 # 是两回事，说反了用户会以为自己钱不够——他钱够，是风控在拦。
                 why = (f"{unit_label} 约 {one_unit_cny:,.0f} 元，超过单笔上限 "
                        f"{cap_limit:,.0f} 元（本金的{max_position_pct:.0f}%）")
-            execution_reason = why
+            execution_reasons.append(why)
 
     # 趋势闸门：20日均线向下就不做多头进场。
     #
@@ -583,6 +608,31 @@ def _build_item(rec: dict) -> dict | None:
         except Exception:
             _trigger = None
 
+    # A trade plan has to be actionable *now*.  A model verdict, a high score,
+    # or a theoretical reward/risk ratio alone is not an entry signal.  These
+    # gates intentionally sit after sizing and trend checks so a notification
+    # can never call a watch-only or unbuyable candidate a "Top recommendation".
+    if is_new_buy:
+        if buy_lo is None or buy_hi is None:
+            execution_reasons.append("当前无法形成有效的买入区间。")
+        elif last < buy_lo:
+            execution_reasons.append(f"尚未触发：现价低于买入区间 {buy_lo:.3f}。")
+        elif last > buy_hi:
+            execution_reasons.append(f"不可追高：现价高于买入上限 {buy_hi:.3f}。")
+        if _falling:
+            trigger_text = f"，等待站上 {_trigger:.2f}" if _trigger else ""
+            execution_reasons.append(f"趋势仍向下{trigger_text}后再评估。")
+    else:
+        execution_reasons.append(f"AI 当前结论为“{rec.get('action') or '未知'}”，不是买入。")
+
+    execution_reason = "；".join(dict.fromkeys(execution_reasons)) or None
+    executable = bool(
+        is_new_buy
+        and decision and decision.allowed
+        and shares
+        and not execution_reasons
+    )
+
     # 规模检查针对机构那个12个月目标——短线目标通常只有几个点的空间，
     # 算隐含市值没有意义。
     reality = _reality_check(symbol, market, last, analyst_t)
@@ -604,7 +654,7 @@ def _build_item(rec: dict) -> dict | None:
         "建议股数": shares,
         "建议金额CNY": amount_cny,
         "不可执行原因": execution_reason,
-        "新开仓状态": "仅观察" if decision and not decision.allowed else "可执行",
+        "新开仓状态": "可执行" if executable else "仅观察",
         "下跌趋势": bool(_falling),
         "止跌触发价": _trigger,
         "最小单位金额CNY": round(lot * last * fx, 0) if fx > 0 else None,
@@ -617,13 +667,15 @@ def _build_item(rec: dict) -> dict | None:
     return item
 
 
-def _rank_candidates(items: list[dict]) -> list[dict]:
-    """达标的全部保留、按盈亏比降序；不达标的只留分数最高的几条作观察。"""
+def _rank_candidates(items: list[dict], min_rr: float | None = None) -> list[dict]:
+    """Executable setups first; rank them by validated gates then research score."""
+    threshold = _min_reward_risk() if min_rr is None else min_rr
     ok, weak = [], []
     for x in items:
-        rr = x.get("盈亏比")
-        (ok if (rr is not None and rr >= _MIN_RR) else weak).append(x)
-    ok.sort(key=lambda x: -(x.get("盈亏比") or 0))
+        (ok if _is_executable_new_buy(x, threshold) else weak).append(x)
+    # Reward/risk is a hard gate, not a ranking proxy: its target is inferred
+    # from price structure.  After the gate, rank by the broader research score.
+    ok.sort(key=lambda x: (-(x.get("评分") or 0), -(x.get("盈亏比") or 0)))
     weak.sort(key=lambda x: -(x.get("评分") or 0))
     return ok + weak[:_MAX_ITEMS]
 
@@ -791,13 +843,12 @@ def build_market_plan(market: str, email: str | None = None, top_n: int = 3) -> 
     except Exception as e:
         print(f"[plan/{market}] 持仓判断读取失败: {e}")
 
-    ranked = _rank_candidates(items_watch)
-    # ranked已经是"达标组(按盈亏比降序)+不达标观察组(按分数降序,最多_MAX_ITEMS条)"
-    # 拼在一起的列表；达标组数量可能是0、可能远超top_n。Top3只从达标组里切，
-    # 不达标的即使排在ranked前面也不算——但ranked本身就是达标组在前，所以
-    # 直接切片，同时保留是不是"凑够了"这个信息给渲染层用。
-    qualifying = [x for x in ranked if (x.get("盈亏比") or 0) >= _MIN_RR
-                  and x.get("新开仓状态") == "可执行"]
+    min_rr = _min_reward_risk()
+    ranked = _rank_candidates(items_watch, min_rr)
+    # Top recommendations must survive every order-readiness gate: AI says buy,
+    # price is inside its entry range, the user profile permits the trade, and
+    # an actual lot-sized position can be funded.
+    qualifying = [x for x in ranked if _is_executable_new_buy(x, min_rr)]
     top3 = qualifying[:top_n]
 
     return {
@@ -810,6 +861,7 @@ def build_market_plan(market: str, email: str | None = None, top_n: int = 3) -> 
         "评分是否当天": (lb_date == today) if lb_date else None,
         "候选池规模": len(items_watch),
         "达标数量": len(qualifying),
+        "最低盈亏比": min_rr,
         f"{market}Top{top_n}": top3,
         "关注候选": ranked,
         "持仓处理": items_pos,
@@ -853,19 +905,24 @@ def render_market_text(plan: dict, top_n: int = 3) -> str:
     top3 = plan.get(top_key) or []
     达标数 = plan.get("达标数量", 0)
     候选池 = plan.get("候选池规模", 0)
+    min_rr = plan.get("最低盈亏比", _min_reward_risk())
     if top3:
-        L.append(f"{market}Top{len(top3)}（候选池{候选池}支，达标{达标数}支，盈亏比≥{_MIN_RR:g}）：")
+        L.append(f"{market}可执行买入 {len(top3)} 支（候选池{候选池}支，达标{达标数}支，盈亏比≥{min_rr:g}）：")
         for i, it in enumerate(top3, 1):
             L += _render_item_lines(it, i)
             L.append("")
     else:
         blocked = [x for x in (plan.get("关注候选") or []) if x.get("新开仓状态") != "可执行"]
         if blocked:
-            L.append(f"今天{market}不输出新开仓指令：风险档案尚未完整配置。候选仍在观察池，"
-                     "但系统不会替你假定单笔风险或仓位上限。")
+            sample = "；".join(dict.fromkeys(
+                x.get("不可执行原因") for x in blocked if x.get("不可执行原因")
+            ))
+            L.append(f"今天{market}没有可直接下单的机会：候选仍在观察池，但未同时满足"
+                     "买入方向、入场区间、风险档案、趋势确认和最小手数。"
+                     + (f" 首要原因：{sample[:180]}" if sample else ""))
         else:
             L.append(f"今天{market}没有盈亏比达标的机会（候选池{候选池}支，达标0支）——"
-                     f"不是没有票，是没有票同时满足盈亏比≥{_MIN_RR:g}这个门槛，宁可没有也不硬凑。")
+                     f"不是没有票，是没有票同时满足盈亏比≥{min_rr:g}这个门槛，宁可没有也不硬凑。")
     L.append("")
     L.append("仅供参考，不构成投资建议，请自行判断。")
     return "\n".join(L)
