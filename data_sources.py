@@ -2761,8 +2761,29 @@ def get_global_indices() -> dict[str, dict]:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_market_news() -> pd.DataFrame:
-    """大盘/宏观资讯，补充个股新闻覆盖不到的面。"""
-    return _with_retry(ak.stock_news_main_cx, throttle=False)  # 财新，不是东财
+    """大盘/宏观资讯，补充个股新闻覆盖不到的面。
+
+    2026-09-09真实故障：这个函数是个股详情页"新闻"区块的最后一级兜底
+    （Futu资讯搜索连不上/查不到时才会落到这里），原来直接调_with_retry包
+    ak.stock_news_main_cx，完全没有超时——_with_retry本身只重试、不限时，
+    单次调用如果卡住，三次尝试（重试2次）加上退避sleep(5)/sleep(10)，
+    理论上界是无限乘3再加15秒，实测个股详情页点开"浏览更多"卡了30秒以上
+    没有任何内容，根因就在这——5分钟的缓存只在命中时救得了，缓存刚过期
+    又撞上这个源慢/连不上，一样会卡穿整页。
+
+    改用_run_with_timeout给单次尝试上限，配合断路器：连续失败过一次就
+    进入60秒冷却，冷却期内不再浪费时间重试一个已知卡住的源，直接返回空
+    表——上层_fetch_news_items会自然把这次当"没查到"处理，不会让用户
+    在个股详情页对着空白等半分钟。
+    """
+    if _breaker_open("market_news_caixin"):
+        return pd.DataFrame()
+    df = _run_with_timeout(lambda: _with_retry(ak.stock_news_main_cx, throttle=False),
+                            timeout=10, default=None)
+    if df is None:
+        _breaker_trip("market_news_caixin")
+        return pd.DataFrame()
+    return df
 
 
 def _hot_news_keywords(limit: int = 8) -> list[str]:

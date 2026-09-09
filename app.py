@@ -1447,7 +1447,8 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
             )
         return
 
-    news, source = _fetch_news_items(keyword, symbol, market)
+    with st.spinner("正在获取最新资讯…"):
+        news, source = _fetch_news_items(keyword, symbol, market)
     if news is None or news.empty:
         st.caption("暂无相关新闻")
         return
@@ -1559,13 +1560,14 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
         # 原始新闻列表已经在页面上方单独一块展示了（_render_news_section），
         # 这里不重复摆一次，只放AI解读，避免同一份数据在页面上出现两遍。
         if is_fresh:
-            news, _ = _fetch_news_items(stock_name, symbol, market)
-            news_summary = _news_to_summary(news)
-            try:
-                ai_text = _stream_ai_text(summarize_news(symbol, news_summary))
-            except Exception as e:
-                st.error(f"分析失败：{e}")
-                return
+            with st.spinner("正在获取资讯并生成AI解读…"):
+                news, _ = _fetch_news_items(stock_name, symbol, market)
+                news_summary = _news_to_summary(news)
+                try:
+                    ai_text = _stream_ai_text(summarize_news(symbol, news_summary))
+                except Exception as e:
+                    st.error(f"分析失败：{e}")
+                    return
             st.session_state[mod_key] = {"ai_text": ai_text}
         else:
             st.markdown(st.session_state[mod_key]["ai_text"])
@@ -1600,7 +1602,8 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                 financial_summary = fin.head(10).to_string(index=False)
                 st.caption("AI 解读")
                 try:
-                    ai_text = _stream_ai_text(summarize_financials(symbol, financial_summary))
+                    with st.spinner("正在生成AI解读…"):
+                        ai_text = _stream_ai_text(summarize_financials(symbol, financial_summary))
                 except Exception as e:
                     st.error(f"分析失败：{e}")
                     return
@@ -1626,7 +1629,8 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
                 bm_pct = (float(benchmark.iloc[-1]["收盘"]) / float(benchmark.iloc[0]["收盘"]) - 1) * 100
                 st.caption("AI 解读")
                 try:
-                    ai_text = _stream_ai_text(summarize_benchmark(symbol, stock_pct, bm_name, bm_pct))
+                    with st.spinner("正在生成AI解读…"):
+                        ai_text = _stream_ai_text(summarize_benchmark(symbol, stock_pct, bm_name, bm_pct))
                 except Exception as e:
                     st.error(f"分析失败：{e}")
                     return
@@ -1661,29 +1665,30 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
 
         st.caption("AI 解读（交叉验证消息面、财务、技术面是否一致）")
         if is_fresh:
-            history_summary = hist.tail(20).to_string(index=False)
-            if spot and spot.get("最新价"):
-                history_summary += (
-                    f"\n\n实时行情快照：最新价{spot['最新价']}，今开{spot.get('今开')}，"
-                    f"最高{spot.get('最高')}，最低{spot.get('最低')}，昨收{spot.get('昨收')}"
-                )
-            history_summary += "\n\n统计指标：" + "，".join(f"{k}={v}" for k, v in stats.items())
+            with st.spinner("正在汇总财务/资讯/技术面数据并生成AI解读…"):
+                history_summary = hist.tail(20).to_string(index=False)
+                if spot and spot.get("最新价"):
+                    history_summary += (
+                        f"\n\n实时行情快照：最新价{spot['最新价']}，今开{spot.get('今开')}，"
+                        f"最高{spot.get('最高')}，最低{spot.get('最低')}，昨收{spot.get('昨收')}"
+                    )
+                history_summary += "\n\n统计指标：" + "，".join(f"{k}={v}" for k, v in stats.items())
 
-            fin = get_financial_abstract(symbol, market=market)
-            financial_summary = (
-                fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
-            )
-            stock_name = _display_name(symbol, market, spot)
-            news, _ = _fetch_news_items(stock_name, symbol, market)
-            news_summary = _news_to_summary(news)
-
-            try:
-                ai_text = _stream_ai_text(
-                    cross_validate(symbol, history_summary, financial_summary, news_summary, technical_summary)
+                fin = get_financial_abstract(symbol, market=market)
+                financial_summary = (
+                    fin.head(10).to_string(index=False) if fin is not None and not fin.empty else "无可用数据"
                 )
-            except Exception as e:
-                st.error(f"分析失败：{e}")
-                return
+                stock_name = _display_name(symbol, market, spot)
+                news, _ = _fetch_news_items(stock_name, symbol, market)
+                news_summary = _news_to_summary(news)
+
+                try:
+                    ai_text = _stream_ai_text(
+                        cross_validate(symbol, history_summary, financial_summary, news_summary, technical_summary)
+                    )
+                except Exception as e:
+                    st.error(f"分析失败：{e}")
+                    return
             current_price = spot.get("最新价") or float(hist.iloc[-1]["收盘"])
             verdict = extract_verdict(ai_text)
             # log_analysis存的"name"只是历史记录里的展示标签，口径跟上面
@@ -4665,9 +4670,10 @@ def _render_stock_detail(symbol: str, market: str, name: str):
                     mod_label: st.session_state.get(f"_detail_mod_{symbol}_{market}_{mod_key}", {}).get("ai_text", "")
                     for mod_key, mod_label in module_defs
                 }
-                st.session_state[summary_key] = _stream_ai_text(
-                    summarize_overall(symbol, section_texts), raise_on_error=False,
-                )
+                with st.spinner("正在汇总生成总结性分析…"):
+                    st.session_state[summary_key] = _stream_ai_text(
+                        summarize_overall(symbol, section_texts), raise_on_error=False,
+                    )
                 # 2026-08-26新增：这个分数原来现算现扔，从来没被存过，没法
                 # 回溯验证准不准——补记到cross模块那次log_analysis刚插入的
                 # 那条记录上（游客模式不落库，跟cross模块的log_analysis同一个
@@ -4772,9 +4778,10 @@ def _render_index_detail(name: str, code: str, market: str):
         st.markdown("**资讯解读**")
         if _idx_news_fresh:
             try:
-                news, _ = get_index_news(name, limit=8)
-                news_summary = _news_to_summary(news)
-                ai_text = _stream_ai_text(summarize_index_news(name, news_summary))
+                with st.spinner("正在获取资讯并生成AI解读…"):
+                    news, _ = get_index_news(name, limit=8)
+                    news_summary = _news_to_summary(news)
+                    ai_text = _stream_ai_text(summarize_index_news(name, news_summary))
                 st.session_state[f"{idx_ai_key}_news"] = {"ai_text": ai_text, "summary": news_summary}
             except Exception as e:
                 st.session_state[f"{idx_ai_key}_news"] = {"ai_text": f"获取失败：{e}", "summary": "无相关新闻"}
@@ -4827,7 +4834,8 @@ def _render_index_detail(name: str, code: str, market: str):
             # 改成跟上面"资讯解读"模块一样的写法——异常时把错误信息当成
             # 这次的展示文本存进缓存，不再 return，让后面的区块正常渲染。
             try:
-                ai_text = _stream_ai_text(analyze_index(name, technical_summary, news_summary))
+                with st.spinner("正在生成AI解读…"):
+                    ai_text = _stream_ai_text(analyze_index(name, technical_summary, news_summary))
                 st.session_state[f"{idx_ai_key}_cross"] = {"ai_text": ai_text}
             except Exception as e:
                 ai_text = f"分析失败：{e}"
@@ -4845,9 +4853,10 @@ def _render_index_detail(name: str, code: str, market: str):
                     "资讯解读": st.session_state.get(f"{idx_ai_key}_news", {}).get("ai_text", ""),
                     "综合数据分析": st.session_state.get(f"{idx_ai_key}_cross", {}).get("ai_text", ""),
                 }
-                st.session_state[idx_summary_key] = _stream_ai_text(
-                    summarize_overall(name, section_texts), raise_on_error=False,
-                )
+                with st.spinner("正在汇总生成总结性分析…"):
+                    st.session_state[idx_summary_key] = _stream_ai_text(
+                        summarize_overall(name, section_texts), raise_on_error=False,
+                    )
             except Exception as e:
                 st.session_state[idx_summary_key] = f"汇总失败：{e}"
         _render_overall_summary(st.session_state[idx_summary_key])
