@@ -725,7 +725,12 @@ def _stream_and_collect(messages: list[dict], max_tokens: int):
     stream = _create_stream_with_failover(
         messages=messages, temperature=0.4, tools=_TOOLS, stream=True, max_tokens=max_tokens,
     )
-    tool_calls_acc: dict[int, dict] = {}
+    # Gemini's OpenAI-compatible stream can reuse ``index=0`` for separate
+    # parallel calls.  The call ID is the stable identity; using index alone
+    # merges e.g. get_stock_quote + get_stock_financials into a fictitious
+    # function named ``get_stock_quoteget_stock_financials``.
+    tool_calls_acc: dict[str, dict] = {}
+    anonymous_slot_keys: dict[int, str] = {}
     content_acc = ""
     for chunk in stream:
         # 千问偶尔发不带内容的收尾chunk（choices=[]），见analysis._stream_chat
@@ -741,8 +746,13 @@ def _stream_and_collect(messages: list[dict], max_tokens: int):
         # 这是OpenAI兼容协议流式工具调用的标准形状，不是千问特有行为。
         if delta.tool_calls:
             for tc in delta.tool_calls:
+                if tc.id:
+                    slot_key = f"id:{tc.id}"
+                    anonymous_slot_keys[tc.index] = slot_key
+                else:
+                    slot_key = anonymous_slot_keys.setdefault(tc.index, f"index:{tc.index}")
                 slot = tool_calls_acc.setdefault(
-                    tc.index,
+                    slot_key,
                     {"id": "", "name": "", "arguments": "", "extra_content": None},
                 )
                 if tc.id:
