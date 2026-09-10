@@ -17,6 +17,7 @@ money 押出来的预期，比任何一篇解读文章都硬。有真数据就�
 Futu SDK的线程不是daemon线程，脚本跑完必须显式 os._exit(0)，否则进程挂着不退
 （这个项目反复踩过的老坑，见 advisor.py / sim_agent.py 同样的收尾）。
 """
+import argparse
 import json
 import os
 import sys
@@ -30,7 +31,9 @@ import tracker
 # 单个词容易漏——"非农"和"就业数据"命中的往往不是同一批稿子。
 _TOPICS = [
     ("fed", "美联储与利率", ["美联储", "议息", "降息", "加息", "鲍威尔"]),
-    ("cpi", "通胀数据", ["CPI", "通胀", "核心通胀", "PCE"]),
+    # PPI 对利率预期和成长股估值的影响不亚于 CPI。此前首页的通胀卡只画了
+    # CPI / 核心 CPI / PCE，文字虽然会提到 PPI，用户却看不到实际值与预期。
+    ("cpi", "通胀数据（CPI / PPI）", ["CPI", "PPI", "通胀", "核心通胀", "生产者物价", "PCE"]),
     ("payrolls", "就业数据", ["非农", "失业率", "就业数据", "ADP"]),
     ("china", "中国经济与政策", ["社融", "PMI", "央行", "LPR", "政治局会议"]),
 ]
@@ -42,7 +45,13 @@ _TOPICS = [
 # 预期），"实际 vs 预期"才是宏观数据真正被交易的那个维度，只看绝对值看不出
 # 市场是被超预期还是不及预期打了一巴掌。
 _TOPIC_SERIES = {
-    "cpi": [("US", "美国CPI同比"), ("US", "美国核心CPI同比"), ("US", "美国PCE同比")],
+    "cpi": [
+        ("US", "美国CPI同比"),
+        ("US", "美国核心CPI同比"),
+        # get_macro_series 用 pandas str.contains；避免把指标名中的括号当正则。
+        ("US", "生产者物价指数"),
+        ("US", "美国PCE同比"),
+    ],
     "payrolls": [("US", "美国非农就业人数"), ("US", "美国失业率")],
     # fed 不在这里取序列：日频的"美国联邦基金利率"两周之内根本不动，画出来
     # 是一条平线。改成单独取政策利率的历次调整路径（见 _rate_path）。
@@ -243,10 +252,12 @@ def build_one(topic: str, title: str, keywords: list[str]) -> bool:
     return True
 
 
-def main() -> int:
+def main(topics: set[str] | None = None) -> int:
     advisor._load_secrets_into_env()
     ok = 0
     for topic, title, kws in _TOPICS:
+        if topics is not None and topic not in topics:
+            continue
         try:
             if build_one(topic, title, kws):
                 ok += 1
@@ -257,7 +268,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    code = main()
+    parser = argparse.ArgumentParser(description="生成首页宏观议题简报")
+    parser.add_argument(
+        "--topic",
+        action="append",
+        choices=[topic for topic, _, _ in _TOPICS],
+        help="只刷新指定议题；可重复传入。默认刷新全部议题。",
+    )
+    args = parser.parse_args()
+    code = main(set(args.topic) if args.topic else None)
     # Futu SDK的线程不是daemon线程，不强制退出的话进程会一直挂着不退出，
     # 变成占着Futu连接的僵尸进程（advisor.py / sim_agent.py 同一个老坑）。
     sys.stdout.flush()
