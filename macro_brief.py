@@ -35,7 +35,11 @@ _TOPICS = [
     # CPI / 核心 CPI / PCE，文字虽然会提到 PPI，用户却看不到实际值与预期。
     ("cpi", "通胀数据（CPI / PPI）", ["CPI", "PPI", "通胀", "核心通胀", "生产者物价", "PCE"]),
     ("payrolls", "就业数据", ["非农", "失业率", "就业数据", "ADP"]),
-    ("china", "中国经济与政策", ["社融", "PMI", "央行", "LPR", "政治局会议"]),
+    (
+        "china",
+        "中国经济与政策",
+        ["CPI", "PPI", "PMI", "社零", "消费", "M2", "货币供应", "央行", "LPR", "政治局会议"],
+    ),
 ]
 
 # 每个议题配套的真实宏观时间序列：(region, 指标名关键词)。
@@ -56,7 +60,16 @@ _TOPIC_SERIES = {
     # fed 不在这里取序列：日频的"美国联邦基金利率"两周之内根本不动，画出来
     # 是一条平线。改成单独取政策利率的历次调整路径（见 _rate_path）。
     "fed": [],
-    "china": [("CN", "CPI同比"), ("CN", "制造业PMI")],
+    # 中国议题既要看价格，也要看需求、流动性与政策利率。只用 CPI 和 PMI
+    # 会漏掉生产端通胀、消费强弱及信用环境，无法支持 A 股/港股的行业判断。
+    "china": [
+        ("CN", "中国CPI同比"),
+        ("CN", "中国工业生产者出厂价格"),
+        ("CN", "中国官方制造业采购经理人指数"),
+        ("CN", "中国社会消费品零售总额同比"),
+        ("CN", "中国货币供应量M2同比"),
+        ("CN", "中国贷款市场报价利率"),
+    ],
 }
 
 _SYSTEM = """你是一位宏观策略分析师，服务对象是一位同时持有港股和美股的个人投资者。
@@ -206,7 +219,10 @@ def _news_text(keywords: list[str], per_kw: int = 4) -> tuple[str, list[dict]]:
 
 
 def build_one(topic: str, title: str, keywords: list[str]) -> bool:
-    news_text, items = _news_text(keywords)
+    # 中国议题覆盖价格、需求、流动性和政策十组关键词；沿用每词4条会在截取
+    # 前20条时让前几组挤掉后面的 LPR/货币资讯。每词取2条，保留同样20条上限
+    # 但让 AI 能看到每个维度的当天材料。
+    news_text, items = _news_text(keywords, per_kw=2 if topic == "china" else 4)
     extra = _fed_watch_text() if topic == "fed" else ""
     chart_rows = _fed_watch_rows() if topic == "fed" else []
     rate_path = _rate_path() if topic == "fed" else {}
