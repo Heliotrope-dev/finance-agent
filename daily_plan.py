@@ -680,6 +680,20 @@ def _rank_candidates(items: list[dict], min_rr: float | None = None) -> list[dic
     return ok + weak[:_MAX_ITEMS]
 
 
+def _research_top_candidates(items: list[dict], top_n: int = 2) -> list[dict]:
+    """Return the strongest research names for briefing, never for order approval.
+
+    This deliberately does not apply the order-readiness gate.  A pre-market
+    report must still show the best one or two scored names when no setup is
+    actionable yet; otherwise an all-empty report hides the useful research.
+    The executable list remains governed by ``_is_executable_new_buy``.
+    """
+    return sorted(
+        items,
+        key=lambda x: (-(x.get("评分") or 0), -(x.get("盈亏比") or 0)),
+    )[:top_n]
+
+
 def build_plan(email: str | None = None) -> dict:
     email = email or advisor._EMAIL
     today = dt.date.today().isoformat()
@@ -797,8 +811,8 @@ def build_market_plan(market: str, email: str | None = None, top_n: int = 3) -> 
     {market.lower()}"，跟老的source="watchlist"（三市场混排）是独立批次。
 
     _MIN_RR门槛、_rank_candidates的排序/分组逻辑原样复用，不为了凑够
-    top_n支就降低盈亏比标准——达标不足top_n支时，Top3就只列实际达标的
-    数量，不能把不达标的标的伪装成正式推荐。
+    top_n支就降低盈亏比标准——正式可执行清单不足top_n支时，仍只列实际
+    达标数量。同时单列评分前两名做完整研究分析，不能把它们伪装成正式推荐。
     """
     email = email or advisor._EMAIL
     today = dt.date.today().isoformat()
@@ -850,6 +864,7 @@ def build_market_plan(market: str, email: str | None = None, top_n: int = 3) -> 
     # an actual lot-sized position can be funded.
     qualifying = [x for x in ranked if _is_executable_new_buy(x, min_rr)]
     top3 = qualifying[:top_n]
+    research_top2 = _research_top_candidates(items_watch, top_n=2)
 
     return {
         "市场": market,
@@ -863,6 +878,9 @@ def build_market_plan(market: str, email: str | None = None, top_n: int = 3) -> 
         "达标数量": len(qualifying),
         "最低盈亏比": min_rr,
         f"{market}Top{top_n}": top3,
+        # 固定保留评分前两名：它回答“筛下来最值得跟踪的是谁”，与上面的
+        # 可执行名单回答“此刻能否下单”是两个问题。前者绝不绕过风控闸门。
+        f"{market}评分Top2": research_top2,
         "关注候选": ranked,
         "持仓处理": items_pos,
         # 完整候选池明细（不像"关注候选"那样把不达标的截到_MAX_ITEMS条），
@@ -924,6 +942,18 @@ def render_market_text(plan: dict, top_n: int = 3) -> str:
             L.append(f"今天{market}没有盈亏比达标的机会（候选池{候选池}支，达标0支）——"
                      f"不是没有票，是没有票同时满足盈亏比≥{min_rr:g}这个门槛，宁可没有也不硬凑。")
     L.append("")
+
+    research_top2 = plan.get(f"{market}评分Top2") or []
+    if research_top2:
+        L.append(f"{market}评分前{len(research_top2)}名（完整研究，未达标者仅观察）：")
+        for i, it in enumerate(research_top2, 1):
+            L += _render_item_lines(it, i)
+            if _is_executable_new_buy(it, min_rr):
+                L.append("   执行状态：已满足下单门槛，已同时列入上方可执行清单。")
+            else:
+                reason = it.get("不可执行原因") or "未同时满足入场与风控条件"
+                L.append(f"   执行状态：仅观察；未达门槛原因：{reason}")
+            L.append("")
     L.append("仅供参考，不构成投资建议，请自行判断。")
     return "\n".join(L)
 
@@ -982,6 +1012,8 @@ def _render_item_lines(x: dict, idx: int) -> list[str]:
     if x.get("日均波幅"):
         seg.append(f"   日均波幅 {x['日均波幅']}%"
                    + (f" · 52周分位 {x['52周分位']:.0f}%" if x.get("52周分位") is not None else ""))
+    if x.get("依据"):
+        seg.append(f"   分析依据：{x['依据']}")
     return seg
 
 
