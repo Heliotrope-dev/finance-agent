@@ -631,8 +631,6 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
                 text = (resp.choices[0].message.content or "").strip()
             if not text:
                 raise RuntimeError(f"AI返回空内容（finish_reason={resp.choices[0].finish_reason}）")
-            if who != "千问":
-                print(f"[failover{('/' + tag) if tag else ''}] 千问不可用，已改用{who}")
             return text
         except Exception as e:
             if primary_err is None:
