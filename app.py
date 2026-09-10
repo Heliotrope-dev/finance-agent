@@ -442,12 +442,31 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 }
 
 /* 主要动作：唯一填实底的按钮。一屏里只应该有一个，让"这一步该点哪"没有歧义。 */
+/* 2026-09实测修复：按钮文字之前肉眼几乎看不见——登录/注册这类主要按钮
+   墨色实底配白字，但白字只设在了<button>本身，按钮内层文字实际包在
+   [data-testid="stMarkdownContainer"] p里，页面上游有一条
+   `[data-testid="stMarkdownContainer"] p { color: var(--fa-text-2) !important }`
+   全局规则，直接挂在这层<p>上，子元素的直接样式天然盖过父级<button>上
+   继承来的白色，不管父级选择器特异度多高。必须连着内层p/div/span一起
+   显式设成白色，只设按钮本身不够。 */
 .stButton button[kind="primary"],
 .stButton button[data-testid="stBaseButton-primary"],
 [data-testid="stFormSubmitButton"] button[kind="primary"],
 [data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] {
     background: var(--fa-ink) !important; border-color: var(--fa-ink) !important; color: #fff !important;
 }
+.stButton button[kind="primary"] p,
+.stButton button[kind="primary"] div,
+.stButton button[kind="primary"] span,
+.stButton button[data-testid="stBaseButton-primary"] p,
+.stButton button[data-testid="stBaseButton-primary"] div,
+.stButton button[data-testid="stBaseButton-primary"] span,
+[data-testid="stFormSubmitButton"] button[kind="primary"] p,
+[data-testid="stFormSubmitButton"] button[kind="primary"] div,
+[data-testid="stFormSubmitButton"] button[kind="primary"] span,
+[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] p,
+[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] div,
+[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] span { color: #fff !important; }
 .stButton button[kind="primary"]:hover,
 .stButton button[data-testid="stBaseButton-primary"]:hover,
 [data-testid="stFormSubmitButton"] button[kind="primary"]:hover,
@@ -456,7 +475,11 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 }
 /* 安静按钮：默认几乎看不见，悬停才浮出一块底。项目里的图标按钮（搜索/添加/
    对比/删除/返回）全部用它，不该在页面上摆一圈边框抢注意力。 */
-/* 安静档：连描边都没有，只在悬停时浮出一块底。图标按钮和返回键走这一档。 */
+/* 安静档：连描边都没有，只在悬停时浮出一块底。图标按钮和返回键走这一档。
+   这一档默认色(--fa-muted)跟上面那条全局p规则(--fa-text-2)刚好都是灰调、
+   肉眼分不出明显差异，实测没有"看不见"的问题，但hover态要变成--fa-text
+   （比--fa-text-2更深），同样会被子级p盖掉，这里一并显式补上，不能只
+   设按钮本身。 */
 .stButton button[kind="tertiary"], .stButton button[data-testid="stBaseButton-tertiary"] {
     background: transparent !important; border: 1px solid transparent !important;
     color: var(--fa-muted) !important;
@@ -464,6 +487,12 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 .stButton button[kind="tertiary"]:hover, .stButton button[data-testid="stBaseButton-tertiary"]:hover {
     background: var(--fa-fill) !important; border-color: transparent !important; color: var(--fa-text) !important;
 }
+.stButton button[kind="tertiary"]:hover p,
+.stButton button[kind="tertiary"]:hover div,
+.stButton button[kind="tertiary"]:hover span,
+.stButton button[data-testid="stBaseButton-tertiary"]:hover p,
+.stButton button[data-testid="stBaseButton-tertiary"]:hover div,
+.stButton button[data-testid="stBaseButton-tertiary"]:hover span { color: var(--fa-text) !important; }
 
 /* 宏观议题条目。跟站内其它列表同一套：发丝线分隔、折叠框无边框。 */
 [class*="st-key-macro_"] {
