@@ -3445,7 +3445,16 @@ def _render_advice_section():
             st.markdown(_plan_row(item, ready=False), unsafe_allow_html=True)
 
     st.markdown("**投研观察排行榜**")
-    st.caption("这是基本面和技术面的研究排序，不是下单指令；实际操作只以上方“今日可执行清单”为准。")
+    # 2026-09-12（前端审计"排行榜说买入、自选里同一只标观望"）：补一句说明
+    # 这里的结论回答的是哪个问题。这条链路(source='screen')问的是"现在值不
+    # 值得新建仓"，自选/持仓那边(source='position')问的是"已有仓位要不要继续
+    # 拿"，同一支票两个答案可以同时成立，不是数据打架。详见自选行展开区里
+    # 对应的那段说明。
+    st.caption(
+        "这是基本面和技术面的研究排序，不是下单指令；实际操作只以上方“今日可执行清单”为准。"
+        "结论回答的是「现在值不值得新建仓」——自选/持仓里同一支票的 AI 标签回答的是"
+        "「已持有的仓位要不要继续拿」，两者是独立判断，不一致属正常。"
+    )
     # 卡片可点击跳转详情页——复用持仓列表卡片验证过的方案（见
     # _render_position_rows 的踩坑记录：JS/CSS猜DOM结构点不动，最后用最朴素
     # 的<a href="?open_symbol=...">整页导航才可靠）。那段CSS只在持仓tab渲染
@@ -3994,6 +4003,14 @@ def _render_my_page():
             )
         else:
             st.caption("还没有满足回看窗口的自动判断记录（advisor.py每天17:30生成，watchlist口径需满6.9天才回填）。")
+
+        # ── 风险偏好 ────────────────────────────────────────────────────
+        # 放在"我的"而不是"持仓"：清单里那句"低于风险档案下限2:1"是全站性的
+        # 闸门参数，用户找设置会先来这一页（前端审计原话是"整个网站都找不到
+        # 可以改这个下限的地方"）。持仓页那个"最大资金投入量"是另一件事
+        # （给组合分析算剩余额度用），两者不合并。
+        st.divider()
+        _render_risk_profile_input(email)
 
         # ── 最近搜索 ────────────────────────────────────────────────────
         try:
@@ -5520,6 +5537,62 @@ def _render_max_capital_input(email: str):
         st.success("已保存。")
 
 
+def _render_risk_profile_input(email: str):
+    """风险偏好设置（2026-09-12新增，前端审计第12条）。
+
+    "今日可执行清单"里一直在写"盈亏比低于风险档案下限 2:1，只观察不给
+    下单数量"这类话，但这份档案此前只存在于 data/risk_profile.json，网站上
+    没有任何地方能看到它、更没法改——用户被一个看不见也够不着的规则挡着。
+    这里把四个真正参与闸门判断的字段摆出来让用户自己设。
+
+    注意不要在这里显示或编辑 starting_capital / allowed_markets：那两个字段
+    不参与新开仓闸门，放进来只会让这个设置面板看起来像"全局资金设置"，跟
+    上面那个"最大资金投入量"语义打架。risk_policy.save_profile 是读-改-写，
+    不会动这里没列出来的字段。
+    """
+    import risk_policy
+
+    profile = risk_policy.load_profile() or {}
+    st.markdown("**风险偏好**")
+    st.caption("可执行清单的闸门参数：不满足这几条的标的只会被列为“仅观察”，不会给出下单数量。")
+
+    min_rr = st.number_input(
+        "最低盈亏比（清单里那句“低于风险档案下限 X:1”就是这个值）",
+        min_value=0.5, max_value=10.0, step=0.5,
+        value=float(profile.get("min_reward_risk") or 2.0),
+        key=f"_risk_min_rr_{email}",
+    )
+    max_risk = st.number_input(
+        "单笔最大亏损占总资金比例（%）",
+        min_value=0.1, max_value=100.0, step=0.5,
+        value=float(profile.get("max_risk_per_trade_pct") or 10.0),
+        key=f"_risk_per_trade_{email}",
+    )
+    max_pos = st.number_input(
+        "单一标的最大仓位占比（%）",
+        min_value=1.0, max_value=100.0, step=5.0,
+        value=float(profile.get("max_position_pct") or 100.0),
+        key=f"_risk_max_pos_{email}",
+    )
+    max_daily = st.number_input(
+        "单日最大回撤容忍度（%）",
+        min_value=0.1, max_value=100.0, step=0.5,
+        value=float(profile.get("max_daily_loss_pct") or 10.0),
+        key=f"_risk_daily_{email}",
+    )
+    if st.button("保存风险偏好", key=f"_risk_save_{email}", use_container_width=True):
+        try:
+            risk_policy.save_profile({
+                "min_reward_risk": min_rr,
+                "max_risk_per_trade_pct": max_risk,
+                "max_position_pct": max_pos,
+                "max_daily_loss_pct": max_daily,
+            })
+            st.success("已保存。下一次生成可执行清单时生效。")
+        except (ValueError, OSError) as e:
+            st.error(f"保存失败：{e}")
+
+
 @st.fragment(run_every=15)
 def _render_ai_sim_live_snapshot(email: str, equity_points: list):
     """AI模拟盘的现金/持仓市值/浮盈浮亏这部分单独抽出来自动刷新——用户
@@ -6443,6 +6516,19 @@ def _render_position_rows(position_items: list, _email: str):
                     for sec in ("基本面", "技术面", "价格位置"):
                         if adv_parts.get(sec):
                             st.markdown(_labeled_line(sec, adv_parts[sec]), unsafe_allow_html=True)
+                    # 2026-09-12（前端审计"排行榜说买入、自选里同一只标观望"）：
+                    # 这两个结论来自两条不同的判断链路，回答的根本不是同一个
+                    # 问题——这里读的是 source='position'，问的是"已经持有的
+                    # 这笔仓位要不要继续拿/加仓"（prompt里那段_HOLDING_ADDENDUM）；
+                    # 排行榜读的是 source='screen'，问的是"现在值不值得新建仓"。
+                    # 同一支票"值得新建仓"和"已有仓位先别加"完全可以同时成立。
+                    # 所以不该像审计建议的那样把两处强行读同一个字段——那是把
+                    # 两个不同的判断压成一个、真的丢信息；缺的是界面没讲清楚
+                    # 各自在回答什么，补一句说明即可。
+                    st.caption(
+                        "这条回答的是「已持有的仓位要不要继续拿」。排行榜里同一支票的结论"
+                        "回答的是「现在值不值得新建仓」，是另一次独立判断，两者不一致是正常的。"
+                    )
 
 
 def _backfill_due_reviews(email: str):
