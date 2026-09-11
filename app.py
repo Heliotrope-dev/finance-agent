@@ -3284,6 +3284,31 @@ def _load_daily_plan(market: str) -> dict:
     return plan
 
 
+def _daily_plan_item_for(symbol: str) -> dict | None:
+    """在HK/US两份今日盘前计划里找这支票的结构化条目——2026-09-11前端审计
+    发现的P0：同一支票，"今日可执行清单"（daily_plan.py，ATR/目标价公式
+    算出来的结构化数字）和排行榜/自选（advisor.py的judge_stock，AI在理由
+    段落里自己另外写一个目标价）经常对不上（比如老铺黄金结构化650、AI
+    正文665）——这是两条完全独立的计算路径，一个是公式，一个是模型自己
+    现算，本来就没有理由凑巧相等。
+
+    正确的修法是"程序只算一次、AI引用不许自己编"，但judge_stock的完整
+    prompt改造（把daily_plan的计算结果作为已知事实喂给它，禁止它自己
+    重新推导目标价）涉及改核心打分prompt、跟下单闸门的计算顺序也要理顺，
+    风险和工作量都不小，不在这次前端审计的修复范围内一起做。这里先做
+    风险最低、当场见效的一半：排行榜显示目标价时，只要daily_plan当天
+    对这支票算过结构化数字，就优先展示这个数字（清楚标成"系统计算"），
+    不再展示AI自己在正文里写的那个可能对不上的数字——不是删掉AI的推理，
+    只是不让它的"目标价"这三个字跟公式算出来的同名数字同台打架。
+    """
+    for market in ("HK", "US", "A"):
+        plan = _load_daily_plan(market)
+        for item in (plan.get("关注候选") or []):
+            if item.get("代码") == symbol:
+                return item
+    return None
+
+
 def _is_order_ready(item: dict) -> bool:
     """一条候选是不是真的可以照着下单——交易参数齐全且过了闸门。
 
@@ -3431,6 +3456,26 @@ def _render_advice_section():
             action = row.get("action", "观望")
             price = row.get("price_at_advice")
             price_text = f"{price:.2f}" if price else "—"
+            # 2026-09-11修：现价标注取价时间——这是这次判断生成那一刻的价格
+            # 快照，不是此刻的实时价，"今日可执行清单"用的是当天另一次单独
+            # 取数（daily_plan.py），两边时间点不同、数字天然可能不一样。
+            # 之前两边都不标时间，看起来像同一支票现价对不上是bug，其实只是
+            # 没写清楚"现价"分别指哪个时刻。
+            _created = row.get("created_at") or ""
+            price_time = ""
+            if _created:
+                try:
+                    price_time = f"（{_to_cn_time_str(_created)[5:16]}取价）"
+                except Exception:
+                    price_time = ""
+            # 目标价优先用daily_plan.py当天算出来的结构化数字（公式计算，
+            # 跟"今日可执行清单"同一个数），AI在理由段落里自己另外写的目标价
+            # 不再单独展示成一个可能对不上的数字——见_daily_plan_item_for。
+            _plan_item = _daily_plan_item_for(row.get("symbol", ""))
+            if _plan_item and isinstance(_plan_item.get("目标价"), (int, float)):
+                target_text = f"{_plan_item['目标价']:.2f}（系统计算）"
+            else:
+                target_text = parts.get("目标价")
             score = row.get("score")
             href = (
                 f"?open_symbol={urllib.parse.quote(row.get('symbol',''))}"
@@ -3452,11 +3497,11 @@ def _render_advice_section():
                     + (f"<span style='font-size:0.8rem;color:var(--fa-muted)'>{score}</span>" if score is not None else "")
                     + f"<span style='color:var(--fa-muted);border-radius:5px;padding:2px 9px;"
                     f"font-size:0.74rem;font-weight:600;letter-spacing:.02em'>研究观点：{_esc(action)}</span></span></div>"
-                    f"<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:3px'>{_esc(row.get('symbol',''))} · 现价{price_text}"
+                    f"<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:3px'>{_esc(row.get('symbol',''))} · 现价{price_text}{_esc(price_time)}"
                     f" · 置信度{_esc(parts.get('置信度','—'))}"
                     # 目标价和投资期限是研报格式里最该被一眼看到的两项——"买入"
                     # 如果不带目标价和时间尺度，就是一句没有可检验内容的话。
-                    + (f" · 目标价{_esc(parts['目标价'])}" if parts.get("目标价") else "")
+                    + (f" · 目标价{_esc(target_text)}" if target_text else "")
                     + (f" · {_esc(parts['投资期限'])}" if parts.get("投资期限") else "")
                     + "</div>"
                     # 每张卡末尾那句"仅供参考，不构成投资建议"是advisor的prompt里
