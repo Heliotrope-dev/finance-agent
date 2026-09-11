@@ -389,7 +389,12 @@ def _load_secrets_into_env():
     # SiliconFlow 时踩到——只要环境里已经有 QWEN_API_KEY 就整个跳过加载，
     # 新加的 SILICONFLOW_API_KEY 永远读不进来，兜底供应商等于没配。
     # 每加一家供应商都要把它的key加进这个判断。
-    if os.environ.get("GEMINI_API_KEY"):
+    # 2026-09-11：加了 GEMINI_FREE_API_KEY 之后，这个提前返回的条件必须
+    # 两把key都在才成立。只看 GEMINI_API_KEY 的话，付费key一旦已经在环境里
+    # （比如被上一次调用灌进去了），整个加载就跳过，新加的免费key永远读不
+    # 进来——这正是上面注释里写的那个"每加一家供应商都要把它的key加进这个
+    # 判断"的坑，2026-09-05 接 SiliconFlow 时已经踩过一次。
+    if os.environ.get("GEMINI_API_KEY") and os.environ.get("GEMINI_FREE_API_KEY"):
         return
     try:
         secrets = toml.load(_SECRETS_PATH)
@@ -461,6 +466,29 @@ def _client() -> OpenAI:
     # 默认重试逻辑下可能会挂很久不返回——不是真的在处理，是客户端卡在某个
     # 没有时间上限的等待/重试循环里。显式给60秒超时，快速失败好过整批
     # 候选全部在同一个坑里陪跑到_run_concurrent_with_deadline的400秒外层超时。
+    return OpenAI(api_key=key, base_url=_GEMINI_BASE, max_retries=2, timeout=60)
+
+
+def _client_free() -> OpenAI:
+    """免费档 Gemini 项目的客户端（2026-09-11新增）。
+
+    背景：Gemini 的免费额度和付费额度是"同一个项目里二选一"的关系——一个
+    项目一旦启用计费，它的免费额度就永久消失，不存在"先用免费的、用完再扣
+    付费余额"这种叠加。想两个都要，只能开两个项目、拿两把key，一把留在
+    免费档、一把开计费。
+
+    所以这里配成两把：GEMINI_FREE_API_KEY 打头（免费项目，额度每天太平洋
+    时间午夜重置），GEMINI_API_KEY 兜底（付费项目，走充值余额）。免费那边
+    打满会返回 429/RESOURCE_EXHAUSTED，正好落在 _is_failover_worthy 认的
+    "配额耗尽"里，自动转到付费那把，第二天免费额度刷新后又会先走免费。
+
+    没配免费key时抛异常——chat_with_failover 会当成"这家不可用"直接跳到
+    下一家（付费），行为上等同于回到改动前的单一付费链路，不会因为少配一个
+    key就把整条链打断。
+    """
+    key = os.environ.get("GEMINI_FREE_API_KEY", "")
+    if not key:
+        raise RuntimeError("未配置 GEMINI_FREE_API_KEY。")
     return OpenAI(api_key=key, base_url=_GEMINI_BASE, max_retries=2, timeout=60)
 
 
@@ -621,7 +649,15 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
     # 踩过的坑是同一个。按调用点原样的预算转过去，思考链很容易把额度吃光、
     # 正文返回空——那就等于兜底了个寂寞。给智谱放宽到2倍，账号里air那包有
     # 1199万tokens，放宽这点量完全够烧。
-    _chain = [(_client, _MODEL, "Gemini", 1.0)]
+    # 免费档打头、付费档兜底（2026-09-11）。用户要求"千问换成刚开的免费
+    # Gemini"，但直接换成单独一把免费key风险太大：这个项目一轮盘前扫描要
+    # 逐支判断二三十支股票，免费档每日请求数打满之后整条链就没有下一家了，
+    # 而且同一把免费key还同时给OpenClaw用着。配成两家，免费额度耗尽时
+    # 自动落到付费那把，第二天免费额度重置又会自己走回免费。
+    _chain = [
+        (_client_free, _MODEL, "Gemini-Free", 1.0),
+        (_client, _MODEL, "Gemini-Paid", 1.0),
+    ]
     # prefer 只调整起点，不裁剪链条：把指定的那家转到队首，其余顺序不变。
     # 这是给多空辩论用的——辩论的价值建立在"两方由互相独立的模型给出"之上，
     # 双方都从千问开始就退化成同一个模型的左右手互搏了。让空头从智谱起步，
