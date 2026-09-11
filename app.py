@@ -255,7 +255,10 @@ html, body, [data-testid="stAppViewContainer"] { font-variant-numeric: tabular-n
 [data-testid="stWidgetLabel"] p { color: var(--fa-text-2) !important; font-size: 0.82rem !important; font-weight: 500 !important; }
 
 /* ── 分隔 ─────────────────────────────────────────────────────────────── */
-hr, [data-testid="stDivider"] hr { border: none !important; border-top: 1px solid var(--fa-border) !important; margin: 30px 0 !important; }
+/* 分隔线上下留白 30px→46px（2026-09-12，用户反馈首页"栏目之间有点挤"）。
+   这条线是首页各栏目之间唯一的分界，留白比线本身更能说明"这里换了一块"——
+   线细、留白窄的时候，两个栏目在视觉上还是连着的，得靠读文字才分得开。 */
+hr, [data-testid="stDivider"] hr { border: none !important; border-top: 1px solid var(--fa-border) !important; margin: 46px 0 !important; }
 
 /* ── 顶部导航（st.radio 伪装成下划线标签页）────────────────────────────
    原来是红底白字的胶囊，五个并排像一排按钮，很难不显得像后台管理系统。
@@ -5015,7 +5018,7 @@ def _render_home_index_strip():
         pct = (chg / prev * 100) if prev else 0.0
         color = UP_COLOR if chg >= 0 else DOWN_COLOR
         cards.append(
-            f"<div style='flex:0 0 auto;min-width:116px;padding:8px 14px 8px 0'>"
+            f"<div>"
             f"<div style='font-size:0.72rem;color:var(--fa-faint);white-space:nowrap'>{_esc(name)}</div>"
             f"<div style='font-size:0.98rem;font-weight:650;color:{color};"
             f"font-variant-numeric:tabular-nums;white-space:nowrap'>{last:,.2f}</div>"
@@ -5024,10 +5027,17 @@ def _render_home_index_strip():
         )
     if not cards:
         return
+    # 等分铺满整行，不是靠左排完剩一大段空白。原来用的是 flex + min-width
+    # 116px + overflow-x:auto，宽屏下6个卡片挤在左边约三分之二，右边空着，
+    # 看上去像没加载完。改成 grid 的 1fr 等分：列宽由容器宽度决定，间隔天然
+    # 一致，不用手调 padding。窄屏降到3列两行，比横向滑动好用——横条本来就
+    # 是"一眼扫完"，需要滑动就失去意义了。
     st.markdown(
-        "<div style='display:flex;overflow-x:auto;gap:2px;padding-bottom:2px;"
-        "border-bottom:1px solid var(--fa-border);margin-bottom:14px'>"
-        + "".join(cards) + "</div>",
+        "<style>.fa-index-strip{display:grid;grid-template-columns:repeat(6,1fr);"
+        "gap:10px 12px;padding-bottom:12px;border-bottom:1px solid var(--fa-border);"
+        "margin-bottom:22px}"
+        "@media (max-width:640px){.fa-index-strip{grid-template-columns:repeat(3,1fr)}}</style>"
+        "<div class='fa-index-strip'>" + "".join(cards) + "</div>",
         unsafe_allow_html=True,
     )
 
