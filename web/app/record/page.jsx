@@ -12,10 +12,14 @@ import { apiGet, fmtPct, moveColor } from "../../lib/api";
 // - 下面的明细是最近 20 条，用来逐条核对。
 export default function RecordPage() {
   const [d, setD] = useState(null);
+  // 默认只看带方向的判断。实测最近的记录绝大多数是"持有/观望"，全量列出来
+  // 一屏扫下去全是"无方向"，看不到这个墙真正要回答的问题（说买入的后来涨了
+  // 没有）。两种视图都留着，默认给更有信息量的那个。
+  const [onlyDirectional, setOnlyDirectional] = useState(true);
 
   useEffect(() => {
     let alive = true;
-    apiGet("/api/track-record?limit=20")
+    apiGet("/api/track-record?limit=60")
       .then((x) => alive && setD(x))
       .catch(() => alive && setD({ summary: {}, recent: [] }));
     return () => {
@@ -26,7 +30,8 @@ export default function RecordPage() {
   if (!d) return <div className="mt-8 h-40" aria-hidden />;
 
   const s = d.summary || {};
-  const rows = d.recent || [];
+  const all = d.recent || [];
+  const rows = (onlyDirectional ? all.filter((r) => r.hit !== null) : all).slice(0, 20);
 
   return (
     <section className="mt-7">
@@ -74,8 +79,25 @@ export default function RecordPage() {
         </p>
       )}
 
-      <h3 className="fa-section-title mt-9 text-[0.95rem]">最近 20 条</h3>
+      <div className="mt-9 flex items-baseline justify-between gap-3">
+        <h3 className="fa-section-title text-[0.95rem]">
+          {onlyDirectional ? "最近的买入/卖出判断" : "最近 20 条判断"}
+        </h3>
+        <button
+          type="button"
+          onClick={() => setOnlyDirectional((v) => !v)}
+          className="text-[0.74rem]"
+          style={{ color: "var(--fa-muted)" }}
+        >
+          {onlyDirectional ? "显示全部（含持有/观望）" : "只看买入/卖出"}
+        </button>
+      </div>
       <div className="mt-2">
+        {!rows.length ? (
+          <p className="text-[0.82rem]" style={{ color: "var(--fa-faint)" }}>
+            最近的记录里没有带方向的判断（都是持有/观望）。点右上角可以看全部。
+          </p>
+        ) : null}
         {rows.map((r, i) => {
           const mark =
             r.hit === true ? ["说对", "var(--fa-down)"]
