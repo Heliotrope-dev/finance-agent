@@ -1360,12 +1360,22 @@ def _quote_market_status(spot: dict, market: str) -> str:
     tz = ZoneInfo(zone)
     now = datetime.now(tz)
     try:
-        # Futu 的 update_time 由 OpenD 按中国时区给出；先按该时区解释，再换算
-        # 成交易所当地时间，避免 UUP 的早盘前报价被写成“美股实时”。
+        # 2026-09-11修：这里原来假设Futu的update_time统一按北京时间给出，
+        # 不管哪个市场都先按Asia/Shanghai解释再转成交易所本地时区。真实
+        # 故障（前端审计发现，用真实行情核对过）：可口可乐详情页显示
+        # "已收盘 · 美东09-10 23:19"，而当时美东实际是09-11 11:19、正在
+        # 盘中——现查Futu的get_market_snapshot证实，美股的update_time字段
+        # 本来就是交易所当地时间（美东，naive，不带时区），不是北京时间；
+        # 之所以港股/A股这条路径一直没暴露问题，是因为香港/中国跟北京
+        # 恰好同一个UTC+8时区，"按北京时间解释"这一步在数值上是空操作，
+        # 只有美股(UTC-4/-5)才会因为这个错误假设多减/多减一次时区差，
+        # 时间和日期都跟着错位。改成naive时间戳直接当成交易所本地时间，
+        # 不再统一套一层"先当北京时间"的转换。
         stamp = pd.Timestamp(spot.get("更新时间")).to_pydatetime()
         if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-        stamp = stamp.astimezone(tz)
+            stamp = stamp.replace(tzinfo=tz)
+        else:
+            stamp = stamp.astimezone(tz)
     except Exception:
         stamp = now
 
