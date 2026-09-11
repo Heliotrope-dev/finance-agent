@@ -5202,29 +5202,38 @@ def _render_index_detail(name: str, code: str, market: str):
 
     base_price = idx_snap.get("最新") - idx_snap.get("涨跌") if idx_snap else None
 
-    if period_label == "分时K（今日）":
-        intraday = get_index_intraday_a(code) if market == "A" else get_index_intraday_futu(name, market, base_price)
-        if intraday.empty:
-            st.caption("今天的分时数据暂时取不到，展示日K替代。")
-            try:
-                chart_hist = get_index_history(code, market, "日K")
-            except Exception:
-                chart_hist = None
-            if chart_hist is not None and not chart_hist.empty:
-                st.plotly_chart(build_candlestick(chart_hist), use_container_width=True, config=_PLOTLY_CONFIG)
+    # 2026-09-11修（P0，前端审计"指数K线空白"）：实测不是取不到数据——A股
+    # 指数分时/日K走的是BaoStock/新浪这两个接口（个股K线走本地Futu，几乎
+    # 秒回），从这台VPS访问境内接口本身就有真实网络延迟，缓存没命中时单次
+    # 加载能到8-9秒。之前这段时间页面上什么都不画，用户等到8秒以上只看到
+    # 一片空白、控制台也没有报错，直接判断成"坏了"——其实只是没有任何加载
+    # 状态提示，慢等于坏是同一个体验问题。包一层st.spinner，缓存命中时
+    # spinner几乎一闪而过感知不到，缓存没命中的几秒钟至少能看出"在加载"
+    # 而不是"卡死了"。
+    with st.spinner("加载K线数据..."):
+        if period_label == "分时K（今日）":
+            intraday = get_index_intraday_a(code) if market == "A" else get_index_intraday_futu(name, market, base_price)
+            if intraday.empty:
+                st.caption("今天的分时数据暂时取不到，展示日K替代。")
+                try:
+                    chart_hist = get_index_history(code, market, "日K")
+                except Exception:
+                    chart_hist = None
+                if chart_hist is not None and not chart_hist.empty:
+                    st.plotly_chart(build_candlestick(chart_hist), use_container_width=True, config=_PLOTLY_CONFIG)
+            else:
+                st.plotly_chart(
+                    build_intraday_line(intraday, base_price, market),
+                    use_container_width=True, config=_PLOTLY_CONFIG,
+                )
         else:
-            st.plotly_chart(
-                build_intraday_line(intraday, base_price, market),
-                use_container_width=True, config=_PLOTLY_CONFIG,
-            )
-    else:
-        try:
-            chart_hist = get_index_history(code, market, period_label)
-        except Exception as e:
-            chart_hist = None
-            st.error(f"K线加载失败：{e}")
-        if chart_hist is not None and not chart_hist.empty:
-            st.plotly_chart(build_candlestick(chart_hist), use_container_width=True, config=_PLOTLY_CONFIG)
+            try:
+                chart_hist = get_index_history(code, market, period_label)
+            except Exception as e:
+                chart_hist = None
+                st.error(f"K线加载失败：{e}")
+    if period_label != "分时K（今日）" and chart_hist is not None and not chart_hist.empty:
+        st.plotly_chart(build_candlestick(chart_hist), use_container_width=True, config=_PLOTLY_CONFIG)
 
     idx_expand_key = f"_idx_expand_{code}_{market}"
     st.divider()
