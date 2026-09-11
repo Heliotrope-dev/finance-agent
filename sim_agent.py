@@ -810,6 +810,19 @@ def _run_cycle_locked(email: str) -> dict:
             f"{p.get('name') or p.get('code')}(¥{(p.get('market_val_hkd') or 0):,.0f})"
             for p in _reconciled["foreign_positions"]
         )
+        # 用户2026-09-12要求"让模拟盘重新按一万美金跑起来"，最后一步是把这些
+        # 遗留仓位真的平掉，让账户状态跟账本状态完全一致。挂在这里而不是另开
+        # 一条cron：这个循环本来就只在有市场开盘时才被唤醒（见上面
+        # _open_markets 的提前返回），正好是唯一能下卖单的时段。
+        # cleanup脚本自己带三重保护——marker文件（清理成功一次后再触发直接
+        # 退出，不会把用户以后手动建的仓顺手平掉）、只卖不买、非盘中时段
+        # 直接跳过不下单。异常一律吞掉：清理是附带动作，绝不能影响这一轮
+        # 正常的交易决策。
+        try:
+            import cleanup_foreign_sim_positions as _cleanup
+            _cleanup.main(write=True, email=email)
+        except Exception as _e:
+            print(f"[sim_agent] 遗留仓位清理失败（不影响本轮决策）：{_e}")
     else:
         _foreign_desc = ""
     # 这次决策"开始前"的净值快照——必须在AI调用/下单之前就固定下来，不能

@@ -47,12 +47,14 @@ def _market_open(qot, code: str) -> bool:
     return "TRADING" in state.upper()
 
 
-def main(write: bool = False) -> int:
+def main(write: bool = False, email: str | None = None) -> int:
     if os.path.exists(_MARKER):
         print(f"已经清理过（marker: {_MARKER}），直接退出。")
         return 0
 
-    email = _EMAIL
+    # email 显式传入优先：sim_agent 在自己的循环里调这个函数时手上已经有
+    # email，不该依赖它那个进程恰好设了 ADVISOR_EMAIL 环境变量。
+    email = email or _EMAIL
     if not email:
         print("没有配置 ADVISOR_EMAIL，退出。")
         return 1
