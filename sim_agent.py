@@ -352,6 +352,7 @@ def _apply_budget_limit(
     不影响原有的总预算拦截继续生效。
     """
     price_map = {(c["symbol"], c["market"]): c["price"] for c in candidates}
+    lot_map = {(c["symbol"], c["market"]): int(c.get("lot_size") or 1) for c in candidates}
     usd_hkd, cny_hkd = _fx_rates()
 
     existing_by_symbol: dict[tuple[str, str], float] = {}
@@ -368,24 +369,37 @@ def _apply_budget_limit(
         if s.get("action") != "买入":
             kept.append(s)
             continue
-        est_cost_hkd = _estimate_amount_hkd(s, s["shares"], price_map, usd_hkd, cny_hkd)
         key = (s["symbol"], s["market"])
-        projected_position_hkd = existing_by_symbol.get(key, 0.0) + est_cost_hkd
-        if projected_position_hkd > max_single_position_hkd:
-            # 拦截原因直接写回signals里的原始dict，不再用浅拷贝——这份dict最后
-            # 要原样写进log_sim_agent_run，而"哪几条被拦了"恰恰只有写进去才留得
-            # 下来。原来只把原因留在拷贝里，落库的那份没有任何标记，页面和下一轮
-            # 的复盘历史就没法把"AI想买"和"真的买到了"分开，见调用方那段真实故障。
-            s["_drop_reason"] = "集中度"
+        est_cost_hkd = _estimate_amount_hkd(s, s["shares"], price_map, usd_hkd, cny_hkd)
+        # 2026-09-12改（审计第11条）：超限不再整笔作废，先按上限削减股数。
+        # 原来两道闸都是"一票否决"，实测AI连续3轮开同一笔超限的GLD买入，
+        # 每轮整笔被拦、每轮颗粒无收——而它其实只是想建这个仓，买少一点
+        # 完全成立。闸的本意是"不许超过这个额度"，不是"超过就什么都别买"。
+        # 拦截原因写回signals里的原始dict（不是浅拷贝）：这份dict最后要原样
+        # 写进log_sim_agent_run，"哪几条被拦了/削了"只有写进去才留得下来，
+        # 否则页面和下一轮的复盘历史分不清"AI想买"和"真的买到了"。
+        room_concentration = max_single_position_hkd - existing_by_symbol.get(key, 0.0)
+        allowed_hkd = min(room_concentration, remaining)
+        if allowed_hkd <= 0:
+            s["_drop_reason"] = "集中度" if room_concentration <= 0 else "预算"
             dropped.append(s)
             continue
-        if est_cost_hkd <= remaining:
-            kept.append(s)
-            remaining -= est_cost_hkd
-            existing_by_symbol[key] = projected_position_hkd
-        else:
-            s["_drop_reason"] = "预算"
-            dropped.append(s)
+        if est_cost_hkd > allowed_hkd:
+            unit_hkd = (est_cost_hkd / s["shares"]) if s.get("shares") else 0.0
+            lot = lot_map.get(key, 1) or 1
+            max_shares = int((allowed_hkd / unit_hkd) // lot) * lot if unit_hkd > 0 else 0
+            if max_shares <= 0:
+                # 连一手都买不起，这才是真的只能作废
+                s["_drop_reason"] = "集中度" if room_concentration <= remaining else "预算"
+                dropped.append(s)
+                continue
+            s["_trimmed_from"] = s["shares"]
+            s["_trim_reason"] = "集中度" if room_concentration <= remaining else "预算"
+            s["shares"] = max_shares
+            est_cost_hkd = _estimate_amount_hkd(s, max_shares, price_map, usd_hkd, cny_hkd)
+        kept.append(s)
+        remaining -= est_cost_hkd
+        existing_by_symbol[key] = existing_by_symbol.get(key, 0.0) + est_cost_hkd
     return kept, dropped
 
 
@@ -913,6 +927,18 @@ def _run_cycle_locked(email: str) -> dict:
         "（取“预算还剩”和“现金余额”两者的较小值——买入是真的要花现金的，"
         "现金不够时预算再多也买不进去，超出这个数的买入会被系统直接拦截不执行）"
         + ("（部分持仓汇率暂时获取不到，实际占用可能比这个数字更高，买入要更保守）" if snapshot.get("holdings_value_partial") else "")
+        # 2026-09-12补：单一标的集中度上限以前只在代码里事后拦截，从没写进
+        # 提示词。实测后果是AI连着几轮开同一笔超限买入（审计那次是连续3轮
+        # 各买15股GLD约$6000），每轮都被拦、每轮都白烧一次AI调用，决策记录
+        # 里全是"执行成功0条、1条被拦截"。把上限连同"该买多少股自己算"一起
+        # 交代清楚，让它在开信号之前就把股数收在闸内，而不是靠事后拦。
+        + (
+            f"\n单一标的持仓上限：HK${_VIRTUAL_BUDGET_HKD * _MAX_SINGLE_POSITION_PCT:,.0f}"
+            f"（虚拟预算的{_MAX_SINGLE_POSITION_PCT:.0%}，按“这支票已有持仓市值＋本次买入金额”合计计算）。"
+            "给买入信号前请自己按这个上限反算股数：可买股数 = 该票剩余额度 ÷ 现价，"
+            "再按每手股数向下取整。超出上限的部分会被系统按上限削减，不会整笔作废，"
+            "但自己算准了才不会浪费这次决策。"
+        )
     )
 
     def _fmt_candidate(c: dict) -> str:
@@ -1151,6 +1177,16 @@ def _run_cycle_locked(email: str) -> dict:
     kept_signals, dropped_signals = _apply_budget_limit(
         tradeable_signals, candidates, holdings_value_hkd, current_cash, snapshot.get("positions"),
     )
+    # 被削减（而不是被拦掉）的那些也要如实写进决策记录：这条信号确实执行了，
+    # 但不是AI原本要的股数，不写清楚的话事后复盘会以为AI当初就只想买这么点。
+    _trimmed = [s for s in kept_signals if s.get("_trimmed_from")]
+    if _trimmed:
+        _t_text = "、".join(
+            f"{s['name']}（{s['symbol']}）{s['_trimmed_from']:g}股→{s['shares']:g}股"
+            f"（{s.get('_trim_reason', '额度')}上限）"
+            for s in _trimmed
+        )
+        reasoning_text += f"\n\n（系统提示：以下买入超出额度上限，已按上限削减股数后执行：{_t_text}）"
     if dropped_signals:
         _budget_dropped = [s for s in dropped_signals if s.get("_drop_reason") != "集中度"]
         _concentration_dropped = [s for s in dropped_signals if s.get("_drop_reason") == "集中度"]
@@ -1198,8 +1234,16 @@ def _run_cycle_locked(email: str) -> dict:
     tracker.log_sim_agent_run(
         email, open_markets, net_value_before, reasoning_text,
         json.dumps(signals, ensure_ascii=False), "完成",
-        f"{len(exec_results)}条信号，其中执行成功{sum(1 for r in exec_results if r.get('status') == '成功')}条"
+        # 2026-09-12改（审计第11条）："信号数"原来数的是exec_results，也就是
+        # 真正送到下单链路的那几条——被预算/集中度/休市拦下来的根本不在里面。
+        # 审计实测：AI明明开了1条买入、被集中度拦了，记录却写"0条信号，其中
+        # 执行成功0条，1条超预算被拦截"，同一句话里"0条信号"和"1条被拦截"
+        # 直接打架。信号数就该是AI这一轮给出的买卖指令总数，跟后面执行与否
+        # 无关，执行结果另外用"执行成功N条"表达。
+        f"{sum(1 for s in signals if s.get('action') in ('买入', '卖出'))}条信号，"
+        f"其中执行成功{sum(1 for r in exec_results if r.get('status') == '成功')}条"
         + (f"，{len(dropped_signals)}条超预算被拦截" if dropped_signals else "")
+        + (f"，{len(_trimmed)}条按额度上限削减后执行" if _trimmed else "")
         + (f"，本轮手续费共HK${total_fee_hkd:,.2f}" if total_fee_hkd > 0 else "")
         # 账户里其他来源的仓位如实带出来，不能悄悄从holdings_value_hkd里
         # 拿掉就当没这回事——用户去富途App对账时应该能在这里查到解释，
