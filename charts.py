@@ -600,7 +600,23 @@ def build_macro_series_chart(series: dict) -> go.Figure:
     水平值序列（利率、失业率这种在某个水平附近小幅波动的）仍然走折线：
     柱状图从0起画，4.1%和4.5%的柱子几乎一样高，等于什么都没表达。
     """
-    pts = _fill_month_gaps((series or {}).get("points") or [])
+    # 2026-09-11修（P0，前端审计"PPI/PCE同一个月份出现了重复数据，柱子叠画了"）：
+    # data_sources.get_macro_series按_ref_month()把富途给的data_time往前
+    # 校正一个月（修another真实故障：富途的data_time比数据实际所属月份晚
+    # 一期），这个校正量按每条记录自己的release_time/data_time间隔现算，
+    # 不是写死的常数——如果某条记录的release_time缺失或格式异常导致gap算
+    # 不出来，校正就不会应用，跟相邻正常校正过的记录撞到同一个参考月份上，
+    # 两条原本相差一个月的原始记录就会被画成同一个x轴类别下的两根柱子叠在
+    # 一起。这里按date去重，同一个月份出现多条时保留最后一条（get_macro_
+    # indicator_history本身是按时间顺序返回的，同一参考月份如果出现修订版
+    # 本，更晚出现的通常是更新的版本），而不是往上游re_month加更复杂的
+    # 消歧逻辑——那需要改一个已经很微妙、这次没有直接改动的时间校正函数，
+    # 风险比这里做一次去重高。
+    _raw_pts = (series or {}).get("points") or []
+    _seen_dates = {}
+    for _p in _raw_pts:
+        _seen_dates[_p.get("date")] = _p
+    pts = _fill_month_gaps(list(_seen_dates.values()))
     if not pts:
         return go.Figure()
     is_pct = series.get("unit") == "PERCENT"
@@ -614,6 +630,13 @@ def build_macro_series_chart(series: dict) -> go.Figure:
         return f"{d[2:4]}-{d[5:7]}" if len(d) >= 7 else d
 
     x = [_label(p["date"]) for p in pts]
+    # _fill_month_gaps只在两个真实数据点之间插值缺月（不会补在末尾，见它
+    # 自己的循环条件），所以这里出现的value为空的点必然是"这个月确实没有
+    # 发布数据"（比如政府停摆），不是"还没到这个月"。2026-09-11修（前端
+    # 审计"25-10那一个月是空的...应该加个注释说明，否则看起来像bug"）：
+    # 加一个通用的"无数据"标注，不硬编码具体原因（不是每次缺数据都是停摆，
+    # 这里没有可靠信息源判断具体原因，只如实标出"这里确实没有数据"）。
+    _gap_idx = [i for i, p in enumerate(pts) if p.get("value") is None and p.get("predict") is None]
 
     def _fmt(v):
         if v is None:
@@ -666,9 +689,27 @@ def build_macro_series_chart(series: dict) -> go.Figure:
         _apply_chart_theme(fig, height=320, legend=has_predict,
                            margin=dict(l=6, r=16, t=26, b=6))
         fig.update_xaxes(type="category")
-        fig.update_yaxes(autorange=True, rangemode="normal")
+        # 2026-09-11修（P0，前端审计"核心CPI折线的起点冲出了坐标轴上方"）：
+        # autorange=True只按折线数值本身算范围，不知道"top center"位置的
+        # 文字标签还要占地方——label_idx固定包含首/末/最大/最小四个点，
+        # 如果第一个点恰好也是最大值（核心CPI这类逐步回落的序列很常见），
+        # 它头顶的文字标签就会紧贴甚至冲出auto算出来的轴顶，因为Plotly的
+        # 自动定宽只看marker/line的y值，不看text标注的包围盒。改成跟下面
+        # 柱状图分支同一个做法：手动按数值跨度留边距，而不是信任autorange
+        # 会连文字标签一起考虑进去。
+        _line_vals = [v for v in (actual + predict) if v is not None]
+        if _line_vals:
+            _hi, _lo = max(_line_vals), min(_line_vals)
+            _pad = (_hi - _lo) * 0.15 or (abs(_hi) * 0.1 or 1)
+            fig.update_yaxes(range=[_lo - _pad * 0.4, _hi + _pad])
+        else:
+            fig.update_yaxes(autorange=True, rangemode="normal")
         if is_pct:
             fig.update_yaxes(ticksuffix="%")
+        for _gi in _gap_idx:
+            fig.add_annotation(x=x[_gi], y=0, yref="paper", yanchor="bottom",
+                                text="无数据", showarrow=False,
+                                font=dict(size=9, color=_AUX_SOFT))
         return fig
 
     fig.add_trace(
@@ -709,6 +750,10 @@ def build_macro_series_chart(series: dict) -> go.Figure:
         fig.update_yaxes(range=[_lo - (_pad if _lo < 0 else 0), _hi + _pad])
     _apply_chart_theme(fig, height=260, legend=has_predict,
                        margin=dict(l=6, r=16, t=26, b=6))
+    for _gi in _gap_idx:
+        fig.add_annotation(x=x[_gi], y=0, yref="paper", yanchor="bottom",
+                            text="无数据", showarrow=False,
+                            font=dict(size=9, color=_AUX_SOFT))
     return fig
 
 

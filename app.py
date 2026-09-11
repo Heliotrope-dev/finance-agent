@@ -78,6 +78,7 @@ from analysis import (
 from assistant import build_context as build_assistant_context, stream_reply as stream_assistant_reply
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
+    get_advice_accuracy,
     get_accuracy_trend, get_daily_accuracy, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_leaderboard, get_user_overview,
     get_latest_macro_briefs,
@@ -3947,6 +3948,42 @@ def _render_my_page():
                 "在个股详情页生成过综合数据分析之后，判断会被记下来，满7天自动补录当时的实际价格算方向是否一致。</div>",
                 unsafe_allow_html=True,
             )
+
+        # ── AI 排行榜/持仓判断 事后一致率 ──────────────────────────────────
+        # 2026-09-11修（P0，前端审计"AI在AI咨询里自己拆排行榜的台"）：审计
+        # 在AI咨询面板问"推荐股排行榜准不准"，AI如实引用了advice表
+        # （advisor.py每天17:30自动判断）的事后一致率和打分回测结论——这些
+        # 数据一直都在，只是从没在任何页面上单独展示过。而上面这一块
+        # "AI 判断准确率"统计的是完全不同的东西（用户自己在个股详情页手动
+        # 触发的"综合数据分析"，靠analyses表，独立的7天回看窗口）。两个
+        # 标签长得像、口径完全不同，用户在这个页面只看到"还没有满7天"，
+        # 却在AI咨询里听到一个具体的百分比，会以为AI在编数字或者前后矛盾
+        # ——其实是这个页面从没展示过AI真正引用的那份数据。这里补上，
+        # 标签明确写清楚"排行榜/持仓判断"，跟上面那块分开，不共用一个标题。
+        try:
+            _adv_acc = get_advice_accuracy(email)
+            _by_source = _adv_acc.get("按来源", {})
+        except Exception:
+            _by_source = {}
+        _adv_lines = []
+        for _src, _label in (("watchlist", "推荐股排行榜"), ("position", "持仓判断")):
+            _s = _by_source.get(_src)
+            if _s and _s.get("总数"):
+                _adv_lines.append((_label, _s["一致率"], _s["总数"]))
+        st.markdown("**AI 排行榜 / 持仓判断事后一致率**")
+        if _adv_lines:
+            _cols = st.columns(len(_adv_lines))
+            for _col, (_label, _rate, _n) in zip(_cols, _adv_lines):
+                _col.metric(_label, f"{_rate:.0f}%", help=f"共{_n}次判断，方向（买入应涨/卖出应跌）事后核对")
+            st.markdown(
+                "<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:4px'>"
+                "这是advisor.py每天17:30自动生成的买卖判断（跟上面\"个股详情页AI分析\"是两套独立记录）。"
+                "AI咨询里回答\"排行榜准不准\"引用的就是这份数据——分数越高不代表事后表现越好，"
+                "详见打分体系的事后实证说明。</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption("还没有满足回看窗口的自动判断记录（advisor.py每天17:30生成，watchlist口径需满6.9天才回填）。")
 
         # ── 最近搜索 ────────────────────────────────────────────────────
         try:
