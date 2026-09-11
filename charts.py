@@ -1209,14 +1209,20 @@ def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
             cmid=0.0, cmin=-lim, cmax=lim,
             line=dict(width=2, color="#FFFFFF"),
             showscale=False,
+            # 父节点内边距清零——这是干掉顶上那条深灰带的关键，见下面注释。
+            pad=dict(t=0, l=0, r=0, b=0),
         ),
-        # 顶上那条深灰色横带不是 pathbar（面包屑），关掉 pathbar 之后它还在。
-        # 它是 parents 全填 "" 时 plotly 自动生成的隐式根节点：根节点会把所有
-        # 板块当成自己的子节点包起来，于是四周画一圈边框、顶上留一条标题带。
-        # 这张图只有一层、不需要下钻，根节点纯属多余，两个都关掉——pathbar 关
-        # 导航，root 透明关那条带子和边框。
         pathbar=dict(visible=False),
-        root=dict(color="rgba(0,0,0,0)"),
+        # 顶上那条深灰横带(#444)是 parents 全填 "" 时 plotly 自动生成的隐式
+        # 根节点。排查过两条死路，别再走一遍：
+        #   1) 关 pathbar——那是面包屑导航，不是这条带子，关了带子还在；
+        #   2) root=dict(color="rgba(0,0,0,0)")——配置确实送到了图上（浏览器里
+        #      读 gd.data[0].root 能看到），但只要 marker.colors 是自己传的
+        #      数组，plotly.js 就不认 root.color，照样刷 rgb(68,68,68)。
+        # 真正起作用的是上面 marker.pad 清零：根节点默认在顶部留一条 header
+        # 的空间，pad.t=0 之后子节点铺满整个绘图区，根节点被完全盖住。
+        # 实测(浏览器里 Plotly.restyle 验证)：子节点 y 从 20 变成 0、高度从
+        # 320 变成 340，带子消失。
         tiling=dict(pad=1),
         sort=True,
         branchvalues="total",
