@@ -3337,11 +3337,20 @@ def _render_advice_section():
     st.caption("通过买入区间、股数、止损、目标和盈亏比全部校验的标的排在最前；没过闸门的也列出来，并写明差在哪。")
 
     def _plan_row(item: dict, *, ready: bool) -> str:
+        # 买入区间经常只有单边：daily_plan 在均线已经高于赔率分界时会只给上限
+        # 不给下沿（"这个位置本来就不便宜"），两边都当必填就会把一个有效的
+        # "不高于X就能买"渲染成一个没信息量的破折号。
         lo, hi = item.get("买入下沿"), item.get("买入上限")
-        range_text = (
-            f"{lo:.2f}–{hi:.2f}" if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) else "—"
-        )
-        bits = [f"买入区间 {range_text}"]
+        _has_lo, _has_hi = isinstance(lo, (int, float)), isinstance(hi, (int, float))
+        if _has_lo and _has_hi:
+            range_text = f"买入区间 {lo:.2f}–{hi:.2f}"
+        elif _has_hi:
+            range_text = f"买入上限 {hi:.2f}"
+        elif _has_lo:
+            range_text = f"买入下沿 {lo:.2f}"
+        else:
+            range_text = "尚无有效买入区间"
+        bits = [range_text]
         if item.get("建议股数"):
             bits.append(f"买入 {int(item['建议股数'])} 股")
         if isinstance(item.get("止损参考"), (int, float)):
