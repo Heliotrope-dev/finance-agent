@@ -59,7 +59,14 @@ def _take_snapshot_locked(email: str) -> dict:
     except Exception as e:
         return {"status": "失败", "note": str(e)}
 
-    holdings_value = snapshot.get("holdings_value_hkd", 0.0)
+    # 2026-09-12修：这里原来直接取 snapshot["holdings_value_hkd"]，也就是
+    # 富途SIMULATE账户里"当前有什么"的全部市值——包含那两笔从未经AI下单的
+    # 遗留持仓。净值/收益率那条链路已经在 sim_agent 和页面两处换成了按成交
+    # 流水核对过的 ai_value_hkd，唯独这个每5分钟落库的快照漏了，于是资产
+    # 曲线和"本日/昨日/本月收益"继续按被污染的净值在算：账户实际从
+    # $10,000 变成 $9,999（-0.01%），页面上的"本日收益"却显示 -$2,026
+    # （-16.85%），因为今天的基准点还是修复前那个虚高的 $12,025。
+    holdings_value = sim_trader.get_ledger_reconciled_holdings(email, snapshot)["ai_value_hkd"]
     virtual_cash = tracker.get_sim_virtual_cash(email)
     if virtual_cash is None:
         virtual_cash = sim_agent._VIRTUAL_BUDGET_HKD

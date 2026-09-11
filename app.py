@@ -376,7 +376,11 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
     letter-spacing: 0.035em;
 }
 [data-testid="stMetricValue"] {
-    font-size: 1.85rem !important; font-weight: 600 !important; letter-spacing: -0.028em !important;
+    /* 2026-09-12：从 1.85rem 收到 1.5rem。实机看个股详情页，"最高/最低/今开"
+       这三个次要参考数字几乎跟顶部主价格一样大，主次完全拉不开，而且三行
+       大字把K线推到了首屏之外。1.5rem 仍然是明确的"指标数字"体量，但不再
+       跟页面主角抢戏，各页面的垂直占用也跟着收了一截。 */
+    font-size: 1.5rem !important; font-weight: 600 !important; letter-spacing: -0.028em !important;
     color: var(--fa-text) !important; line-height: 1.24 !important;
 }
 /* Streamlit 新版给 delta 加了一个带底色的圆角小胶囊，粉底/浅绿底在这套
@@ -5991,9 +5995,20 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
                 pl_text = _fmt_usd_signed(pl_usd, decimals=2)
             else:
                 pl_text = "—"
+            # 非AI下单的那几笔要在列表里就标出来，不能只靠上面那句说明。
+            # 2026-09-12实机看下来：上面净值卡片写着"仅AI自己买入的"，下面
+            # 这个列表却把遗留仓位和AI刚买的GLD混在一起平铺，读者对不上账，
+            # 会以为净值算漏了。
+            _is_foreign = any(
+                fp.get("code") == p.get("code") and fp.get("market") == p.get("market")
+                for fp in _reconciled["foreign_positions"]
+            )
+            _tag = ("<span style='font-size:0.7rem;color:var(--fa-faint);margin-left:8px'>"
+                    "非AI持仓 · 不计入净值</span>") if _is_foreign else ""
             st.markdown(
-                f"<div style='display:flex;justify-content:space-between;padding:4px 0'>"
-                f"<span>{_esc(p['name'])}（{_esc(p['code'])}）· {p['qty']:g}股</span>"
+                f"<div style='display:flex;justify-content:space-between;padding:4px 0"
+                f"{';opacity:.55' if _is_foreign else ''}'>"
+                f"<span>{_esc(p['name'])}（{_esc(p['code'])}）· {p['qty']:g}股{_tag}</span>"
                 f"<span style='color:{pl_color}'>{pl_text}</span></div>",
                 unsafe_allow_html=True,
             )
