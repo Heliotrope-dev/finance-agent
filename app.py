@@ -962,21 +962,23 @@ if not st.session_state.get("logged_in") and not st.session_state.get("guest_mod
     _show_login_page()
     st.stop()
 
-# 持仓列表整卡片可点——之前试过CSS覆盖层、JS找DOM绑事件两种方案，
-# 在真实浏览器里都点不动（大概率是这两种方案都依赖对Streamlit内部渲染结构
-# 的猜测，版本一变或者猜错了就失效）。改成最朴素可靠的办法：卡片内容整个
-# 包在一个真正的<a href="?...">链接里，点击就是标准的浏览器导航行为，
-# 不依赖任何JS/CSS去猜内部结构。这里在页面渲染最开始就检查URL参数，
-# 有就直接跳转详情页并清掉参数。
-if st.query_params.get("open_symbol"):
-    st.session_state["_detail_symbol"] = st.query_params["open_symbol"]
-    st.session_state["_detail_market"] = st.query_params.get("open_market", "A")
-    st.session_state["_detail_name"] = st.query_params.get("open_name", st.query_params["open_symbol"])
+# 个股详情页有稳定的可分享地址。旧的 open_* 是一次性跳转参数，第一次进入
+# 后会改写为 symbol/market/name/section 四个规范参数；后者不清理，刷新或复制
+# 地址仍能回到同一只标的。认证令牌不放进规范地址，登录态由七天 Cookie 维持。
+_route_symbol = st.query_params.get("symbol") or st.query_params.get("open_symbol")
+if _route_symbol:
+    _route_is_legacy = bool(st.query_params.get("open_symbol"))
+    _route_market = st.query_params.get("market") or st.query_params.get("open_market", "A")
+    _route_name = st.query_params.get("name") or st.query_params.get("open_name", _route_symbol)
+    _route_section = st.query_params.get("section") or st.query_params.get("open_from")
+    st.session_state["_detail_symbol"] = _route_symbol
+    st.session_state["_detail_market"] = _route_market
+    st.session_state["_detail_name"] = _route_name
     # 从卡片点进来的，"返回"要能回到原来那个分区，不是每次都弹回默认的
     # "行情"——整页导航会把session_state清空，"_active_section"记不住是从哪个
     # 分区点进来的，得靠这个参数显式带过来。历史上这里只认"pos"一个值、固定
     # 回"持仓"，自选拆成独立分区后就不够用了，改成直接带分区名。
-    _from = st.query_params.get("open_from")
+    _from = _route_section
     _VALID_SECTIONS = ("首页", "行情", "持仓", "自选", "AI模拟炒股", "我的")
     if _from == "pos":          # 兼容还没刷新的旧页面里残留的老链接
         st.session_state["_active_section"] = "持仓"
@@ -984,8 +986,13 @@ if st.query_params.get("open_symbol"):
         st.session_state["_active_section"] = _from
     if _from:
         st.session_state["_detail_return_section"] = st.session_state.get("_active_section", "持仓")
-    st.query_params.clear()
-    st.rerun()
+    if _route_is_legacy:
+        # 旧链接带 _auth 时也只使用一次；规范 URL 不泄露可登录令牌。
+        st.query_params.clear()
+        st.query_params.update({"symbol": _route_symbol, "market": _route_market, "name": _route_name})
+        if _from:
+            st.query_params["section"] = _from
+        st.rerun()
 if st.query_params.get("open_index_code"):
     st.session_state["_index_detail_code"] = st.query_params["open_index_code"]
     st.session_state["_index_detail_market"] = st.query_params.get("open_index_market", "A")
@@ -2536,6 +2543,10 @@ def _render_market_extras(market: str):
             ipos = get_ipo_calendar(market, limit=6)
         except Exception:
             ipos = []
+        # 政府银债/债券不是股票 IPO，不应混进“新股上市”。它们没有同一套
+        # 招股价、绿鞋或首日表现语义，展示在这里会和首页认购专区互相矛盾。
+        ipos = [ip for ip in ipos if "银债" not in str(ip.get("name") or "")
+                and "债券" not in str(ip.get("name") or "")]
         if ipos:
             st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
             st.markdown(
@@ -2605,24 +2616,18 @@ def _render_hot_sectors(market: str):
             f"</div>"
         )
         with st.container(key=f"sector_row_{market}_{idx}"):
-            if market == "A":
-                # A股板块成分股走东财接口，实测连接经常失败（东财板块类接口的
-                # 老问题），点进去大概率只看到"获取不到"，体验比不能点还差——
-                # A股这边先不做成可点击。港股/美股走Futu，可靠，保留可点击。
-                st.markdown(inner, unsafe_allow_html=True)
-            else:
-                href = (
-                    f"?open_sector={urllib.parse.quote(str(row['板块']))}"
-                    f"&open_sector_market={urllib.parse.quote(market)}"
-                    f"{_auth_qs()}"
-                )
-                st.markdown(
-                    "<style>a.sector-card-link, a.sector-card-link:link, a.sector-card-link:visited {"
-                    "text-decoration:none !important; color:inherit !important; display:block; cursor:pointer;"
-                    "}</style>"
-                    f"<a class='sector-card-link' href='{href}' target='_self'>{inner}</a>",
-                    unsafe_allow_html=True,
-                )
+            href = (
+                f"?open_sector={urllib.parse.quote(str(row['板块']))}"
+                f"&open_sector_market={urllib.parse.quote(market)}"
+                f"{_auth_qs()}"
+            )
+            st.markdown(
+                "<style>a.sector-card-link, a.sector-card-link:link, a.sector-card-link:visited {"
+                "text-decoration:none !important; color:inherit !important; display:block; cursor:pointer;"
+                "}</style>"
+                f"<a class='sector-card-link' href='{href}' target='_self'>{inner}</a>",
+                unsafe_allow_html=True,
+            )
 
     if len(sectors) > 9:
         if not st.session_state.get(expand_key):
@@ -3413,9 +3418,9 @@ def _render_app_guide():
             "（附股数和金额），这是基于你自己数据算出来的仓位管理建议，不是选股推荐，"
             "同样不构成投资建议，请自行判断风险。\n\n"
             "**行情**\n\n"
-            "首页按市场切换查看核心指数（A股按涨跌幅列示，港股按东财人气榜排热度，"
+            "在「行情」分区按市场查看核心指数（A股按涨跌幅列示，港股按东财人气榜排热度，"
             "美股展示固定核心股名单），A股另有涨停/跌停池和南向资金；"
-            "价格每 3 秒自动刷新一次。\n\n"
+            "局部报价会自动刷新，模块旁会标注市场状态与数据时间。\n\n"
             "**个股/指数详情页**\n\n"
             "点开任意标的先看K线或分时图，再看一手资讯（A股优先展示官方公告，"
             "港股/美股优先富途资讯，都查不到才退回财新摘要），最后是 AI 深度分析——"
@@ -3423,17 +3428,17 @@ def _render_app_guide():
             "以及一段综合评分（0-100，越高越偏多头证据、越低越偏空头证据，"
             "评分依据是各条独立证据链是否互相印证，不是 AI 自己主观看好程度）。\n\n"
             "**持仓**\n\n"
-            "右上角放大镜可以按代码或名称搜索添加，填股数/金额记为真实持仓"
+            "右上角搜索可按代码或名称查行情，+ 按钮用于添加持仓；填写股数或金额后记为真实持仓，成交均价可选填"
             "（不填只是关注），卡片显示迷你走势图、实时涨跌和持仓浮盈，"
             "点卡片进详情页，点 × 卖出或取消关注。\n\n"
             "**AI模拟炒股**\n\n"
-            "内置AI（千问）用虚拟资金自主管理一个模拟盘——只交易港股/美股（A股不参与），"
-            "起始本金1万美金，在开盘时段每5分钟自主决定要不要买卖，不需要手动操作，"
+            "内置 Gemini AI 用虚拟资金自主管理一个模拟盘——只交易港股/美股（A股不参与），"
+            "在开盘时段按行情触发决策，不需要手动操作；"
             "这里能看到它的持仓、收益曲线和完整交易记录，仅供观察AI决策能力，"
             "不构成投资建议。\n\n"
             "**我的**\n\n"
             "账户信息、自选与持仓的数量和市场分布、累计做过多少次AI分析、最近搜索、"
-            "以及几个开关的当前状态都在这里。其中「AI 判断准确率」是这样来的：每次"
+            "以及行情与 Gemini AI 的数据源状态都在这里。其中「AI 判断准确率」是这样来的：每次"
             "生成「综合数据分析」时会记录当时价格和 AI 判断的方向倾向，满 7 天后"
             "自动补录当时的价格做对照，统计一个方向一致率——这是历史记录的客观统计，"
             "不代表未来表现，不是胜率承诺。\n\n"
@@ -3465,6 +3470,35 @@ def _render_data_source_health():
                 "港股/美股行情会自动退回腾讯行情兜底，不影响使用）",
                 unsafe_allow_html=True,
             )
+
+        # 行情连接正常不代表 AI 决策链路正常。模拟盘曾发生账户欠费后持续失败、
+        # 而这里仍显示“暂无失败”的误导状态，所以单独展示最近一次 AI 决策。
+        try:
+            _sim_runs = get_sim_agent_runs(sim_agent.advisor._EMAIL, limit=8)
+            _sim_latest = _sim_runs[0] if _sim_runs else None
+            _sim_ok = next((r for r in _sim_runs if r.get("status") != "失败"), None)
+            if _sim_latest and _sim_latest.get("status") == "失败":
+                _when = _to_cn_dt(_sim_latest.get("run_at"))
+                _when_text = _when.strftime("%m-%d %H:%M") if _when else "未知时间"
+                _ok_when = _to_cn_dt(_sim_ok.get("run_at")) if _sim_ok else None
+                _ok_text = _ok_when.strftime("%m-%d %H:%M") if _ok_when else "无成功记录"
+                st.markdown(
+                    f"**Gemini AI 决策**：<span style='color:{DOWN_COLOR}'>不可用</span>"
+                    f"（最近一次失败 {_when_text}；最后一次成功 {_ok_text}）",
+                    unsafe_allow_html=True,
+                )
+            elif _sim_latest:
+                _when = _to_cn_dt(_sim_latest.get("run_at"))
+                _when_text = _when.strftime("%m-%d %H:%M") if _when else "未知时间"
+                st.markdown(
+                    f"**Gemini AI 决策**：<span style='color:{UP_COLOR}'>正常</span>"
+                    f"（最近一次 {_when_text}：{_esc(str(_sim_latest.get('status') or '完成'))}）",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown("**Gemini AI 决策**：暂无运行记录")
+        except Exception:
+            st.markdown("**Gemini AI 决策**：状态暂时读取不到")
 
         _breakers = _health["熔断记录"]
         if _breakers:
@@ -4315,7 +4349,7 @@ def _render_event_calendar():
             if r["target_price"]:
                 _tp = f"目标价 {r['target_price']:,.0f}"
                 if r["target_pct"] is not None and abs(r["target_pct"]) >= 0.5:
-                    _tp += f"（{r['target_pct']:+.0f}%）"
+                    _tp += f"（较前目标价 {r['target_pct']:+.0f}%）"
             st.markdown(
                 f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
                 f"border-bottom:1px solid var(--fa-border)'>"
@@ -4798,6 +4832,11 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     if st.button("", icon=":material/arrow_back:", key=f"detail_back_{symbol}_{market}", type="tertiary", help="返回"):
         for k in ("_detail_symbol", "_detail_market", "_detail_name", "_detail_module"):
             st.session_state.pop(k, None)
+        for key in ("symbol", "market", "name", "section"):
+            try:
+                del st.query_params[key]
+            except KeyError:
+                pass
         # 回到进来时那个分区。以前这里写死"持仓"，从自选点进来的用户按返回会
         # 落在一个自己没在看的分区上。
         st.session_state["_active_section"] = st.session_state.get("_detail_return_section", "持仓")
@@ -6583,22 +6622,31 @@ def _show_add_position_dialog(email: str):
         # on_change实时互算，所以放弃"边打字边看到另一个框跟着变"这个效果，
         # 换成提交后台由代码统一按"填了哪个就用哪个算另一个"来处理。
         with st.form("_pos_add_form", border=False):
-            st.caption("股数与金额填一个即可")
+            st.caption("股数、成交均价、金额可填任意两项；只填一项时按当前报价估算。")
             amount = st.number_input(
                 f"买入金额（{cur_label}）", min_value=0.0, value=0.0, step=100.0, key="_pos_add_amount",
             )
             shares = st.number_input(
-                "股数", min_value=0.0, value=0.0, step=1.0, key="_pos_add_shares",
+                "股数", min_value=0, value=0, step=1, key="_pos_add_shares",
+                help="股票按整数股记录；港股请按券商显示的每手股数填写。",
+            )
+            cost_price = st.number_input(
+                f"成交均价（{cur_label}）", min_value=0.0, value=0.0,
+                step=0.01, format="%.4f", key="_pos_add_cost_price",
+                help="已成交的仓位请填写实际成交均价，浮盈亏会以它为成本计算。",
             )
             submitted = st.form_submit_button("确认添加", type="primary", use_container_width=True)
 
         if submitted:
-            # 表单提交时shares/amount是这一刻真实、原子提交的值，不会再是
-            # 竞态下的旧值——这里只需要处理"只填了一个，另一个要补算"。
+            # 用用户明确输入的成交均价优先；没有成交价才以当前报价估算。
+            # 这一步只做确定性算术，不交给模型，避免成本价/浮盈亏被自由文本改写。
+            basis_price = cost_price if cost_price > 0 else confirmed["price"]
             if shares <= 0 and amount > 0:
-                shares = round(amount / confirmed["price"], 4)
+                shares = max(1, round(amount / basis_price))
             elif amount <= 0 and shares > 0:
-                amount = round(shares * confirmed["price"], 2)
+                amount = round(shares * basis_price, 2)
+            elif shares > 0 and cost_price > 0:
+                amount = round(shares * cost_price, 2)
 
             if shares > 0:
                 upsert_position(email, confirmed["symbol"], confirmed["name"], confirmed["market"], shares, amount)
@@ -6914,8 +6962,8 @@ else:
                         st.markdown(
                             "<div style='text-align:center;color:var(--fa-muted);padding:20px 0 10px'>"
                             "还没有持仓<br>"
-                            "<span style='font-size:0.82rem'>点右上角的 + 按钮添加，填了股数/金额才算持仓——"
-                            "不填股数会加进「自选」分区</span>"
+                            "<span style='font-size:0.82rem'>点右上角的 + 按钮添加；填写股数或金额后才算持仓，成交均价可选填——"
+                            "股数和金额都留空会加进「自选」分区</span>"
                             "</div>",
                             unsafe_allow_html=True,
                         )
@@ -6986,7 +7034,7 @@ else:
                         st.markdown(
                             "<div style='text-align:center;color:var(--fa-muted);padding:20px 0 10px'>"
                             "还没有自选股票<br>"
-                            "<span style='font-size:0.82rem'>点右上角的 + 按钮添加，弹窗里不填股数/金额即为自选</span>"
+                            "<span style='font-size:0.82rem'>点右上角的 + 按钮添加；股数和金额都留空即为自选</span>"
                             "</div>",
                             unsafe_allow_html=True,
                         )

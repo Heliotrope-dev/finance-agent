@@ -3553,22 +3553,35 @@ def get_market_rank(kind: str, market: str = "HK", count: int = 10) -> list[dict
     (ret, df)，统一走 _unwrap_futu 拆。
     """
     mk = getattr(ft.Market, market, None)
+    # 先多取一批再筛，避免去掉 OTC/超小盘 ADR 后页面只剩两三条。
+    request_count = max(count * 3, 20)
     if kind == "us_premarket":
-        r = _futu_call(lambda c: c.get_us_pre_market_rank(count=count), timeout=20, default=None)
+        r = _futu_call(lambda c: c.get_us_pre_market_rank(count=request_count), timeout=20, default=None)
     elif kind == "hot":
         if mk is None:
             return []
-        r = _futu_call(lambda c: c.get_hot_list(mk, count=count), timeout=20, default=None)
+        r = _futu_call(lambda c: c.get_hot_list(mk, count=request_count), timeout=20, default=None)
     else:
         if mk is None:
             return []
-        r = _futu_call(lambda c: c.get_top_movers_rank(mk, count=count), timeout=20, default=None)
+        r = _futu_call(lambda c: c.get_top_movers_rank(mk, count=request_count), timeout=20, default=None)
     df = _unwrap_futu(r)
     if df is None or df.empty:
         return []
     out = []
     for _, row in df.iterrows():
         sec = str(row.get("security") or "")
+        row_market = sec.split(".")[0] if "." in sec else market
+        raw_name = str(row.get("name") or "").strip()
+        # 排行榜的目标是可交易的大盘主板股票。原始接口常把 OTC ADR（名称里
+        # 带 EACH REP/ORD SHS）混进异常榜；这类标的流动性和报价质量都不适合作为
+        # 首页的市场信号。交易所字段存在时优先用字段，没有时才用名称兜底。
+        exchange = str(row.get("exchange") or row.get("listing_exchange") or "").upper()
+        if row_market == "US":
+            if exchange and exchange not in {"NASDAQ", "NYSE", "AMEX", "ARCA"}:
+                continue
+            if not exchange and ("EACH REP" in raw_name.upper() or "ORD SHS" in raw_name.upper()):
+                continue
         def _f(*keys):
             for k in keys:
                 v = row.get(k)
@@ -3580,8 +3593,8 @@ def get_market_rank(kind: str, market: str = "HK", count: int = 10) -> list[dict
             return None
         out.append({
             "symbol": sec.split(".")[-1],
-            "market": sec.split(".")[0] if "." in sec else market,
-            "name": str(row.get("name") or ""),
+            "market": row_market,
+            "name": raw_name,
             "price": _f("cur_price", "price", "last_price"),
             "change_pct": _f("change_ratio", "change_rate", "change_pct"),
             "volume_ratio": _f("volume_ratio"),
