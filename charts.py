@@ -221,8 +221,14 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
     return fig
 
 
-def build_candlestick(hist: pd.DataFrame) -> go.Figure:
-    """K线图 + MA5/MA20 + 成交量 + MACD，三个子图。hist 需要有 日期/开盘/收盘/最高/最低/成交量 列。"""
+def build_candlestick(hist: pd.DataFrame, show_volume: bool = True) -> go.Figure:
+    """K线图 + MA5/MA20 + 成交量 + MACD，三个子图。hist 需要有 日期/开盘/收盘/最高/最低/成交量 列。
+
+    show_volume=False 时去掉成交量那一栏，只留 K线 + MACD 两栏。给本身没有
+    成交量概念的品种用——VIX、美债收益率、美元指数这些是计算出来的指数，不是
+    撮合出来的合约，Yahoo 那边成交量返回的是 0。画一栏全空的柱状图不是"信息
+    为零"，是看上去像坏了。
+    """
     df = hist.copy()
     df["MA5"] = df["收盘"].rolling(5).mean()
     df["MA20"] = df["收盘"].rolling(20).mean()
@@ -231,10 +237,17 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
     # 主图占比从0.5提到0.58，MACD从0.3压到0.26——三块面板原来接近等分，
     # 价格才是主角，成交量和MACD是辅证，不该跟主图抢高度。子图间距也收窄，
     # 三块之间原来空出很大一片，整张图显得散。
+    if show_volume:
+        rows, row_heights, titles = 3, [0.58, 0.16, 0.26], ("", "成交量", "MACD")
+        vol_row, macd_row = 2, 3
+    else:
+        # 去掉成交量之后把高度还给主图，不是让 MACD 变胖。
+        rows, row_heights, titles = 2, [0.70, 0.30], ("", "MACD")
+        vol_row, macd_row = None, 2
     fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True,
-        row_heights=[0.58, 0.16, 0.26], vertical_spacing=0.055,
-        subplot_titles=("", "成交量", "MACD"),
+        rows=rows, cols=1, shared_xaxes=True,
+        row_heights=row_heights, vertical_spacing=0.055,
+        subplot_titles=titles,
     )
     _style_subplot_titles(fig)
 
@@ -269,18 +282,19 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
         col=1,
     )
 
-    vol_colors = [
-        UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(df["开盘"], df["收盘"])
-    ]
-    # 成交量柱去掉描边并压低不透明度：它是辅证，不该跟上面的K线一样浓。
-    fig.add_trace(
-        go.Bar(
-            x=df["日期"], y=df["成交量"], marker_color=vol_colors, name="成交量",
-            marker_line_width=0, opacity=0.5,
-        ),
-        row=2,
-        col=1,
-    )
+    if vol_row:
+        vol_colors = [
+            UP_COLOR if c >= o else DOWN_COLOR for o, c in zip(df["开盘"], df["收盘"])
+        ]
+        # 成交量柱去掉描边并压低不透明度：它是辅证，不该跟上面的K线一样浓。
+        fig.add_trace(
+            go.Bar(
+                x=df["日期"], y=df["成交量"], marker_color=vol_colors, name="成交量",
+                marker_line_width=0, opacity=0.5,
+            ),
+            row=vol_row,
+            col=1,
+        )
 
     macd_colors = [UP_COLOR if v >= 0 else DOWN_COLOR for v in macd["MACD"]]
     fig.add_trace(
@@ -288,17 +302,17 @@ def build_candlestick(hist: pd.DataFrame) -> go.Figure:
             x=df["日期"], y=macd["MACD"], marker_color=macd_colors, name="MACD柱",
             marker_line_width=0, opacity=0.55,
         ),
-        row=3,
+        row=macd_row,
         col=1,
     )
     fig.add_trace(
         go.Scatter(x=df["日期"], y=macd["DIF"], line=dict(width=1, color=_AUX_STRONG), name="DIF"),
-        row=3,
+        row=macd_row,
         col=1,
     )
     fig.add_trace(
         go.Scatter(x=df["日期"], y=macd["DEA"], line=dict(width=1, color=_AUX_SOFT), name="DEA"),
-        row=3,
+        row=macd_row,
         col=1,
     )
 
@@ -1101,26 +1115,32 @@ def build_fed_rate_path_chart(series: dict) -> go.Figure:
     return fig
 
 
-# 热力图专用的低饱和色阶。不直接用 UP_COLOR/DOWN_COLOR（#D0342C / #12855F）：
-# 那两个是给数字用的——一行几十像素的小字，饱和度高才看得清。热力图是大色块，
-# 整屏铺满同样的饱和度，会把这一页从"黑白灰为主、克制用色"变成一张花图，
-# 用户原话："我们的项目的风格是简约清爽高级有颜色以黑白灰为主这个你要协调一下"。
+# 热力图走纯黑白灰，深浅表示涨跌幅的大小。用户要求："热力版的颜色最好不要用
+# 红绿，用黑白灰表示深浅"。
 #
-# 做法是保留红涨绿跌的色相（这是这张图唯一的信息通道，不能丢），把饱和度压到
-# 灰调区间、亮度提上去，让色块更接近"带一点颜色的灰"。中点用页面底色附近的
-# 浅灰，不涨不跌的板块于是几乎融进背景——这正是想要的：注意力只落在两头。
-_HEAT_DOWN_STRONG = "#6F9788"   # 跌：灰调墨绿
-_HEAT_DOWN_SOFT = "#BCCFC8"
-_HEAT_NEUTRAL = "#F1F2F3"       # 0%：接近页面底色的浅灰
-_HEAT_UP_SOFT = "#E3C4C0"
-_HEAT_UP_STRONG = "#B77B73"     # 涨：灰调砖红
+# 这跟一般的红绿热力图有个关键差别，必须想清楚再写：灰度只有一个通道（深浅），
+# 而涨跌是有正负的量。两种映射方式——
+#   A) 发散式：跌=深、涨=浅、0=中灰。保住了方向，但"涨最多"会被画成接近白色，
+#      在这个浅色页面上等于看不见，而且"白=好"这个约定很反直觉。
+#   B) 幅度式：深浅 = |涨跌幅|，方向交给方块上印的正负号。
+# 取 B。理由是这张图真正要回答的问题是"今天哪儿动得最厉害"，方向紧跟着在同一
+# 个方块上用 +4.63% / -0.89% 写着，一眼就能确认；而 A 方案会让半张图消失。
+#
+# 最浅一档贴近页面底色，几乎不动的板块自然融进背景；最深一档是墨色而不是纯黑
+# ——纯黑在浅色页面上太硬，跟全站其它元素（发丝线、次级文字）不是一套。
+_HEAT_GREY_FLAT = "#F1F2F3"     # |涨跌| ≈ 0：接近页面底色
+_HEAT_GREY_MID = "#C6C9CD"
+_HEAT_GREY_DEEP = "#5A5E66"
+_HEAT_GREY_MAX = "#2E3138"      # 当日波动最大：墨色，不用纯黑
 _HEAT_COLORSCALE = [
-    [0.0, _HEAT_DOWN_STRONG],
-    [0.25, _HEAT_DOWN_SOFT],
-    [0.5, _HEAT_NEUTRAL],
-    [0.75, _HEAT_UP_SOFT],
-    [1.0, _HEAT_UP_STRONG],
+    [0.0, _HEAT_GREY_FLAT],
+    [0.35, _HEAT_GREY_MID],
+    [0.75, _HEAT_GREY_DEEP],
+    [1.0, _HEAT_GREY_MAX],
 ]
+# 超过这个灰度深度就得把字改成白的，否则墨色字压在深灰块上读不出来。
+# 0.45 是按上面色阶估的翻转点（大致落在 _HEAT_GREY_MID 和 _HEAT_GREY_DEEP 之间）。
+_HEAT_TEXT_FLIP = 0.45
 
 
 def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
@@ -1161,18 +1181,26 @@ def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
     else:
         sizes = pd.Series(1.0, index=d.index)
 
-    # 颜色范围取当天实际涨跌幅的绝对值上限，并且上下对称。不写死 ±3%：
-    # 平静的一天全部板块都在 ±0.5% 以内，写死范围会把整张图压成一片灰白；
-    # 暴动的一天又会有一半板块顶格同色，分不出层次。对称是必须的——不对称
-    # 的话 0% 不落在色阶中点，不涨不跌的板块会被染上颜色。
+    # 灰度的上限取当天涨跌幅绝对值的最大值：最能动的那个板块是最深的墨色，
+    # 其余按比例排开。不写死 3%——平静的一天全部板块都在 0.5% 以内，写死
+    # 上限会把整张图压成一片浅灰；暴动的一天又会有一堆板块顶格同色、分不出
+    # 层次。下限 0.35% 是防止极度平静时把噪声放大成满屏深灰。
     lim = float(d["涨跌幅"].abs().max())
-    lim = max(lim, 0.35)  # 给一个下限，否则极度平静时噪声会被放大成满屏红绿
+    lim = max(lim, 0.35)
 
     pcts = d["涨跌幅"].tolist()
     if size_col:
         amounts = [f"{v/1e8:,.1f}亿" if pd.notna(v) else "—" for v in d[size_col]]
     else:
         amounts = ["—"] * len(d)
+
+    # 按每个方块自己的灰度深度决定字色：浅块墨字、深块白字。深度就是
+    # |涨跌幅| / lim，跟上面喂给 colorscale 的是同一个量，所以翻转点跟实际
+    # 底色是对齐的，不会出现"字翻白了但底色还很浅"。
+    text_colors = [
+        "#FFFFFF" if (abs(p) / lim) >= _HEAT_TEXT_FLIP else _CHART_INK
+        for p in pcts
+    ]
 
     # 方块上的文字在 Python 这边拼好，不用 texttemplate 的格式化占位符。
     # 踩过的坑：customdata 里同时放了数字(涨跌幅)和字符串(成交额)，plotly 会
@@ -1196,17 +1224,16 @@ def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
         hovertemplate="<b>%{label}</b><br>涨跌幅 %{customdata[0]}"
                       "<br>成交额 %{customdata[1]}<extra></extra>",
         textposition="middle center",
-        # 墨色字不是白字。色阶中点是接近白的浅灰(#F2F3F5)，不涨不跌的板块
-        # 方块几乎是白的，白字直接消失；而涨跌大的方块底色够深，墨色字在上面
-        # 仍然读得出来。两头取其一的话，深色字的可读区间宽得多。
-        textfont=dict(family=_CHART_FONT, size=12, color=_CHART_INK),
+        # 每个方块单独给字色。灰度色阶两头的底色一个接近白、一个接近墨，
+        # 统一用哪种字色都会有一半读不出来，所以按各自的深度翻转：浅块用墨字，
+        # 深块用白字。plotly 的 textfont.color 支持传数组，正好按方块配。
+        textfont=dict(family=_CHART_FONT, size=12, color=text_colors),
         marker=dict(
-            colors=pcts,
-            # 中式红涨绿跌，但走上面那套低饱和色阶。这里跟"日历热力图刻意不用
-            # UP/DOWN配色"的那条注释不冲突：那张图讲的是新股破发率、不是价格；
-            # 这张图的颜色含义就是涨跌本身，色相该跟全站一致，只是饱和度要压。
+            # 颜色喂的是涨跌幅的绝对值，不是带符号的原值——灰度只有深浅一个
+            # 通道，表达的是"动得多厉害"，方向由方块上印的正负号承担。
+            colors=[abs(p) for p in pcts],
             colorscale=_HEAT_COLORSCALE,
-            cmid=0.0, cmin=-lim, cmax=lim,
+            cmin=0.0, cmax=lim,
             line=dict(width=2, color="#FFFFFF"),
             showscale=False,
             # 父节点内边距清零——这是干掉顶上那条深灰带的关键，见下面注释。

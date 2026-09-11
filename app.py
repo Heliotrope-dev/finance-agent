@@ -65,6 +65,7 @@ from data_sources import (
     get_hot_sectors,
     get_sector_heatmap,
     get_macro_dashboard,
+    get_macro_history,
     get_sector_constituents,
     get_hstech_constituents,
     resolve_symbol_by_name,
@@ -1023,6 +1024,10 @@ if _route_symbol:
         if _from:
             st.query_params["section"] = _from
         st.rerun()
+if st.query_params.get("open_macro"):
+    st.session_state["_macro_detail_name"] = st.query_params["open_macro"]
+    st.query_params.clear()
+    st.rerun()
 if st.query_params.get("open_index_code"):
     st.session_state["_index_detail_code"] = st.query_params["open_index_code"]
     st.session_state["_index_detail_market"] = st.query_params.get("open_index_market", "A")
@@ -2704,8 +2709,13 @@ def _render_macro_strip():
             unit_html = (
                 f"<div style='font-size:0.66rem;color:var(--fa-faint)'>{_esc(unit)}</div>"
             )
+        # 整张卡片包在一个真正的 <a> 里，点进宏观详情页。跟项目里推荐股/指数/
+        # 持仓卡片是同一套做法：整页导航而不是 st.button——Streamlit 的按钮在
+        # 这种密集横排里会各自占一个 block，排版就散了，而且点击要等一次
+        # rerun 往返。
+        href = f"?open_macro={urllib.parse.quote(name)}{_auth_qs()}"
         cards.append(
-            f"<div>"
+            f"<a class='macro-card-link' href='{href}' target='_self'>"
             f"<div style='font-size:0.72rem;color:var(--fa-faint);white-space:nowrap'>"
             f"{_esc(name)}</div>"
             f"<div style='font-size:0.98rem;font-weight:650;color:{color};"
@@ -2713,19 +2723,168 @@ def _render_macro_strip():
             f"<div style='font-size:0.72rem;color:{color};"
             f"font-variant-numeric:tabular-nums'>{delta_txt}</div>"
             f"{unit_html}"
-            f"</div>"
+            f"</a>"
         )
     if not cards:
         return
-    # 跟首页指数横条同一套等分网格（用户2026-09-12反馈"一行塞满间隔一致"）。
+    # 等分网格铺满整行（用户2026-09-12反馈"一行塞满间隔一致"）。
     st.markdown(
         "<style>.fa-macro-strip{display:grid;grid-template-columns:repeat(6,1fr);"
         "gap:10px 12px;padding-bottom:12px;border-bottom:1px solid var(--fa-border);"
         "margin-bottom:20px}"
-        "@media (max-width:640px){.fa-macro-strip{grid-template-columns:repeat(3,1fr)}}</style>"
+        "@media (max-width:640px){.fa-macro-strip{grid-template-columns:repeat(3,1fr)}}"
+        # 卡片链接不要继承正文链接的颜色和下划线，它就是一块可点的区域。
+        "a.macro-card-link,a.macro-card-link:link,a.macro-card-link:visited{"
+        "display:block;text-decoration:none;border-bottom:none;color:inherit;"
+        "padding:4px 6px;margin:-4px -6px;border-radius:7px;"
+        "transition:background .12s ease}"
+        "a.macro-card-link:hover{background:rgba(23,24,28,0.045)}</style>"
         "<div class='fa-macro-strip'>" + "".join(cards) + "</div>",
         unsafe_allow_html=True,
     )
+
+
+# 每个宏观品种的"这是什么、为什么要看它"。写死在代码里而不是让AI临时生成：
+# 这些是稳定的常识，不会变，没必要每次进页面烧一次token、也没必要冒AI写错的
+# 风险（比如把美债收益率和债券价格的方向说反，这种错误初学者看不出来）。
+_MACRO_EXPLAIN = {
+    "VIX恐慌指数": (
+        "芝加哥期权交易所用标普500期权价格反推出来的「未来30天预期波动率」，"
+        "俗称恐慌指数。它不预测方向，只衡量市场认为未来会有多颠簸。",
+        "经验区间：20以下算平静，20-30是明显不安，30以上通常对应真正的恐慌行情。"
+        "它跟股指几乎总是反向——股市暴跌时VIX飙升。看它的意义在于，当VIX很低时"
+        "市场对坏消息毫无防备，这种时候的「一切都好」反而最脆弱。",
+    ),
+    "美债10年期": (
+        "美国10年期国债收益率，全球资产定价的锚。几乎所有估值模型的分母里都有它。",
+        "注意收益率和债券价格是反向的：收益率涨=债券在被卖。收益率上行会压制"
+        "成长股估值（未来现金流折现变少），也会抬高企业融资成本。这里的变动按"
+        "基点（bp）计，1bp = 0.01个百分点——这是债券市场的通用读法，"
+        "说「涨了0.3%」在这里是有歧义的。",
+    ),
+    "美元指数": (
+        "美元对一篮子主要货币（欧元占比最大，其次日元、英镑等）的加权汇率。",
+        "美元强弱直接压制以美元计价的资产：美元走强时，黄金、原油、大宗商品"
+        "通常承压，新兴市场资金也倾向流出。持有港股的人尤其要留意——港币挂钩"
+        "美元，所以美元的走势就是你这部分仓位的汇率背景。",
+    ),
+    "黄金": (
+        "COMEX黄金期货主力合约，美元/盎司。",
+        "传统避险资产，同时也是对实际利率的反向押注：实际利率（名义利率减通胀）"
+        "越低，持有不生息的黄金的机会成本越小。所以看黄金要配合上面的美债收益率"
+        "和美元指数一起看，单看金价本身很难解释它为什么动。",
+    ),
+    "原油": (
+        "NYMEX WTI原油期货主力合约，美元/桶。",
+        "既是能源成本也是需求温度计。油价大涨会推高通胀预期、进而影响利率路径；"
+        "而在没有供给冲击的情况下油价下跌，往往是全球需求转弱的早期信号。"
+        "区分这两种情形（供给冲击还是需求走弱）比记住油价本身重要得多。",
+    ),
+    "铜": (
+        "COMEX铜期货主力合约，美元/磅。",
+        "被称作「铜博士」（Dr. Copper），因为它广泛用于建筑、电网、家电和电动车，"
+        "需求变化几乎同步反映全球制造业景气。它是这六个里最纯粹的实体经济指标——"
+        "不像黄金那样掺杂避险情绪，也不像原油那样频繁被地缘政治打断。",
+    ),
+}
+
+_MACRO_RANGE_OPTIONS = {
+    "近1月": ("1mo", "1d"),
+    "近6月": ("6mo", "1d"),
+    "近1年": ("1y", "1d"),
+    "近5年": ("5y", "1wk"),
+}
+
+
+def _render_macro_detail(name: str):
+    """宏观品种详情页：VIX / 美债10年期 / 美元指数 / 黄金 / 原油 / 铜。
+
+    2026-09-12新增。用户要求首页那条宏观横栏的六个数字要能点进来，
+    "跟其他的行情详情界面一样"。
+
+    没有复用 _render_index_detail：那个函数从头到尾绑死在 A/HK/US 三个市场上
+    （get_multi_index_snapshot / get_index_intraday_a / get_index_intraday_futu /
+    get_index_history 全都只认这三个），而这六个品种在富途那边没有行情权限、
+    数据走的是 Yahoo。硬塞进去要给四个函数各开一个 MACRO 分支，改动面比单独
+    写一个渲染函数大得多，还会把那条已经稳定的路径搅浑。
+
+    K线图复用 build_candlestick，所以这一页的观感跟个股/指数详情页是一致的。
+    """
+    if st.button("", icon=":material/arrow_back:", key=f"macro_back_{name}",
+                 type="tertiary", help="返回"):
+        st.session_state.pop("_macro_detail_name", None)
+        st.session_state["_active_section"] = "首页"
+        st.rerun()
+
+    try:
+        snap = (get_macro_dashboard() or {}).get(name)
+    except Exception:
+        snap = None
+
+    group = (snap or {}).get("分类", "")
+    unit = (snap or {}).get("单位", "")
+    st.markdown(
+        f"""
+        <div style='padding:2px 0 14px;border-bottom:1px solid var(--fa-border);margin-bottom:20px'>
+            <div style='font-size:1.34rem;font-weight:650;letter-spacing:-.022em;
+                        color:var(--fa-text);line-height:1.3'>{_esc(name)}</div>
+            <div style='font-size:.78rem;color:var(--fa-faint);margin-top:4px;
+                        letter-spacing:.03em'>{_esc(group)}{(' · ' + _esc(unit)) if unit else ''}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if snap:
+        chg = snap.get("涨跌") or 0.0
+        color = UP_COLOR if chg >= 0 else DOWN_COLOR
+        if snap.get("口径") == "rate":
+            value_txt = f"{snap['最新']:.2f}{unit}"
+            delta_txt = f"{snap.get('bp变动', 0.0):+.1f}bp"
+        else:
+            value_txt = f"{snap['最新']:,.2f}"
+            delta_txt = f"{chg:+,.2f}（{snap['涨跌幅']:+.2f}%）"
+        st.markdown(
+            f"<div style='display:flex;align-items:baseline;gap:14px;margin-bottom:6px'>"
+            f"<span style='font-size:2.1rem;font-weight:650;letter-spacing:-.02em;"
+            f"color:{color};font-variant-numeric:tabular-nums'>{value_txt}</span>"
+            f"<span style='font-size:1.1rem;color:{color};"
+            f"font-variant-numeric:tabular-nums'>{delta_txt}</span></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("实时报价暂时取不到，下面的历史走势仍然可看。")
+
+    st.divider()
+    range_label = st.radio("周期", list(_MACRO_RANGE_OPTIONS), index=2,
+                           horizontal=True, key=f"_macro_range_{name}")
+    rng, interval = _MACRO_RANGE_OPTIONS[range_label]
+
+    with st.spinner("加载K线数据..."):
+        try:
+            hist = get_macro_history(name, rng, interval)
+        except Exception:
+            hist = None
+    if hist is None or hist.empty:
+        st.caption("历史数据暂时取不到。")
+    else:
+        # VIX、美债收益率、美元指数是算出来的指数不是撮合出来的合约，没有成交量
+        # （Yahoo 返回 0）。画一栏全空的柱状图看上去像坏了，所以按数据本身决定
+        # 画不画那一栏，而不是按品种名硬编码——万一以后 Yahoo 补了数据，这里
+        # 自动就跟上了。
+        has_volume = float(pd.to_numeric(hist["成交量"], errors="coerce").fillna(0).sum()) > 0
+        st.plotly_chart(
+            build_candlestick(hist, show_volume=has_volume),
+            use_container_width=True, config=_PLOTLY_CONFIG,
+        )
+
+    exp = _MACRO_EXPLAIN.get(name)
+    if exp:
+        st.divider()
+        st.markdown("**这是什么**")
+        st.write(exp[0])
+        st.markdown("**怎么看**")
+        st.write(exp[1])
 
 
 @st.fragment
@@ -2749,7 +2908,8 @@ def _render_sector_heatmap(market: str):
     if fig is None:
         return
     st.markdown("**板块热力图**")
-    st.caption("方块大小=成交额（今天有多少钱在里面），颜色=涨跌幅。")
+    st.caption("方块大小=成交额（今天有多少钱在里面），颜色深浅=涨跌幅度，"
+               "涨还是跌看方块上的正负号。")
     st.plotly_chart(fig, use_container_width=True, config=_PLOTLY_CONFIG)
 
 
@@ -7603,6 +7763,10 @@ elif st.session_state.get("_sector_detail_name"):
             st.session_state["_sector_detail_name"],
             st.session_state.get("_sector_detail_market", "A"),
         )
+elif st.session_state.get("_macro_detail_name"):
+    with _page_slot.container():
+        with st.spinner("加载行情…"):
+            _render_macro_detail(st.session_state["_macro_detail_name"])
 else:
     with _page_slot.container():
         # 页眉。原来是一条通栏的品牌红横幅+白色粗体字，那是整个页面上最抢眼

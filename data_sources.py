@@ -2855,6 +2855,53 @@ def get_macro_dashboard() -> dict[str, dict]:
     return out
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def get_macro_history(name: str, range_: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """宏观品种的历史K线（VIX/美债10年期/美元指数/黄金/原油/铜）。
+
+    2026-09-12新增，给宏观详情页用。走的还是 Yahoo 的 chart 接口，只是把
+    range 拉长、把 quote 里的 OHLC 取出来——跟 _yahoo_index_snapshot 同一个
+    端点同一套鉴权（不需要 key），不新增任何外部依赖。
+
+    返回列跟 get_stock_history / get_index_history 对齐（日期/开盘/收盘/最高/
+    最低/成交量），这样 charts.build_candlestick 可以直接吃，不用为这几个品种
+    再写一套画图代码。
+
+    成交量：指数类（VIX、美债收益率、美元指数）本身没有成交量概念，Yahoo 返回
+    0 或 null，这里统一填 0，由渲染层决定要不要画那个子图。
+    """
+    meta = _MACRO_YAHOO_SYMBOLS.get(name)
+    if not meta:
+        return pd.DataFrame()
+    sym = meta[0]
+    try:
+        r = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
+            f"?interval={interval}&range={range_}",
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+            timeout=10,
+        )
+        result = r.json()["chart"]["result"][0]
+        stamps = result["timestamp"]
+        q = result["indicators"]["quote"][0]
+    except Exception:
+        return pd.DataFrame()
+
+    df = pd.DataFrame({
+        "日期": pd.to_datetime(stamps, unit="s"),
+        "开盘": q.get("open"),
+        "收盘": q.get("close"),
+        "最高": q.get("high"),
+        "最低": q.get("low"),
+        "成交量": q.get("volume"),
+    })
+    # Yahoo 在停牌/无成交的日子会给整行 null。这种行不能留（K线会断出一个
+    # 空洞），也不能前值填充（会造出一根假的十字星），直接丢掉。
+    df = df.dropna(subset=["开盘", "收盘", "最高", "最低"])
+    df["成交量"] = pd.to_numeric(df["成交量"], errors="coerce").fillna(0)
+    return df.reset_index(drop=True)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def get_global_indices() -> dict[str, dict]:
     """首页世界地图用的几个国际指数（日经225/富时100/德国DAX/印度SENSEX/
