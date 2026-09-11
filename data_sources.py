@@ -1989,7 +1989,8 @@ def get_analyst_consensus(symbol: str, market: str) -> dict:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_futu_news(keyword: str, max_count: int = 8) -> pd.DataFrame:
+def get_futu_news(keyword: str, max_count: int = 8, *, symbol: str | None = None,
+                  market: str | None = None) -> pd.DataFrame:
     """走 Futu OpenD 的资讯搜索（get_search_news）——这是目前找到的最好的新闻源：
     真按关键词匹配（不是财新那种整段大盘资讯里瞎找子串），A股/港股/美股通吃
     （财新的公司新闻只覆盖到个别大公司，港股/美股基本没东西），链接指向
@@ -2044,6 +2045,26 @@ def get_futu_news(keyword: str, max_count: int = 8) -> pd.DataFrame:
             return s
 
     df = data.copy()
+    # 个股详情页不能只按公司名称模糊搜：ETF 的名称尤其容易撞词。曾经打开
+    # US.UUP 时，页面混进了其他 PowerShares/iShares 基金公告，AI 又把这些
+    # 无关材料当成 UUP 的消息面。明确传入证券代码时，优先按返回中的代码列
+    # 精确匹配；接口没有代码列时，退化到标题中完整 ticker 的词边界匹配。
+    # 匹配不到宁可显示“暂无相关新闻”，也绝不把别的标的凑进去。
+    if symbol:
+        normalized = str(symbol).upper().strip()
+        full_code = f"{str(market).upper()}.{normalized}" if market else normalized
+        code_cols = [c for c in ("code", "stock_code", "security_code", "stock_id") if c in df.columns]
+        if code_cols:
+            matched = pd.Series(False, index=df.index)
+            for col in code_cols:
+                values = df[col].astype(str).str.upper().str.strip()
+                matched |= values.isin({normalized, full_code})
+            df = df[matched]
+        else:
+            title = df.get("title", pd.Series("", index=df.index)).astype(str)
+            df = df[title.str.contains(rf"(?<![A-Z0-9]){re.escape(normalized)}(?![A-Z0-9])", case=False, regex=True)]
+        if df.empty:
+            return pd.DataFrame(columns=["日期", "新闻标题", "分类", "url"])
     df["日期"] = df["publish_time"].apply(_full_date)
     df = df.sort_values("日期", ascending=False)
     df = df.rename(columns={"title": "新闻标题", "source": "分类"})
@@ -2153,7 +2174,10 @@ def _futu_last_day_intraday(ctx, code: str) -> pd.DataFrame:
     data = data[data["日期_only"] == last_date]
     data["价格"] = data["价格"].astype(float)
     data["成交量"] = data["成交量"].astype(float)
-    return data[["时间", "价格", "成交量"]]
+    result = data[["时间", "价格", "成交量"]].copy()
+    result.attrs["is_previous_session"] = True
+    result.attrs["session_date"] = str(last_date)
+    return result
 
 
 def _futu_intraday_by_code(code: str) -> pd.DataFrame:
@@ -2186,7 +2210,9 @@ def _futu_intraday_by_code(code: str) -> pd.DataFrame:
         df["成交量"] = df["成交量"].astype(float)
         df = df[df["价格"] > 0]
         if not df.empty:
-            return df[["时间", "价格", "成交量"]]
+            result = df[["时间", "价格", "成交量"]].copy()
+            result.attrs["is_previous_session"] = False
+            return result
         kind = "last_day"
     if kind == "last_day":
         return _futu_call(lambda ctx: _futu_last_day_intraday(ctx, code), timeout=10, default=pd.DataFrame())

@@ -13,6 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as _cv1
 from contextlib import nullcontext as _nullcontext
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from data_sources import (
     get_crypto_quotes,
@@ -182,6 +183,22 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
     overflow: hidden !important;
 }
 #MainMenu, [data-testid="stMainMenu"], [data-testid="stToolbarActions"] { display: none !important; }
+
+/* 顶部导航吸顶（2026-09-11前端审计）：行情页内容很长，滚到底部想切分区
+   得往回滚很远。让导航那一条钉在顶部，背景用页面底色盖住下面滚过去的
+   内容，不然文字会透上来叠在一起。z-index 取 90——低于右下角AI浮标
+   (9999)，不跟它抢层级。 */
+.st-key-fa_nav {
+    position: sticky !important; top: 0 !important; z-index: 90 !important;
+    background: var(--fa-bg) !important;
+    padding-top: 6px !important;
+}
+
+/* 右下角AI浮标会盖住页面最底部那一行的数字（审计实测盖住过中信金属的
+   -9.97% 和模拟盘持仓的盈亏金额）。给主内容区底部留出比浮标更高的空白，
+   让最后一行始终能滚到浮标上方。浮标本身 56px 高、距底 26px，留 120px
+   够用还有余量。 */
+[data-testid="stMainBlockContainer"] { padding-bottom: 120px !important; }
 
 /* 内容收窄居中。原来是整屏铺满，超宽屏上一行数字能拉到两千多像素，
    眼睛要横扫过去才读得完；收到1240再给足左右留白，行长回到舒适区间。 */
@@ -1002,17 +1019,38 @@ def _fetch_news_items(keyword: str, symbol: str | None, market: str) -> tuple:
             return notices, "notices"
 
     try:
-        futu_news = get_futu_news(keyword, max_count=8)
+        futu_news = get_futu_news(keyword, max_count=8, symbol=symbol, market=market)
     except Exception:
         futu_news = None
     if futu_news is not None and not futu_news.empty:
         return futu_news, "futu"
 
+    # 有证券代码却没有精确命中的富途资讯时，不能再退回名称模糊匹配。后者会
+    # 重新把同名/同类基金的新闻塞进来，等于绕过了上面的精确过滤。
+    if symbol:
+        return pd.DataFrame(columns=["日期", "新闻标题", "分类", "url"]), "none"
     try:
         news = get_stock_news(keyword, limit=8)
     except Exception:
         news = None
     return news, "caixin"
+
+
+def _completed_history_for_ai(hist: pd.DataFrame | None) -> pd.DataFrame:
+    """Remove an exchange's not-yet-formed zero-volume daily bar before AI sees it.
+
+    Some upstream feeds append the current session to daily history before the
+    market opens.  That placeholder is useful neither as price history nor as
+    evidence of "shrinking volume", so retain only completed bars for the
+    model input.  Charts deliberately keep their original data; this is an
+    analysis-input guard, not a display transformation.
+    """
+    if hist is None or hist.empty:
+        return pd.DataFrame() if hist is None else hist
+    if "成交量" not in hist.columns:
+        return hist
+    volume = pd.to_numeric(hist["成交量"], errors="coerce")
+    return hist.loc[volume > 0].copy()
 
 
 def _build_sparkline_svg(values: list, color: str, width: int = 60, height: int = 26) -> str:
@@ -1286,6 +1324,70 @@ def _to_cn_dt(iso_str: str) -> datetime | None:
 def _to_cn_time_str(iso_str: str) -> str:
     dt = _to_cn_dt(iso_str)
     return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else (iso_str or "")[:19].replace("T", " ")
+
+
+def _quote_market_status(spot: dict, market: str) -> str:
+    """根据交易所时区和交易时段描述报价状态，不能把昨收当“实时”。"""
+    zone = {"A": "Asia/Shanghai", "HK": "Asia/Hong_Kong", "US": "America/New_York"}.get(market)
+    if not zone:
+        return "报价"
+    tz = ZoneInfo(zone)
+    now = datetime.now(tz)
+    try:
+        # Futu 的 update_time 由 OpenD 按中国时区给出；先按该时区解释，再换算
+        # 成交易所当地时间，避免 UUP 的早盘前报价被写成“美股实时”。
+        stamp = pd.Timestamp(spot.get("更新时间")).to_pydatetime()
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        stamp = stamp.astimezone(tz)
+    except Exception:
+        stamp = now
+
+    local_time = now.time()
+    weekday = now.weekday() < 5
+    if market == "US":
+        open_now = weekday and datetime.strptime("09:30", "%H:%M").time() <= local_time < datetime.strptime("16:00", "%H:%M").time()
+    elif market == "HK":
+        open_now = weekday and (datetime.strptime("09:30", "%H:%M").time() <= local_time < datetime.strptime("12:00", "%H:%M").time() or datetime.strptime("13:00", "%H:%M").time() <= local_time < datetime.strptime("16:00", "%H:%M").time())
+    else:
+        open_now = weekday and (datetime.strptime("09:30", "%H:%M").time() <= local_time < datetime.strptime("11:30", "%H:%M").time() or datetime.strptime("13:00", "%H:%M").time() <= local_time < datetime.strptime("15:00", "%H:%M").time())
+    place = {"A": "北京时间", "HK": "香港", "US": "美东"}[market]
+    if open_now and stamp.date() == now.date():
+        return f"交易中 · {place} {stamp:%H:%M}"
+    if weekday and local_time < datetime.strptime("09:30", "%H:%M").time():
+        return f"盘前 · {place} {stamp:%H:%M}"
+    return f"已收盘 · {place} {stamp:%m-%d %H:%M}"
+
+
+def _fmt_price(value, default: str = "—") -> str:
+    """价格按量级决定小数位，并统一加千分位（2026-09-11前端审计）。
+
+    原来全站价格都是写死的 :.2f：BTC 显示成 77100.86（七万多的数字没有
+    千分位，一眼读不出量级），DOGE/ARB 这类小币显示成 0.08 / 0.15（0.0823
+    和 0.0849 看起来是同一个价，实际差 3%）。股票价格几乎都在个位到四位数
+    之间，两位小数够用；加密货币横跨 0.0001 到 100000 六个数量级，必须按
+    量级给小数位，不然要么精度丢光要么一堆无意义的零。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    av = abs(v)
+    if av >= 1:
+        return f"{v:,.2f}"
+    if av >= 0.01:
+        return f"{v:,.4f}"
+    return f"{v:,.6f}"
+
+
+def _clean_name(name) -> str:
+    """去掉行情接口返回的名称里的空格。
+
+    2026-09-11前端审计抓到「南 京 港」这种——A股接口对三个字的名字会用
+    全角空格补齐成四个字宽（老行情软件对齐用的习惯），原样渲染到网页上
+    就变成了字中间带空格。半角全角都要去，不能只strip两端。
+    """
+    return str(name or "").replace("　", "").replace(" ", "")
 
 
 def _sim_note_for_display(note: str) -> str:
@@ -1717,7 +1819,8 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
             st.caption("基准数据暂时获取不到。")
 
     else:  # "cross" —— 完整交叉验证
-        stats = compute_stats(hist)
+        ai_hist = _completed_history_for_ai(hist)
+        stats = compute_stats(ai_hist)
         if stats:
             scol1, scol2, scol3, scol4 = st.columns(4)
             scol1.metric("区间收益率", stats.get("区间收益率", "—"))
@@ -1740,8 +1843,11 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
 
         st.caption("AI 解读（交叉验证消息面、财务、技术面是否一致）")
         if is_fresh:
+            if ai_hist.empty:
+                st.warning("当前没有可用于分析的已完成日线数据，请在收盘后再试。")
+                return
             with st.spinner("正在汇总财务/资讯/技术面数据并生成AI解读…"):
-                history_summary = hist.tail(20).to_string(index=False)
+                history_summary = ai_hist.tail(20).to_string(index=False)
                 if spot and spot.get("最新价"):
                     history_summary += (
                         f"\n\n实时行情快照：最新价{spot['最新价']}，今开{spot.get('今开')}，"
@@ -1891,8 +1997,8 @@ def _render_price_header(symbol: str, market: str):
         + "</div>",
         unsafe_allow_html=True,
     )
-    _src = "Futu 实时" if spot.get("数据源") == "Futu实时" else "延迟行情"
-    st.caption(f"{_src} · {spot.get('更新时间', '-')}")
+    _src = "Futu 报价" if spot.get("数据源") == "Futu实时" else "延迟报价"
+    st.caption(f"{_src} · {_quote_market_status(spot, market)}")
     hcol1, hcol2, hcol3 = st.columns(3)
     hcol1.metric("最高", f"{spot.get('最高', 0):.2f}")
     hcol2.metric("最低", f"{spot.get('最低', 0):.2f}")
@@ -1999,8 +2105,8 @@ def _render_stock_movers_cards(df, market: str):
                 f"<a class='pos-card-link' href='{href}' target='_self'>"
                 f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:4px'>"
                 f"<div style='flex:2;font-weight:600;color:var(--fa-text);text-decoration:none'>"
-                f"{_esc(row['名称'])}（{_esc(mv_symbol)}）</div>"
-                f"<div style='flex:1;text-align:right;font-weight:600;color:{mv_color}'>{row['最新价']:.2f}</div>"
+                f"{_esc(_clean_name(row['名称']))}（{_esc(mv_symbol)}）</div>"
+                f"<div style='flex:1;text-align:right;font-weight:600;color:{mv_color}'>{_fmt_price(row['最新价'])}</div>"
                 f"<div style='flex:1;text-align:right;color:{mv_color}'>{row['涨跌幅']:+.2f}%</div>"
                 f"</div></a>",
                 unsafe_allow_html=True,
@@ -2189,8 +2295,29 @@ def _render_a_share_overview():
         breadth = {}
     if breadth:
         bcols = st.columns(6)
+        # 家数是"多少只股票"，必须是整数。2026-09-11前端审计：页面上显示成
+        # 324.0 / 4862.0，因为上游把它当float传下来、st.metric照单全收。
+        # 活跃度是百分比，保留两位并补上%；它的口径是"当日有成交的股票占比"，
+        # 光一个数字看不出来量的是什么，加一行说明。
         for col, key in zip(bcols, ["上涨", "下跌", "涨停", "跌停", "平盘", "活跃度"]):
-            col.metric(key, breadth.get(key, "—"))
+            raw = breadth.get(key)
+            if raw is None or raw == "":
+                col.metric(key, "—")
+                continue
+            if key == "活跃度":
+                try:
+                    col.metric(key, f"{float(raw):.2f}%", help="当日有成交的股票占全市场的比例")
+                except (TypeError, ValueError):
+                    col.metric(key, str(raw), help="当日有成交的股票占全市场的比例")
+            else:
+                try:
+                    col.metric(key, f"{int(round(float(raw))):,}")
+                except (TypeError, ValueError):
+                    col.metric(key, str(raw))
+        # 接口本来就返回统计时刻，之前没往页面上放——审计提的"每个模块都要
+        # 标数据时间"，这一块的数据现成就有，先把有的标上。
+        if breadth.get("统计日期"):
+            st.caption(f"统计时间 {breadth['统计日期']}")
 
     st.divider()
     up_col, down_col = st.columns(2)
@@ -3863,16 +3990,32 @@ def _render_ipo_briefs():
         perf = get_latest_ipo_performance()
     except Exception:
         perf = {}
+
+    # 简报不是在页面渲染时生成的。没有最近一次任务的时间，就不能把空列表
+    # 表述成“当前没有”；尤其是任务失效时，那会把“未知”伪装成“没有”。
+    updated_at = (perf or {}).get("created_at")
+    updated_text = ""
+    is_stale = True
+    if updated_at:
+        try:
+            updated = _d.datetime.fromisoformat(updated_at)
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            updated_text = updated.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
+            is_stale = (datetime.now(timezone.utc) - updated.astimezone(timezone.utc)) > timedelta(hours=24)
+        except (TypeError, ValueError):
+            pass
+    if is_stale:
+        st.warning(
+            "港股新股数据超过24小时未更新；以下结果不应视为当前认购清单。"
+            "刷新任务恢复前，请以券商认购页面为准。"
+        )
+    elif updated_text:
+        st.caption(f"数据更新：{updated_text}（北京时间）")
     if not briefs:
-        updated_at = (perf or {}).get("created_at")
-        updated_text = ""
-        if updated_at:
-            try:
-                updated_text = _d.datetime.fromisoformat(updated_at).astimezone().strftime("%Y-%m-%d %H:%M")
-            except (TypeError, ValueError):
-                updated_text = ""
         st.caption(
-            "当前没有处于认购期、且尚未上市的港股新股。"
+            ("当前未发现处于认购期、且尚未上市的港股新股。" if not is_stale
+             else "新股数据未及时更新，无法确认当前是否有处于认购期的港股新股。")
             + (f" 最近一次数据更新：{updated_text}。" if updated_text else "")
         )
         return
@@ -4732,6 +4875,8 @@ def _render_stock_detail(symbol: str, market: str, name: str):
             if hist is not None and not hist.empty:
                 st.plotly_chart(build_candlestick(hist), use_container_width=True, config=_PLOTLY_CONFIG)
         else:
+            if intraday.attrs.get("is_previous_session"):
+                st.caption(f"当前没有今日分时，展示最近交易日（{intraday.attrs.get('session_date', '')}）走势。")
             st.plotly_chart(
                 build_intraday_line(intraday, spot.get("昨收") if spot else None, market),
                 use_container_width=True, config=_PLOTLY_CONFIG,
@@ -5921,7 +6066,24 @@ def _render_position_rows(position_items: list, _email: str):
                 # 前缀每行都一样，重复二十遍不提供任何信息；日期只留月-日。
                 # 折叠框本身在 CSS 里去掉了边框和底色（见 .st-key-pos_row_ 那段），
                 # 变成一行安静的可展开文字，不再是卡片里的第二个方框。
-                with st.expander(f"{adv_action} · {adv.get('created_at','')[5:10]}"):
+                # 2026-09-11前端审计：原来这行是"持有 · 09-04"，用户第一反应
+                # 是"我持有这支"，其实说的是"AI在09-04给的评级"——主语完全
+                # 反了。补上"AI："前缀消歧；再把距今天数标出来，7天前的判断
+                # 跟今天的判断摆在一起而看不出新旧，是另一种误导（审计里也
+                # 提到自选页显示"持有"、首页同一支显示"买入"，其实是两个
+                # 时间点的判断）。超过3天的算过期，文字整体压灰。
+                _adv_dt = _to_cn_dt(adv.get("created_at", ""))
+                _age_days = (datetime.now(timezone(timedelta(hours=8))) - _adv_dt).days if _adv_dt else None
+                if _age_days is None:
+                    _age_text = ""
+                elif _age_days <= 0:
+                    _age_text = "（今天）"
+                else:
+                    _age_text = f"（{_age_days}天前）"
+                _label = f"AI：{adv_action}{_age_text}"
+                if _age_days is not None and _age_days >= 3:
+                    _label += " · 已过期"
+                with st.expander(_label):
                     st.markdown(
                         f"<span style='background:{adv_color};color:#fff;border-radius:4px;padding:1px 8px;"
                         f"font-size:0.8rem;font-weight:700'>{_esc(adv_action)}</span> "
