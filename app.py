@@ -4191,6 +4191,8 @@ def _render_ai_assistant():
         # 不用st.chat_message——它自带的默认头像是个卡通小图标，用户明确要求
         # 整个网站不许出现任何emoji/装饰性图标，且要求跟GPT一致的"用户蓝气泡/
         # AI白气泡"经典聊天条样式，改成自己拼HTML气泡，不带任何头像。
+        # 示例问题按钮点击结果用局部变量接（见下面按钮那段的注释）
+        _clicked_example_q = None
         bubble_box = st.container(height=320)
         with bubble_box:
             if not st.session_state["_assistant_messages"]:
@@ -4209,20 +4211,21 @@ def _render_ai_assistant():
                     unsafe_allow_html=True,
                 )
                 # 2026-09-12（前端审计第10条"四个示例问题只是文字，不能点"）：
-                # 做成真按钮，点一下直接发出去。用 session_state 传递而不是
-                # 直接调用发送逻辑——发送那段在下面、依赖 bubble_box 等局部
-                # 变量，这里提前调会把渲染顺序搞乱；存一个待发问题再
-                # rerun(scope="fragment") 只重跑这个浮窗，不惊动整页。
+                # 做成真按钮。第一版走的是"存进 session_state 再
+                # st.rerun(scope='fragment')"，实测在 popover 里点了没反应
+                # （重跑之后浮层这一支的状态没接上），改成不绕 rerun：
+                # st.button 在被点击的那一次运行就返回 True，把它记在局部变量
+                # 里，本次运行继续往下走到下面的发送逻辑即可——发送链路跟手输
+                # 完全共用一条，不给示例问题另开一条以后必然走偏的路径。
                 for _i, _q in enumerate(_ASSISTANT_EXAMPLE_QUESTIONS):
                     if st.button(_q, key=f"_ai_example_q_{_i}", use_container_width=True):
-                        st.session_state["_assistant_pending_q"] = _q
-                        st.rerun(scope="fragment")
+                        _clicked_example_q = _q
             for m in st.session_state["_assistant_messages"]:
                 st.markdown(_chat_bubble(m["role"], m["content"]), unsafe_allow_html=True)
 
         # 示例问题按钮把问题放进 session_state，这里跟手输的问题走完全同一条
         # 发送链路——不给它们单开一条，不然两条路径以后一定会走偏。
-        prompt = st.chat_input("问点什么...") or st.session_state.pop("_assistant_pending_q", None)
+        prompt = st.chat_input("问点什么...") or _clicked_example_q
         if prompt:
             st.session_state["_assistant_messages"].append({"role": "user", "content": prompt})
             with bubble_box:
