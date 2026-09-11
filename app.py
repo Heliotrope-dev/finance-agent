@@ -1728,7 +1728,7 @@ def _render_news_section(keyword: str, symbol: str | None = None, market: str = 
         )
 
 
-def _financial_key_rows(fin) -> list[dict]:
+def _financial_key_rows(fin, market: str = "A") -> list[dict]:
     """把东财的财务摘要原始表压成几行关键指标。
 
     2026-09-05用户要求"就说关键的就行"。原来这里是 st.dataframe(fin) 直接把
@@ -1759,16 +1759,24 @@ def _financial_key_rows(fin) -> list[dict]:
         except Exception:
             return None
 
+    # 金额带上币种单位（2026-09-11前端审计："479.4亿"没有单位）。
+    # 只给能确定的两个市场加：A股报表一定是人民币，美股一定是美元；港股
+    # 刻意留空——大量港股公司用人民币出报表，而这套数据里没有"报表币种"
+    # 这个字段（项目早先就踩过一次坑：以为有，实际那个字段给的是交易币种，
+    # 见 git 历史里"港股的财报币种一直是错的"那次修复）。宁可不标，也不
+    # 标一个可能是错的单位——一个错的币种比没有币种更误导。
+    _unit = {"A": "元", "US": "美元"}.get(market, "")
+
     def money(v):
         f = num(v)
         if f is None:
             return ""
         a = abs(f)
         if a >= 1e8:
-            return f"{f / 1e8:,.1f}亿"
+            return f"{f / 1e8:,.1f}亿{_unit}"
         if a >= 1e4:
-            return f"{f / 1e4:,.0f}万"
-        return f"{f:,.0f}"
+            return f"{f / 1e4:,.0f}万{_unit}"
+        return f"{f:,.0f}{_unit}"
 
     def pct(v):
         f = num(v)
@@ -1829,7 +1837,7 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
     elif module == "financial":
         fin = get_financial_abstract(symbol, market=market)
         if fin is not None and not fin.empty:
-            _rows = _financial_key_rows(fin)
+            _rows = _financial_key_rows(fin, market=market)
             if _rows:
                 _cols = list(_rows[0].keys())
                 _html = ["<div style='overflow-x:auto'><table style='border-collapse:collapse;width:100%;"
@@ -3194,6 +3202,16 @@ def _clean_ai_markdown(text: str) -> str:
     cleaned = re.sub(r"([：:])[ \t]*\n+[ \t]*(?=\S)", r"\1", cleaned)
     # 去掉成对但跨行残留的加粗标记
     cleaned = re.sub(r"\*\*(\s*)\*\*", r"\1", cleaned)
+    # 落单的加粗标记也要清（2026-09-12，前端审计"AI深度分析里 **+8.55% 的
+    # 星号没渲染出来，直接显示了"）。上面那条只处理成对的，模型偶尔会写一个
+    # 开头的 ** 却忘了收尾，剩下的这个孤儿标记在按纯文本渲染的地方就会原样
+    # 显示出来。按行判断：一行里 ** 出现奇数次说明必然有落单的，整行清掉；
+    # 偶数次是正常配对，留着不动（有些调用方是走 st.markdown 渲染的，配对
+    # 的加粗在那边是有效果的）。
+    cleaned = "\n".join(
+        (ln.replace("**", "") if ln.count("**") % 2 else ln)
+        for ln in cleaned.split("\n")
+    )
     cleaned = _normalize_dimension_line(cleaned)
     return cleaned.strip()
 
