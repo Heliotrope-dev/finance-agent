@@ -1023,7 +1023,19 @@ def get_period_pnl(email: str, current_net_value: float) -> dict:
     # 昨日收益需要，本日/本月的期末统一用current_net_value）：这个窗口
     # 结束前最后一条快照。
     today_start = next((v for dt, v in parsed if dt.date() >= today), None)
-    month_start_val = next((v for dt, v in parsed if dt.date() >= month_start), None)
+    # 本月收益的期初 = 上个月最后一条快照（上月收盘净值），不是"本月第一条
+    # 快照"。2026-09-11修：原来取的是本月第一条，而快照历史本身就是从本月
+    # 才开始有的，于是"本月收益"实际覆盖了全部历史，页面上出现"本月收益
+    # +54.42% 比累计收益率还高"这种不可能的组合。没有上月数据时（比如本月
+    # 就是有记录的第一个月）如实返回None，显示"暂无数据"，不拿本月第一条
+    # 冒充上月收盘。
+    month_prev_close = None
+    for dt, v in parsed:
+        if dt.date() < month_start:
+            month_prev_close = v
+        else:
+            break
+    month_start_val = month_prev_close
 
     yesterday_start = next((v for dt, v in parsed if dt.date() >= yesterday), None)
     yesterday_end = None

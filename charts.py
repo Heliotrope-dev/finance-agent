@@ -773,6 +773,7 @@ _DONUT_COLORS = [
 
 def build_position_donut(
     holdings: list[dict], total_value_cny: float, currency_symbol: str = "¥", show_legend: bool = False,
+    center_label: str = "总资产",
 ) -> go.Figure:
     """持仓占比环形图。holdings: [{"label": "名称（代码）", "value_cny": 折算后市值}, ...]，
     调用方（app.py）负责按金额降序排好、汇率折算好——这里不做排序也不做汇率转换，
@@ -816,8 +817,12 @@ def build_position_donut(
             sort=False,
         )
     )
+    # center_label（2026-09-11新增）：这个中心数字写死"总资产"是错的——调用方
+    # 传进来的可能是"含现金的总资产"，也可能只是"持仓市值"（AI模拟盘那两个
+    # 饼图就是一个传总资产、一个传持仓合计），一律标"总资产"会让第二个图
+    # 凭空少掉现金那部分，用户核对时对不上账。标签跟着调用方传的数据走。
     fig.add_annotation(
-        text=f"总资产<br><b style='font-size:1.3em'>{currency_symbol}{total_value_cny:,.0f}</b>",
+        text=f"{center_label}<br><b style='font-size:1.3em'>{currency_symbol}{total_value_cny:,.0f}</b>",
         showarrow=False, font=dict(size=13), align="center",
     )
     fig.update_layout(

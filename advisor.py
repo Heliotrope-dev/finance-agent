@@ -1183,6 +1183,27 @@ def _extract_score(text: str) -> int | None:
     return max(0, min(100, score))
 
 
+def _authoritative_score(text: str) -> int | None:
+    """综合得分以"六个维度分之和"为准，不直接采信模型自己写的那个总分。
+
+    2026-09-11新增。前端审计发现过"综合得分：80/80（折算后约80分）"（满分
+    写成80）和"维度打分里少一项、剩下几项加起来凑不到总分"这两种情况。
+    拿真实数据量过一遍：09-05以来3410条判断里，六维齐全的3387条(99.3%)，
+    其中加总≠模型自写总分的26条(0.8%)，差值-10到+10。占比不高，但这个数字
+    是跨股票排序用的，错一条就排错一条，而"六项分别打分再加总"本来就是
+    提示词里写死的规则，让代码来做这道加法比让模型自己算更可靠。
+
+    六项没有全部解析出来时退回模型自写的总分——解析失败不该连带把这条
+    判断的分数整个丢掉（那会让它在排行榜里直接沉底，比分数略有偏差更糟）。
+    """
+    breakdown = tracker.extract_score_breakdown(text)
+    keys = ("fundamental", "price_position", "technical", "chips", "analyst", "data_certainty")
+    values = [breakdown.get(k) for k in keys]
+    if all(v is not None for v in values):
+        return max(0, min(100, sum(values)))
+    return _extract_score(text)
+
+
 def _extract_short_reason(text: str, max_len: int = 130) -> str:
     """从AI输出里解析"理由："这一段，压缩成一行给"每支自选都要有理由"的
     市场简报用——完整理由段落经常两三百字，40支自选逐支贴全文会让一条
@@ -1942,6 +1963,34 @@ def _corporate_actions_text(symbol: str, market: str) -> str:
                          else f"{abs(amt) / 1e4:.0f}万")
                 segs.append(f"{x.get('股东')} {direction} {abs(n):,.0f}股（{amt_s}）")
             parts.append(f"大股东变动（{chg[0].get('期间','')}）：" + "；".join(segs))
+
+            # 两个接口打架时必须明说，不能让模型自己挑一边讲。
+            # 2026-09-11前端审计追查出来的真实问题：GOOGL的"大股东变动"显示
+            # 巴菲特/富达/贝莱德等在2026/Q3全都大额增持，而同期"机构持股"
+            # 汇总却是占比-0.08个百分点、持有机构-50家（净减持）。两份数据
+            # 都来自Futu，口径不同（一个是头部大股东的绝对股数变动，一个是
+            # 全体机构的占比和家数），方向可以合理地相反——头部加仓、长尾
+            # 机构撤离。但模型只会看到哪个先入眼就用哪个，写出"顶级机构大手笔
+            # 增持"这种只对了一半的结论。这里把矛盾算出来直接写进数据里，
+            # 让它必须两边都交代。
+            try:
+                _inst = ds.get_institutional_holding(symbol, market)
+            except Exception:
+                _inst = []
+            if _inst:
+                _i0 = _inst[0]
+                _agg_dir = _i0.get("holder_pct_change")
+                _top_net = sum((x.get("变动股数") or 0) for x in chg)
+                if _agg_dir is not None and _top_net and (_agg_dir < 0) != (_top_net < 0):
+                    parts.append(
+                        f"注意（数据交叉检查）：头部大股东本期合计"
+                        f"{'净增持' if _top_net > 0 else '净减持'}，"
+                        f"但全体机构持股占比同期{_i0['holder_pct_change']:+.2f}个百分点、"
+                        f"持有机构家数{_i0.get('institution_quantity_change', 0):+d}家，"
+                        f"两者方向相反。结论里不能只引用其中一边就下"
+                        f"「机构在买/在卖」的判断，要把这个分歧本身说出来"
+                        f"（通常意味着头部集中、长尾分散，而不是一致行动）。"
+                    )
     except Exception:
         pass
 
@@ -2231,9 +2280,20 @@ def _build_judge_user_content(symbol: str, market: str, name: str, financial_sum
                                technical_summary: str, news_summary: str, position_summary: str,
                                valuation_summary: str = "", chips_summary: str = "",
                                analyst_view: str = "") -> str:
+    # 币种必须显式写出来，不能让模型从"US股/HK股"自己推。2026-09-11前端
+    # 审计实测抓到：美光(美股)的止损位被写成"910.43元"、携程(港股)的价格
+    # 也带"元"，港币美元人民币混着用。模型不是不知道美股用美元，是提示词
+    # 里从头到尾没有一个字提过币种，它就按中文写作习惯默认写"元"了。
+    _ccy = {"US": "美元（$）", "HK": "港币（HK$）", "A": "人民币（¥）", "CC": "美元（$）"}.get(market, "")
+    _ccy_line = (
+        f"计价币种：{_ccy}。下面所有价格数字都是这个币种，"
+        f"你输出的目标价/止损位/买入区间也必须用同一个币种，并显式带上币种符号或名称，"
+        f"不要写成「元」（除非本来就是人民币）。\n\n"
+    ) if _ccy else ""
     return (
         f"股票：{name}（{symbol}，{market}股）\n\n"
-        f"财务摘要：\n{financial_summary or '（暂无财务数据）'}\n\n"
+        + _ccy_line
+        + f"财务摘要：\n{financial_summary or '（暂无财务数据）'}\n\n"
         f"估值：{valuation_summary or '（暂无估值数据）'}\n\n"
         f"技术面信号：{technical_summary or '（数据不足）'}\n\n"
         f"价格位置（52周区间）：{position_summary or '（数据不足）'}\n\n"
@@ -2382,7 +2442,7 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
         raise RuntimeError("裁决AI返回空内容")
     action = _extract_action(text)
     return {
-        "action": action, "score": _extract_score(text), "fundamental_verdict": text,
+        "action": action, "score": _authoritative_score(text), "fundamental_verdict": text,
         "bull_argument": bull_text, "bear_argument": bear_text,
     }
 
@@ -2432,7 +2492,7 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
         max_length_budget=48000,
     )
     action = _extract_action(text)
-    return {"action": action, "score": _extract_score(text), "fundamental_verdict": text}
+    return {"action": action, "score": _authoritative_score(text), "fundamental_verdict": text}
 
 
 # 财务摘要里真正要喂给AI的字段。键是接口的英文列名，值是中文标签和单位。

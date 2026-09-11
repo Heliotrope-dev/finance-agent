@@ -167,6 +167,22 @@ section.main, .main, .block-container,
 }
 header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; height: 0 !important; }
 
+/* Streamlit自带的右上角工具区（2026-09-11前端审计）：
+   - stStatusWidget 是"Running… / Stop"那个小人+按钮。行情页每3秒刷新一次
+     fragment，它就跟着闪一次，页面右上角一直在抖。
+   - MainMenu 是那个 ⋮ 菜单，点开是"Made with Streamlit v1.59.2"这类给
+     开发者看的东西，对访问者没有意义，而且展开时会压在内容上面。
+   两个都只做视觉隐藏、不用 display:none——首屏加载遮罩那段JS（见上面
+   _fa_loader）靠读 stStatusWidget 的 textContent 判断"跑完了没有"，
+   把元素从渲染树里摘掉是能读到，但留着更保险，也免得以后谁改了那段
+   探测逻辑又踩一次。 */
+[data-testid="stStatusWidget"] {
+    opacity: 0 !important; pointer-events: none !important;
+    position: absolute !important; width: 1px !important; height: 1px !important;
+    overflow: hidden !important;
+}
+#MainMenu, [data-testid="stMainMenu"], [data-testid="stToolbarActions"] { display: none !important; }
+
 /* 内容收窄居中。原来是整屏铺满，超宽屏上一行数字能拉到两千多像素，
    眼睛要横扫过去才读得完；收到1240再给足左右留白，行长回到舒适区间。 */
 [data-testid="stMainBlockContainer"] {
@@ -1272,6 +1288,31 @@ def _to_cn_time_str(iso_str: str) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else (iso_str or "")[:19].replace("T", " ")
 
 
+def _sim_note_for_display(note: str) -> str:
+    """决策记录标题里的note要给人看，不是给开发者看的。
+
+    2026-09-11前端审计抓到：AI调用失败时，note存的是供应商返回的整段原文
+    （Error code: 403 - {'error': {'code': 'AccountOverdueError', 'message':
+    '...Request id: 02178894...'}}），这一整串被原样拼进了折叠框标题，
+    用户看到的是一行英文报错加一串请求ID。这里把已知的几类失败翻译成一句
+    中文，其余的截断；原文仍然留在数据库里，排查时照样查得到。
+    """
+    text = str(note or "")
+    if not text:
+        return ""
+    lowered = text.lower()
+    if "accountoverdue" in lowered or "arrearage" in lowered or "insufficient balance" in lowered:
+        return "AI服务商账户余额不足，本次决策未执行"
+    if "rate limit" in lowered or "429" in text or "too many requests" in lowered:
+        return "AI服务商限流，本次决策未执行"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "AI调用超时，本次决策未执行"
+    if text.startswith("AI调用失败"):
+        return "AI调用失败，本次决策未执行"
+    # 未知情况：只保留前40个字，避免整段JSON糊在标题上。
+    return text if len(text) <= 40 else text[:40] + "…"
+
+
 def _chat_bubble(role: str, text: str) -> str:
     """AI咨询浮窗用的聊天气泡——用户明确要求跟主流AI聊天产品一致的经典
     样式：用户消息靠右、蓝底白字；AI回复靠左、白底黑字，不带任何头像图标
@@ -1283,7 +1324,11 @@ def _chat_bubble(role: str, text: str) -> str:
     """
     is_user = role == "user"
     align = "flex-end" if is_user else "flex-start"
-    bg = "#2563eb" if is_user else "#f0f1f3"
+    # 2026-09-11：用户气泡从蓝色(#2563eb)改成墨色。用户定的全站规矩是
+    # "主色调黑白灰，只有真正需要强调的元素才用彩色"——一个区分说话人的
+    # 气泡底色不属于需要强调的信息，深浅对比已经足够分清谁是谁，蓝色在
+    # 这套灰白界面里是唯一一块跟涨跌红绿无关的彩色，显得很突兀。
+    bg = "#17181C" if is_user else "#f0f1f3"
     color = "#fff" if is_user else "#1a1a1a"
     body = _esc(text) if is_user else text
     return (
@@ -3678,7 +3723,22 @@ def _render_ai_assistant():
         ".st-key-ai_assistant_popover button:hover p{color:#fff!important;}"
         # 浮层本体：收掉Streamlit默认的厚投影和圆角，跟站内卡片同一套。
         "[data-testid='stPopoverBody']{border-radius:12px!important;"
-        "border:1px solid #EAEAEF!important;box-shadow:0 8px 32px rgba(23,24,28,.10)!important;}"
+        "border:1px solid #EAEAEF!important;box-shadow:0 8px 32px rgba(23,24,28,.10)!important;"
+        # 2026-09-11修：浮层原来是"整块固定高度+整块滚动"，窗口矮一点
+        # （实测609px高）输入框就被挤到滚动区外面去了，要在面板里往下滚
+        # 才能找到输入框——等于这个功能在小窗口下是坏的。改成纵向flex：
+        # 高度跟着视口走（封顶560px），消息区自己滚，输入框固定在底部
+        # 永远可见。
+        "display:flex!important;flex-direction:column!important;"
+        "max-height:min(70vh,560px)!important;overflow:hidden!important;}"
+        # 消息区：吃掉剩余高度并单独滚动。选的是浮层里第一层竖向容器，
+        # 命中不了也只是退回原来的行为，不会把布局搞坏。
+        "[data-testid='stPopoverBody']>[data-testid='stVerticalBlock']{"
+        "flex:1 1 auto!important;min-height:0!important;overflow-y:auto!important;}"
+        # 输入框：不参与伸缩，钉在底部，上面压一条发丝线跟消息区分开。
+        "[data-testid='stPopoverBody'] [data-testid='stChatInput']{"
+        "flex:0 0 auto!important;margin-top:8px!important;"
+        "border-top:1px solid #EAEAEF!important;padding-top:8px!important;}"
         # popover 触发键默认会在文字右边带一个下拉小箭头。这颗按钮是个圆形
         # 浮标，里面只放两个字母，多一个箭头会挤成"AI⌄"，既不居中也不好看。
         ".st-key-ai_assistant_popover button svg,"
@@ -5093,14 +5153,16 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
     with col3:
         st.metric("总额（起始$10,000）", f"${net_value / _usd_rate:,.0f}")
 
-    if equity_points:
-        # equity_points里的assets_hkd已经是折算成美元的数字（见调用方
-        # _render_ai_sim_dashboard里的说明），这里net_value还是原始港币，
-        # 两边要换算成同一个币种才能相减，不然百分比会算错。
-        first = min(equity_points, key=lambda p: p["run_at"])["assets_hkd"]
-        if first:
-            change_pct = (net_value / _usd_rate - first) / first * 100
-            st.metric("累计收益率（相对第一次记录）", f"{change_pct:+.2f}%")
+    # 累计收益率的基准是起始本金，不是"图表窗口里第一个快照点"。
+    # 2026-09-11修：原来拿equity_points的最早一点当基准，而那个列表只覆盖
+    # 图表窗口（不是全部历史），算出来的"累计"比"本月"还小——页面上同时
+    # 摆着"总额（起始$10,000）$15,442"和"累计收益率+16.58%"、"本月收益
+    # +54.42%"三个互相矛盾的数字。累计就该是相对起始本金，跟上面那张
+    # "总额（起始$10,000）"卡片同一个口径。
+    _start_capital_usd = sim_agent._VIRTUAL_BUDGET_HKD / _usd_rate
+    if _start_capital_usd:
+        change_pct = (net_value / _usd_rate - _start_capital_usd) / _start_capital_usd * 100
+        st.metric("累计收益率（相对起始本金）", f"{change_pct:+.2f}%")
     if snapshot["skipped_markets"]:
         st.caption(f"以下市场暂时没查到模拟账户：{'、'.join(snapshot['skipped_markets'])}")
 
@@ -5172,6 +5234,27 @@ def _render_ai_sim_dashboard():
 
 
     runs = get_sim_agent_runs(email, limit=30)
+
+    # AI停摆要在页面顶部说清楚（2026-09-11前端审计）。真实发生过的情况：
+    # 2026-09-09 15:56 起AI供应商账户欠费，之后每次决策都失败，但页面顶部
+    # 的收益卡片照常显示、看起来一切正常，用户完全看不出这个盘已经两天
+    # 没人管了——收益数字还在动（持仓市值跟着行情波动），只是没有任何新
+    # 决策。这种"坏了但看着没坏"比直接报错更危险。
+    _last_ok = next((r for r in runs if str(r.get("status") or "") != "失败"), None)
+    _latest = runs[0] if runs else None
+    if _latest is not None and str(_latest.get("status") or "") == "失败":
+        _ok_dt = _to_cn_dt(_last_ok.get("run_at")) if _last_ok else None
+        _ok_text = _ok_dt.strftime("%m-%d %H:%M") if _ok_dt else "无记录"
+        _fail_dt = _to_cn_dt(_latest.get("run_at"))
+        _fail_text = _fail_dt.strftime("%m-%d %H:%M") if _fail_dt else ""
+        # 原始报错（含供应商的Request id、整段JSON）只写日志，不摆给用户看。
+        __import__("logging").getLogger(__name__).warning(
+            "[sim] 最近一次AI决策失败：%s", _latest.get("note") or "")
+        st.warning(
+            f"AI 决策已暂停：最近一次尝试（{_fail_text}）没有成功，"
+            f"最后一次成功决策是 {_ok_text}。"
+            f"下方的收益和持仓数字仍会跟着行情波动，但期间没有产生任何新的买卖决策。"
+        )
 
     # 走势图数据源用sim_equity_snapshots(每几分钟一次，跟AI决策频率解耦)，
     # 不再用sim_agent_runs的决策快照(15分钟一次)——用户反馈"遇到低波动
@@ -5281,7 +5364,8 @@ def _render_ai_sim_dashboard():
             holdings_total_usd = sum(r["value_cny"] for r in position_rows)
             if position_rows:
                 st.plotly_chart(
-                    build_position_donut(position_rows, holdings_total_usd, currency_symbol="$", show_legend=True),
+                    build_position_donut(position_rows, holdings_total_usd, currency_symbol="$", show_legend=True,
+                                        center_label="持仓市值"),
                     use_container_width=True, config=_PLOTLY_CONFIG, key="_ai_sim_positions_donut",
                 )
             else:
@@ -5299,7 +5383,8 @@ def _render_ai_sim_dashboard():
         visible_runs = runs if show_all_runs else runs[:5]
         for r in visible_runs:
             when = _to_cn_time_str(r.get("run_at"))
-            title = f"{when} · {r['status']}" + (f" · {r['note']}" if r.get("note") else "")
+            title = f"{when} · {r['status']}" + (
+                f" · {_sim_note_for_display(r['note'])}" if r.get("note") else "")
             # 决策记录同样压成发丝线分隔的行，不再是一摞带边框的白盒子——
             # 这里一屏能有五到三十条，方框叠方框是这一段最主要的视觉噪声。
             with st.container(key=f"sim_run_{r.get('run_at','')}"), st.expander(title):
