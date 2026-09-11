@@ -63,6 +63,8 @@ from data_sources import (
     get_southbound_flow,
     get_us_famous_movers,
     get_hot_sectors,
+    get_sector_heatmap,
+    get_macro_dashboard,
     get_sector_constituents,
     get_hstech_constituents,
     resolve_symbol_by_name,
@@ -98,7 +100,7 @@ from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
     build_benchmark_comparison, build_return_histogram, build_multi_comparison, build_position_donut,
     build_fed_watch_chart, build_macro_series_chart,
-    build_sim_equity_curve,
+    build_sim_equity_curve, build_sector_treemap,
 )
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
@@ -2659,6 +2661,96 @@ def _render_market_extras(market: str):
                     f"{('每手 ' + format(int(ip['lot_size']), ',')) if ip.get('lot_size') else ''}</span></div>",
                     unsafe_allow_html=True,
                 )
+
+
+@st.fragment
+def _render_macro_strip():
+    """行情页顶部的跨资产温度计：VIX / 美债10年期 / 美元指数 / 黄金 / 原油 / 铜。
+
+    2026-09-12新增（升级路线图第5条，行情页做成"市场全景"）。原来的行情页
+    只有股票：指数、板块、异动。但决定今天该不该加仓的，一半以上不在股票
+    里——VIX 说的是恐慌程度，美债收益率是所有资产定价的锚，美元强弱直接压
+    着黄金和原油。这几个数字看一眼要跳三个网站，放在最上面一行才有意义。
+
+    放在市场单选之上：这一条跟选A股/港股/美股无关，它是全球共用的背景板。
+    挂在某个市场下面会让人误以为"这是美股的VIX"。
+    """
+    try:
+        rows = get_macro_dashboard()
+    except Exception:
+        rows = None
+    if not rows:
+        return
+
+    cards = []
+    for name, r in rows.items():
+        chg, unit = r.get("涨跌"), r.get("单位") or ""
+        if chg is None:
+            continue
+        color = UP_COLOR if chg >= 0 else DOWN_COLOR
+        if r.get("口径") == "rate":
+            # 收益率：数值本身就是百分数，变动按基点念。"4.96% / +1.3bp"
+            # 才是债券的读法；写成"+0.26%"会被当成"美债涨了0.26%"，差两个
+            # 数量级。
+            value_txt = f"{r['最新']:.2f}{unit}"
+            delta_txt = f"{r.get('bp变动', 0.0):+.1f}bp"
+        else:
+            value_txt = f"{r['最新']:,.2f}"
+            delta_txt = f"{r['涨跌幅']:+.2f}%"
+        # 单位（美元/盎司、美元/桶…）单独一行小字。收益率那一项的单位是"%"，
+        # 已经跟在数值后面了，不重复再写一行。
+        unit_html = ""
+        if unit and r.get("口径") != "rate":
+            unit_html = (
+                f"<div style='font-size:0.66rem;color:var(--fa-faint)'>{_esc(unit)}</div>"
+            )
+        cards.append(
+            f"<div>"
+            f"<div style='font-size:0.72rem;color:var(--fa-faint);white-space:nowrap'>"
+            f"{_esc(name)}</div>"
+            f"<div style='font-size:0.98rem;font-weight:650;color:{color};"
+            f"font-variant-numeric:tabular-nums;white-space:nowrap'>{value_txt}</div>"
+            f"<div style='font-size:0.72rem;color:{color};"
+            f"font-variant-numeric:tabular-nums'>{delta_txt}</div>"
+            f"{unit_html}"
+            f"</div>"
+        )
+    if not cards:
+        return
+    # 跟首页指数横条同一套等分网格（用户2026-09-12反馈"一行塞满间隔一致"）。
+    st.markdown(
+        "<style>.fa-macro-strip{display:grid;grid-template-columns:repeat(6,1fr);"
+        "gap:10px 12px;padding-bottom:12px;border-bottom:1px solid var(--fa-border);"
+        "margin-bottom:20px}"
+        "@media (max-width:640px){.fa-macro-strip{grid-template-columns:repeat(3,1fr)}}</style>"
+        "<div class='fa-macro-strip'>" + "".join(cards) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+@st.fragment
+def _render_sector_heatmap(market: str):
+    """板块热力图：面积=成交额，颜色=涨跌幅。
+
+    2026-09-12接上（升级路线图第5条）。get_sector_heatmap 这个数据源
+    2026-09-06 就写好了，但一直没有任何地方渲染，等于白拉一次接口。
+
+    放在"热门板块"列表之前：热力图回答"今天钱往哪个方向走"（一眼看形状），
+    列表回答"具体是哪几个板块、涨了多少"（要读数字）。先看形状再读数字，
+    顺序上是从面到点的，跟下面"板块→成分股"是同一个收敛方向。
+    """
+    try:
+        df = get_sector_heatmap(market, limit=30)
+    except Exception:
+        df = None
+    if df is None or df.empty:
+        return
+    fig = build_sector_treemap(df)
+    if fig is None:
+        return
+    st.markdown("**板块热力图**")
+    st.caption("方块大小=成交额（今天有多少钱在里面），颜色=涨跌幅。")
+    st.plotly_chart(fig, use_container_width=True, config=_PLOTLY_CONFIG)
 
 
 @st.fragment
@@ -7629,6 +7721,9 @@ else:
             # （比如"显示更多"、"更多板块"）都会带动其余几块跟着重新拉一遍
             # 数据，是页面交互卡顿的主要原因。现在各自是独立的@st.fragment，
             # 点一个按钮只重新跑对应那一块。
+            # 跨资产温度计在市场单选之上：它跟选哪个市场无关，是全球共用的
+            # 背景板（升级路线图第5条）。
+            _render_macro_strip()
             mkt_pick = st.radio("市场", ["A股", "港股", "美股", "虚拟货币"], horizontal=True, key="_market_overview_pick")
             mkt_code = {"A股": "A", "港股": "HK", "美股": "US", "虚拟货币": "CC"}[mkt_pick]
 
@@ -7651,6 +7746,9 @@ else:
                     _render_us_overview()
 
                 st.divider()
+                # 先看形状（热力图：钱往哪走），再读数字（列表：具体哪几个
+                # 板块涨了多少），最后点进成分股。从面到点。
+                _render_sector_heatmap(mkt_code)
                 st.markdown("**热门板块**")
                 _render_hot_sectors(mkt_code)
                 # 异动榜/热度榜/新股放在板块之后：板块回答"哪个方向在动"，

@@ -1099,3 +1099,94 @@ def build_fed_rate_path_chart(series: dict) -> go.Figure:
     _apply_chart_theme(fig, height=250, legend=False, margin=dict(l=6, r=48, t=26, b=6))
     fig.update_yaxes(ticksuffix="%", autorange=True, rangemode="normal")
     return fig
+
+
+def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
+    """板块热力图：面积=成交额，颜色=涨跌幅。
+
+    2026-09-12新增（升级路线图第5条"行情页做成市场全景"）。数据源
+    data_sources.get_sector_heatmap 早在 2026-09-06 就写好了，但一直没有
+    任何地方渲染它。
+
+    为什么用树状图而不是再加一张条形图：项目里已经有"热门板块"（按热度排）
+    和板块涨跌幅列表，再来一张条形图只是把同一份数字换个方向摆。树状图能
+    同时表达两件互相独立的事——面积说"钱有多少在这个板块里"，颜色说"它今天
+    是涨是跌"。一个成交额很小的板块涨8%，和一个撑起半个市场的板块跌1%，在
+    条形图里前者更显眼，在树状图里后者才是今天真正发生的事。
+
+    面积用成交额不用总市值：总市值是存量、基本上天天不变，画出来每天都是
+    同一张图；成交额是当天的增量，才是"今天钱往哪走"。没有成交额列就退回
+    总市值，两个都没有就只好等权，此时树状图退化成纯配色矩阵，仍然比不画好。
+    """
+    if df is None or df.empty or "板块" not in df.columns or "涨跌幅" not in df.columns:
+        return None
+
+    d = df.copy()
+    d["涨跌幅"] = pd.to_numeric(d["涨跌幅"], errors="coerce")
+    d = d[d["涨跌幅"].notna()]
+    if d.empty:
+        return None
+
+    size_col = next((c for c in ("成交额", "总市值") if c in d.columns), None)
+    if size_col:
+        d[size_col] = pd.to_numeric(d[size_col], errors="coerce")
+        sizes = d[size_col].fillna(0.0)
+        # 全 0 / 全空的成交额（盘前、或者这个市场没返回这列）会让 Treemap
+        # 算不出面积，直接画成空白。这种时候等权反而是诚实的。
+        if sizes.sum() <= 0:
+            sizes = pd.Series(1.0, index=d.index)
+            size_col = None
+    else:
+        sizes = pd.Series(1.0, index=d.index)
+
+    # 颜色范围取当天实际涨跌幅的绝对值上限，并且上下对称。不写死 ±3%：
+    # 平静的一天全部板块都在 ±0.5% 以内，写死范围会把整张图压成一片灰白；
+    # 暴动的一天又会有一半板块顶格同色，分不出层次。对称是必须的——不对称
+    # 的话 0% 不落在色阶中点，不涨不跌的板块会被染上颜色。
+    lim = float(d["涨跌幅"].abs().max())
+    lim = max(lim, 0.35)  # 给一个下限，否则极度平静时噪声会被放大成满屏红绿
+
+    pcts = d["涨跌幅"].tolist()
+    if size_col:
+        amounts = [f"{v/1e8:,.1f}亿" if pd.notna(v) else "—" for v in d[size_col]]
+    else:
+        amounts = ["—"] * len(d)
+
+    fig = go.Figure(go.Treemap(
+        labels=d["板块"].astype(str).tolist(),
+        parents=[""] * len(d),
+        values=sizes.tolist(),
+        customdata=list(zip(pcts, amounts)),
+        # 板块名和涨跌幅都直接印在方块上——热力图的意义就是不用 hover 就能
+        # 扫完，hover 只是补充成交额。
+        texttemplate="%{label}<br>%{customdata[0]:+.2f}%",
+        hovertemplate="<b>%{label}</b><br>涨跌幅 %{customdata[0]:+.2f}%"
+                      "<br>成交额 %{customdata[1]}<extra></extra>",
+        textposition="middle center",
+        textfont=dict(family=_CHART_FONT, size=12, color="#FFFFFF"),
+        marker=dict(
+            colors=pcts,
+            # 中式红涨绿跌。这里跟"日历热力图刻意不用UP/DOWN配色"的那条注释
+            # 不冲突：那张图讲的是新股破发率，不是价格；这张图的颜色含义就是
+            # 涨跌本身，用全站的涨跌色才是对的。
+            colorscale=[[0.0, DOWN_COLOR], [0.5, "#F2F3F5"], [1.0, UP_COLOR]],
+            cmid=0.0, cmin=-lim, cmax=lim,
+            line=dict(width=2, color="#FFFFFF"),
+            showscale=False,
+        ),
+        tiling=dict(pad=1),
+        sort=True,
+        branchvalues="total",
+    ))
+    fig.update_layout(
+        font=dict(family=_CHART_FONT, size=11, color=_CHART_MUTED),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=340,
+        hoverlabel=dict(
+            bgcolor="#FFFFFF", bordercolor="rgba(23,24,28,0.12)",
+            font=dict(family=_CHART_FONT, size=11, color=_CHART_INK),
+        ),
+        showlegend=False,
+    )
+    return fig

@@ -2791,6 +2791,70 @@ def _yahoo_index_snapshot(symbol: str) -> dict | None:
     return {"最新": last, "涨跌": change, "涨跌幅": change / prev * 100}
 
 
+# 市场全景页用的"跨资产温度计"。2026-09-12新增（升级路线图第5条：行情页
+# 改成一张今日市场仪表盘）。
+#
+# 全部走已经验证可用的 Yahoo chart 接口（跟上面 _GLOBAL_INDEX_YAHOO_SYMBOLS
+# 同一条路径）：不需要 key、不需要信用卡，而且这条路在这个项目里已经稳定跑了
+# 一段时间。刻意不走富途——实测这个账号没有美股期货/外汇的行情权限
+# （"行情权限不足，请前往行情商城购买行情卡"），而这几个恰恰都是期货/外汇
+# 品种。
+#
+# 选的这几个不是凑数：
+# - VIX：市场恐慌程度，判断"现在是不是该谨慎"最直接的单一指标；
+# - 美债10年期收益率：全球资产定价的锚，股债跷跷板的另一端；
+# - 美元指数：美元强弱直接压制以美元计价的黄金和原油；
+# - 黄金/原油/铜：贵金属(避险)、能源、工业需求三条彼此不重叠的商品线，
+#   跟 sim_agent 那边的商品 ETF 清单是同一套分类思路。
+#
+# 每项带上计价单位和"变动怎么念"。最后这个字段不是为了好看：^TNX 的数值
+# 本身就是百分数（4.96 = 4.96%），照 _yahoo_index_snapshot 算出来的涨跌幅
+# 是"收益率相对自己涨了0.26%"，放在一排涨跌幅里看过去会被当成"美债涨了
+# 0.26%"，差了两个数量级。债券收益率的行业惯例是报基点（bp），所以这一项
+# 单独标成 "rate"，由渲染层按 bp 显示。
+_MACRO_YAHOO_SYMBOLS = {
+    #  名称: (Yahoo代码, 分类, 单位, 变动口径)
+    "VIX恐慌指数": ("%5EVIX", "风险", "", "pct"),
+    "美债10年期": ("%5ETNX", "利率", "%", "rate"),
+    "美元指数": ("DX-Y.NYB", "汇率", "", "pct"),
+    "黄金": ("GC%3DF", "大宗商品", "美元/盎司", "pct"),
+    "原油": ("CL%3DF", "大宗商品", "美元/桶", "pct"),
+    "铜": ("HG%3DF", "大宗商品", "美元/磅", "pct"),
+}
+
+
+# TTL 5分钟，比指数快照(60s)松。这一条是背景板不是盘口：VIX、美债收益率、
+# 金油铜用来判断"今天大环境是什么样"，5分钟前的数值不会让判断变一个方向；
+# 而缓存每失效一次，就有一个用户要等这6个请求（并发，实测1秒上下，最坏8秒）。
+# 行情页本来就是审计点名过的慢页面，不该为了几个背景数字再加一次等待。
+@st.cache_data(ttl=300, show_spinner=False)
+def get_macro_dashboard() -> dict[str, dict]:
+    """跨资产温度计：VIX/美债收益率/美元指数/黄金/原油/铜。
+
+    并发查，单个失败不影响其它——查不到的不出现在返回值里，调用方按 key
+    存在与否判断，不拿假数据凑数（跟 get_global_indices 同一个约定）。
+
+    比 _yahoo_index_snapshot 多给三个字段：分类、单位、口径（"pct" 看涨跌幅，
+    "rate" 看 bp 变动），渲染层据此决定怎么念这个数。
+    """
+    with ThreadPoolExecutor(max_workers=len(_MACRO_YAHOO_SYMBOLS)) as ex:
+        results = list(ex.map(
+            lambda kv: (kv[0], kv[1], _yahoo_index_snapshot(kv[1][0])),
+            _MACRO_YAHOO_SYMBOLS.items(),
+        ))
+    out = {}
+    for name, meta, snap in results:
+        if snap is None:
+            continue
+        _sym, group, unit, kind = meta
+        row = {**snap, "分类": group, "单位": unit, "口径": kind}
+        if kind == "rate":
+            # 收益率：变动按基点算（1bp = 0.01个百分点）
+            row["bp变动"] = snap["涨跌"] * 100
+        out[name] = row
+    return out
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def get_global_indices() -> dict[str, dict]:
     """首页世界地图用的几个国际指数（日经225/富时100/德国DAX/印度SENSEX/
