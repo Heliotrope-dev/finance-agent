@@ -1210,9 +1210,13 @@ def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
             line=dict(width=2, color="#FFFFFF"),
             showscale=False,
         ),
-        # 顶上那条深灰色横带是 pathbar（树状图的"面包屑"导航）。这张图只有
-        # 一层、没有下钻，面包屑没有任何用处，却占掉一条视觉最重的横带。
+        # 顶上那条深灰色横带不是 pathbar（面包屑），关掉 pathbar 之后它还在。
+        # 它是 parents 全填 "" 时 plotly 自动生成的隐式根节点：根节点会把所有
+        # 板块当成自己的子节点包起来，于是四周画一圈边框、顶上留一条标题带。
+        # 这张图只有一层、不需要下钻，根节点纯属多余，两个都关掉——pathbar 关
+        # 导航，root 透明关那条带子和边框。
         pathbar=dict(visible=False),
+        root=dict(color="rgba(0,0,0,0)"),
         tiling=dict(pad=1),
         sort=True,
         branchvalues="total",
