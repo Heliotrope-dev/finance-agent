@@ -101,14 +101,32 @@ def main(write: bool = False, email: str | None = None) -> int:
                     print(f"  没查到 {market} 的 SIMULATE 账户，跳过。")
                     skipped += len(positions)
                     continue
+                # 用"可卖数量"而不是"持仓数量"下单。2026-09-12实测：休市时段
+                # 富途给的 can_sell_qty 是 0，拿 qty 去卖会直接被拒（返回
+                # "持仓不足"，而不是更直白的"未开盘"）。开盘后 can_sell_qty
+                # 才会变成真正能卖的数量，按它下单才不会被打回。
+                ret_pos, pos_df = trd.position_list_query(
+                    trd_env=ft.TrdEnv.SIMULATE, acc_id=int(acc_id))
+                sellable = {}
+                if ret_pos == ft.RET_OK and pos_df is not None and not pos_df.empty:
+                    for _, _r in pos_df.iterrows():
+                        try:
+                            sellable[_r["code"]] = float(_r.get("can_sell_qty") or 0)
+                        except (TypeError, ValueError):
+                            sellable[_r["code"]] = 0.0
                 for p in positions:
+                    qty = sellable.get(p["code"], 0.0)
+                    if qty <= 0:
+                        print(f"  {p['code']} 当前可卖数量为0（多半还没开盘/未交收），本轮跳过。")
+                        skipped += 1
+                        continue
                     ret, data = trd.place_order(
-                        price=0, qty=float(p["qty"]), code=p["code"],
+                        price=0, qty=qty, code=p["code"],
                         trd_side=ft.TrdSide.SELL, order_type=ft.OrderType.MARKET,
                         trd_env=ft.TrdEnv.SIMULATE, acc_id=int(acc_id),
                     )
                     if ret == ft.RET_OK:
-                        print(f"  已卖出 {p['code']} {p['qty']:g}股")
+                        print(f"  已卖出 {p['code']} {qty:g}股")
                         done += 1
                     else:
                         print(f"  卖出 {p['code']} 失败：{data}")
