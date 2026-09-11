@@ -99,17 +99,49 @@ def run_premarket(market: str, *, deliver: bool = False) -> int:
     text = render_watchlist_report(market, judged)
     print(text)
 
+    import datetime as _dt
     import json
-    out = Path(__file__).resolve().parent / "data" / f"daily_plan_{market.lower()}.json"
+    data_dir = Path(__file__).resolve().parent / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # 逐支评分的原始结果落在自己的文件里。
+    #
+    # 2026-09-11真实故障：这里原来写的是 daily_plan_{market}.json——那是
+    # daily_plan.py 的产物，schema 完全不同（关注候选/新开仓状态/买入区间/
+    # 止损/目标/盈亏比 那一整套经过仓位测算和闸门校验的字段）。这个函数拿
+    # {市场,候选池规模,结果} 把它整个覆盖掉，结果是首页"今日可执行清单"、
+    # plan_push.py、mentor_scan.py、mentor_interpret.py、intraday_watch.py
+    # 五个下游读到的全是没有这些键的字典，一律退化成空——用户看到的就是
+    # 首页那块天天什么都没有。两份产物各用各的文件名，不再互相覆盖。
     try:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(
-            json.dumps({"市场": market, "候选池规模": len(judged), "结果": judged},
-                       ensure_ascii=False, indent=1, default=str),
+        (data_dir / f"watchlist_report_{market.lower()}.json").write_text(
+            json.dumps({
+                "市场": market,
+                "日期": _dt.date.today().isoformat(),
+                "候选池规模": len(judged),
+                "结果": judged,
+            }, ensure_ascii=False, indent=1, default=str),
             encoding="utf-8",
         )
     except Exception as e:
-        print(f"[market_recommendation/{market}] 落盘失败: {e}")
+        print(f"[market_recommendation/{market}] 评分快照落盘失败: {e}")
+
+    # 评分结果已经进了 advice 表（judge_market_watchlist 里 log_advice 写的
+    # source=watchlist_{market}），daily_plan 正是从那张表读候选池。所以这里
+    # 顺手把当天的可执行计划也算出来——同一次运行产出两样东西：给微信的
+    # 逐支评分正文，和给首页"今日可执行清单"的带仓位/止损/目标的计划。
+    # 以前这一步靠一个单独的 cron 跑 daily_plan.py，那个 cron 早就停了，
+    # 于是计划文件一直是旧的。
+    try:
+        import daily_plan
+        plan = daily_plan.build_market_plan(market)
+        (data_dir / f"daily_plan_{market.lower()}.json").write_text(
+            json.dumps(plan, ensure_ascii=False, indent=1, default=str), encoding="utf-8",
+        )
+        print(f"[market_recommendation/{market}] 可执行计划已更新："
+              f"关注候选{len(plan.get('关注候选') or [])}条")
+    except Exception as e:
+        print(f"[market_recommendation/{market}] 可执行计划生成失败: {e}")
     if deliver:
         import wechat_delivery
         if not wechat_delivery.send_text(text):

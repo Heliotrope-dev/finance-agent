@@ -102,7 +102,7 @@ from auth import (
     _check_user, _register_user, _create_token, _validate_token,
     _invalidate_token, _hash_pw, _user_exists,
 )
-from theme import UP_COLOR, DOWN_COLOR, NEUTRAL_COLOR
+from theme import UP_COLOR, DOWN_COLOR, NEUTRAL_COLOR, OK_COLOR, BAD_COLOR
 
 for _k in ("SUPABASE_URL", "SUPABASE_KEY", "ADVISOR_EMAIL"):
     if _k not in os.environ:
@@ -3272,25 +3272,56 @@ def _parse_advice_text(text: str) -> dict:
     return parts
 
 
-def _load_order_ready_items(market: str) -> list[dict]:
-    """Read the current pre-market plan without running external data or an AI call."""
+def _load_daily_plan(market: str) -> dict:
+    """读当天的盘前计划快照，不现场取数、不调AI。返回 {} 表示今天没有这份计划。"""
     path = Path(__file__).resolve().parent / "data" / f"daily_plan_{market.lower()}.json"
     try:
         plan = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return []
-    if plan.get("日期") != cn_now().date().isoformat() or plan.get("AI状态") != "正常":
-        return []
-    return [
-        item for item in (plan.get("关注候选") or [])
-        if item.get("方向") == "买入"
+        return {}
+    if not isinstance(plan, dict) or plan.get("日期") != cn_now().date().isoformat():
+        return {}
+    return plan
+
+
+def _is_order_ready(item: dict) -> bool:
+    """一条候选是不是真的可以照着下单——交易参数齐全且过了闸门。
+
+    2026-09-11修：这里原来查的是 买入区间/止损/目标 三个键，而 daily_plan.py
+    的 _build_item 写出来的是 买入下沿/买入上限/止损参考/目标价——键名对不上，
+    条件恒为假，所以首页"今日可执行清单"从上线起就没渲染出过任何一条，不是
+    "今天确实没有标的达标"。（intraday_watch.py 早就在做 止损参考->止损 的
+    重命名，这份 schema 的真实键名在那边有据可查。）
+    """
+    return bool(
+        item.get("方向") == "买入"
         and item.get("新开仓状态") == "可执行"
         and item.get("建议股数")
-        and item.get("买入区间")
-        and item.get("止损") is not None
-        and item.get("目标") is not None
+        and item.get("买入下沿") is not None
+        and item.get("买入上限") is not None
+        and item.get("止损参考") is not None
+        and item.get("目标价") is not None
         and (item.get("盈亏比") or 0) > 0
-    ]
+    )
+
+
+def _load_order_ready_items(market: str) -> list[dict]:
+    plan = _load_daily_plan(market)
+    if plan.get("AI状态") != "正常":
+        return []
+    return [item for item in (plan.get("关注候选") or []) if _is_order_ready(item)]
+
+
+def _load_watch_only_items(market: str) -> list[dict]:
+    """没通过下单闸门、但当天确实被打过分的候选。
+
+    2026-09-11用户要求："就算没达到门槛也要写啊我得参考啊"。原来这块只渲染
+    可执行清单，一旦当天没有标的过闸门，整块就是一句"今天暂无"，等于把当天
+    几十支的评分工作全藏起来了。差一点点的候选和差很远的候选对用户是完全
+    不同的信息——把它们连同"差在哪"一起列出来，判断权交回给人。
+    """
+    plan = _load_daily_plan(market)
+    return [item for item in (plan.get("关注候选") or []) if not _is_order_ready(item)]
 
 
 def _render_advice_section():
@@ -3303,23 +3334,60 @@ def _render_advice_section():
     每次访问都触发一遍完全不现实，也没必要（这类基本面判断一天一次足够新）。
     """
     st.markdown("**今日可执行清单**")
-    st.caption("只显示当天已通过买入区间、股数、止损、目标和盈亏比校验的标的；没有就是今天不下新单。")
+    st.caption("通过买入区间、股数、止损、目标和盈亏比全部校验的标的排在最前；没过闸门的也列出来，并写明差在哪。")
+
+    def _plan_row(item: dict, *, ready: bool) -> str:
+        lo, hi = item.get("买入下沿"), item.get("买入上限")
+        range_text = (
+            f"{lo:.2f}–{hi:.2f}" if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) else "—"
+        )
+        bits = [f"买入区间 {range_text}"]
+        if item.get("建议股数"):
+            bits.append(f"买入 {int(item['建议股数'])} 股")
+        if isinstance(item.get("止损参考"), (int, float)):
+            bits.append(f"止损 {item['止损参考']:.2f}")
+        if isinstance(item.get("目标价"), (int, float)):
+            bits.append(f"目标 {item['目标价']:.2f}")
+        if isinstance(item.get("盈亏比"), (int, float)):
+            bits.append(f"盈亏比 {item['盈亏比']:.2f}:1")
+        if isinstance(item.get("现价"), (int, float)):
+            bits.insert(0, f"现价 {item['现价']:.2f}")
+        tag = (
+            f"<span style='color:{OK_COLOR};font-size:.72rem;font-weight:600'>可执行</span>"
+            if ready else
+            f"<span style='color:var(--fa-faint);font-size:.72rem'>仅观察</span>"
+        )
+        # 没过闸门的必须把原因摆出来。"不可执行原因"是 daily_plan 逐条算出来的
+        # 具体判据（尚未触发/不可追高/趋势仍向下/盈亏比不足…），不是一句笼统的
+        # "不达标"——用户要的正是这个，好自己判断是"差一点"还是"差很远"。
+        reason = item.get("不可执行原因") if not ready else None
+        score = item.get("评分")
+        return (
+            f"<div style='padding:9px 0;border-bottom:1px solid var(--fa-border)'>"
+            f"<strong>{_esc(_clean_name(item.get('名称', '')))}</strong>"
+            f"<span style='color:var(--fa-faint);font-size:.78rem'> · "
+            f"{_esc(str(item.get('市场', '')))} · {_esc(str(item.get('代码', '')))}"
+            + (f" · {score}分" if score is not None else "")
+            + f"</span>&nbsp;&nbsp;{tag}<br>"
+            f"<span style='font-size:.8rem;color:var(--fa-muted)'>{' · '.join(bits)}</span>"
+            + (f"<br><span style='font-size:.78rem;color:var(--fa-faint)'>{_esc(reason)}</span>"
+               if reason else "")
+            + "</div>"
+        )
+
     _order_ready = [item for _market in ("HK", "US") for item in _load_order_ready_items(_market)]
-    if not _order_ready:
-        st.caption("今天暂无可直接下单的标的。研究评分或“买入”观点不会在这里替代交易清单。")
+    _watch_only = [item for _market in ("HK", "US") for item in _load_watch_only_items(_market)]
+    if not _order_ready and not _watch_only:
+        st.caption("今天还没有生成盘前计划（港股09:00前、美股21:00前各跑一次）。")
     else:
-        for item in _order_ready:
-            price_range = item.get("买入区间") or {}
-            low, high = price_range.get("下限"), price_range.get("上限")
-            range_text = f"{low:.2f}–{high:.2f}" if isinstance(low, (int, float)) and isinstance(high, (int, float)) else "—"
-            st.markdown(
-                f"<div style='padding:9px 0;border-bottom:1px solid var(--fa-border)'>"
-                f"<strong>{_esc(item.get('名称', ''))}</strong>"
-                f"<span style='color:var(--fa-faint);font-size:.78rem'> · {_esc(str(item.get('市场', '')))} · {_esc(str(item.get('代码', '')))}</span><br>"
-                f"<span style='font-size:.8rem;color:var(--fa-muted)'>买入区间 {range_text} · 买入 {int(item['建议股数'])} 股 · "
-                f"止损 {item['止损']:.2f} · 目标 {item['目标']:.2f} · 盈亏比 {item['盈亏比']:.2f}:1</span></div>",
-                unsafe_allow_html=True,
-            )
+        if _order_ready:
+            for item in _order_ready:
+                st.markdown(_plan_row(item, ready=True), unsafe_allow_html=True)
+        else:
+            st.caption("今天没有标的通过全部下单校验——下面是当天打过分、但被闸门拦下的候选，供参考，不是下单指令。")
+        # 没过闸门的按评分降序，最多列8条：这块是"参考"，不是又一张长列表。
+        for item in sorted(_watch_only, key=lambda x: -(x.get("评分") or 0))[:8]:
+            st.markdown(_plan_row(item, ready=False), unsafe_allow_html=True)
 
     st.markdown("**投研观察排行榜**")
     st.caption("这是基本面和技术面的研究排序，不是下单指令；实际操作只以上方“今日可执行清单”为准。")
@@ -3490,7 +3558,7 @@ def _render_data_source_health():
         if not _futu["已安装SDK"]:
             st.markdown("**Futu OpenD**：未安装 SDK，港股/美股实时数据全部走兜底源（腾讯行情）。")
         elif _futu["已连接"]:
-            st.markdown(f"**Futu OpenD**：<span style='color:{UP_COLOR}'>已连接</span>", unsafe_allow_html=True)
+            st.markdown(f"**Futu OpenD**：<span style='color:{OK_COLOR}'>已连接</span>", unsafe_allow_html=True)
         else:
             _last_try = _futu["上次尝试连接"]
             _last_try_txt = (
@@ -3499,7 +3567,7 @@ def _render_data_source_health():
             _next_interval = _futu["下次重连间隔秒"]
             _next_interval_txt = f"，下次重连间隔约{_next_interval:.0f}秒（连续失败会指数退避，最长5分钟）" if _next_interval else ""
             st.markdown(
-                f"**Futu OpenD**：<span style='color:{DOWN_COLOR}'>未连接</span>"
+                f"**Futu OpenD**：<span style='color:{BAD_COLOR}'>未连接</span>"
                 f"（上次尝试 {_last_try_txt}{_next_interval_txt}；"
                 "港股/美股行情会自动退回腾讯行情兜底，不影响使用）",
                 unsafe_allow_html=True,
@@ -3508,16 +3576,20 @@ def _render_data_source_health():
         # 行情连接正常不代表 AI 决策链路正常。模拟盘曾发生账户欠费后持续失败、
         # 而这里仍显示“暂无失败”的误导状态，所以单独展示最近一次 AI 决策。
         try:
-            _sim_runs = get_sim_agent_runs(sim_agent.advisor._EMAIL, limit=8)
+            # limit 放大到 200：这里要回答两个问题——"最近一次是不是失败"只需要
+            # 第一条，但"最后一次成功是什么时候"要往回翻。2026-09-11用户截图里
+            # 显示"最后一次成功 无成功记录"，其实只是连续失败次数超过了当时写死
+            # 的 limit=8，历史上成功过很多次——把"翻不到"说成"没有过"是在报假话。
+            _sim_runs = get_sim_agent_runs(sim_agent.advisor._EMAIL, limit=200)
             _sim_latest = _sim_runs[0] if _sim_runs else None
             _sim_ok = next((r for r in _sim_runs if r.get("status") != "失败"), None)
             if _sim_latest and _sim_latest.get("status") == "失败":
                 _when = _to_cn_dt(_sim_latest.get("run_at"))
                 _when_text = _when.strftime("%m-%d %H:%M") if _when else "未知时间"
                 _ok_when = _to_cn_dt(_sim_ok.get("run_at")) if _sim_ok else None
-                _ok_text = _ok_when.strftime("%m-%d %H:%M") if _ok_when else "无成功记录"
+                _ok_text = _ok_when.strftime("%m-%d %H:%M") if _ok_when else "最近200次内没有成功记录"
                 st.markdown(
-                    f"**Gemini AI 决策**：<span style='color:{DOWN_COLOR}'>不可用</span>"
+                    f"**Gemini AI 决策**：<span style='color:{BAD_COLOR}'>不可用</span>"
                     f"（最近一次失败 {_when_text}；最后一次成功 {_ok_text}）",
                     unsafe_allow_html=True,
                 )
@@ -3525,7 +3597,7 @@ def _render_data_source_health():
                 _when = _to_cn_dt(_sim_latest.get("run_at"))
                 _when_text = _when.strftime("%m-%d %H:%M") if _when else "未知时间"
                 st.markdown(
-                    f"**Gemini AI 决策**：<span style='color:{UP_COLOR}'>正常</span>"
+                    f"**Gemini AI 决策**：<span style='color:{OK_COLOR}'>正常</span>"
                     f"（最近一次 {_when_text}：{_esc(str(_sim_latest.get('status') or '完成'))}）",
                     unsafe_allow_html=True,
                 )
@@ -5451,7 +5523,10 @@ def _render_ai_sim_dashboard():
     email = sim_agent.advisor._EMAIL
 
 
-    runs = get_sim_agent_runs(email, limit=30)
+    # 200 而不是 30：连续失败的时间一长（2026-09-09 供应商欠费那次连挂了两天、
+    # 几百次），30 条窗口里一条成功记录都翻不到，横幅就会说"最后一次成功 无记录"，
+    # 把"翻不到"讲成了"从来没成功过"。
+    runs = get_sim_agent_runs(email, limit=200)
 
     # AI停摆要在页面顶部说清楚（2026-09-11前端审计）。真实发生过的情况：
     # 2026-09-09 15:56 起AI供应商账户欠费，之后每次决策都失败，但页面顶部
@@ -5462,7 +5537,7 @@ def _render_ai_sim_dashboard():
     _latest = runs[0] if runs else None
     if _latest is not None and str(_latest.get("status") or "") == "失败":
         _ok_dt = _to_cn_dt(_last_ok.get("run_at")) if _last_ok else None
-        _ok_text = _ok_dt.strftime("%m-%d %H:%M") if _ok_dt else "无记录"
+        _ok_text = _ok_dt.strftime("%m-%d %H:%M") if _ok_dt else "最近200次内没有成功记录"
         _fail_dt = _to_cn_dt(_latest.get("run_at"))
         _fail_text = _fail_dt.strftime("%m-%d %H:%M") if _fail_dt else ""
         # 原始报错（含供应商的Request id、整段JSON）只写日志，不摆给用户看。
@@ -5651,7 +5726,7 @@ def _render_ai_sim_dashboard():
             # 是反的。状态是对错语义，不是方向语义，走另一套：成功绿、失败红
             # （这两个词的通用约定），跳过灰。
             status_color = {
-                "成功": "#12855F", "失败": "#D0342C", "跳过": NEUTRAL_COLOR,
+                "成功": OK_COLOR, "失败": BAD_COLOR, "跳过": NEUTRAL_COLOR,
             }.get(o["status"], NEUTRAL_COLOR)
             try:
                 _ordered = float(o.get("shares_ordered") or 0)
