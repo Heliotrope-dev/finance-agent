@@ -2903,9 +2903,18 @@ def get_hot_market_news(limit: int = 30) -> pd.DataFrame:
 
     def _search(kw: str) -> pd.DataFrame:
         try:
-            return get_futu_news(kw, max_count=5)
+            df = get_futu_news(kw, max_count=5)
         except Exception:
             return pd.DataFrame()
+        # 把"这条是搜哪个名字搜出来的"带上。2026-09-12（前端审计第17条
+        # +升级路线图第9条"资讯关联化"）：这批新闻本来就是拿当天真实异动的
+        # 股票名当关键词搜回来的，合并时却把关键词丢了，页面上只剩一条孤零零
+        # 的标题，读者没法判断"这跟我有什么关系"。关键词是事实（这条确实是
+        # 按这个名字搜到的），不是AI猜的关联，留下来直接可用。
+        if df is not None and not df.empty:
+            df = df.copy()
+            df["related"] = kw
+        return df
 
     with ThreadPoolExecutor(max_workers=len(keywords)) as ex:
         results = list(ex.map(_search, keywords))
@@ -2914,10 +2923,31 @@ def get_hot_market_news(limit: int = 30) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     merged = pd.concat(frames, ignore_index=True)
+    # 同一条新闻可能被多个关键词搜到，去重前先把关联名字合起来，这样
+    # "影响：MU、NVDA"这种一条顶多条的情况也能如实显示。
+    if "related" in merged.columns:
+        _rel = (merged.groupby("url")["related"]
+                .apply(lambda s: "、".join(dict.fromkeys(s.dropna().astype(str)))))
+    else:
+        _rel = None
     merged = merged.drop_duplicates(subset="url")
+    if _rel is not None:
+        merged["related"] = merged["url"].map(_rel)
+    # 跟投资无关的内容过滤掉。这批新闻是"按公司名搜"搜回来的，命中的未必
+    # 都跟投资有关——审计实测首页混进了9·11纪念报道（按某家公司名搜到的
+    # 确实是这家公司，但讲的是当年遇难员工）和企业家人物传记。这里只挡
+    # 明显属于纪念/讣告/人物特写这几类的标题，宁可漏挡也不误杀：用AI逐条
+    # 打相关度分更准，但那是每次刷新几十次模型调用，放在首页这种每人每次
+    # 访问都要走的路径上不划算。
+    _IRRELEVANT = ("遇难", "追思", "纪念日", "逝世", "去世", "讣告", "生平", "回忆录", "传记")
+    if "summary" in merged.columns or "新闻标题" in merged.columns:
+        _title_col = "新闻标题" if "新闻标题" in merged.columns else "summary"
+        _mask = ~merged[_title_col].astype(str).str.contains("|".join(_IRRELEVANT), regex=True, na=False)
+        merged = merged[_mask]
     merged = merged.sort_values("日期", ascending=False)
     merged = merged.rename(columns={"新闻标题": "summary", "分类": "tag"})
-    return merged[["日期", "summary", "tag", "url"]].head(limit)
+    _cols = ["日期", "summary", "tag", "url"] + (["related"] if "related" in merged.columns else [])
+    return merged[_cols].head(limit)
 
 
 def get_index_news(name: str, limit: int = 10) -> tuple:

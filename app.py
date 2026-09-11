@@ -4917,7 +4917,12 @@ def _render_home_page():
             f"<div style='padding:11px 2px;border-bottom:1px solid var(--fa-border)'>"
             f"<a href='{_safe_href(row['url'])}' target='_blank' style='{_title_style};text-decoration:none'>{_esc(row['summary'])}</a>"
             f"<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:4px'>"
-            f"{_esc(row.get('tag',''))} · {_esc(row.get('日期') or '-')}</div></div>",
+            # 2026-09-12：标出这条是按哪只异动股搜到的（升级路线图第9条
+            # "资讯关联化"）。这批新闻本来就是拿当天真实异动的股票名当关键词
+            # 搜的，related 就是那个关键词本身，是事实不是AI推断的关联；
+            # 没有这个字段（老缓存/兜底数据源）就照旧只显示分类和日期。
+            + (f"影响：{_esc(row.get('related'))} · " if row.get("related") else "")
+            + f"{_esc(row.get('tag',''))} · {_esc(row.get('日期') or '-')}</div></div>",
             unsafe_allow_html=True,
         )
     if len(news) > 10:
