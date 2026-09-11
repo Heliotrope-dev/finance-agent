@@ -616,16 +616,20 @@ def _build_item(rec: dict) -> dict | None:
         if buy_lo is None or buy_hi is None:
             execution_reasons.append("当前无法形成有效的买入区间。")
         elif last < buy_lo:
-            execution_reasons.append(f"尚未触发：现价低于买入区间 {buy_lo:.3f}。")
+            execution_reasons.append(f"尚未触发：现价低于买入区间 {buy_lo:.2f}。")
         elif last > buy_hi:
-            execution_reasons.append(f"不可追高：现价高于买入上限 {buy_hi:.3f}。")
+            execution_reasons.append(f"不可追高：现价高于买入上限 {buy_hi:.2f}。")
         if _falling:
             trigger_text = f"，等待站上 {_trigger:.2f}" if _trigger else ""
             execution_reasons.append(f"趋势仍向下{trigger_text}后再评估。")
     else:
         execution_reasons.append(f"AI 当前结论为“{rec.get('action') or '未知'}”，不是买入。")
 
-    execution_reason = "；".join(dict.fromkeys(execution_reasons)) or None
+    # 每条原因本身自带句号，直接用「；」拼会拼出"……下限 2:1。；当前……"
+    # 这种双标点（2026-09-11前端审计抓到）。拼接前先把各自结尾的句号
+    # 剥掉，由分隔符统一承担断句，最后再补一个句号收尾。
+    _reasons = [r.rstrip("。") for r in dict.fromkeys(execution_reasons) if r]
+    execution_reason = ("；".join(_reasons) + "。") if _reasons else None
     executable = bool(
         is_new_buy
         and decision and decision.allowed

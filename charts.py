@@ -468,6 +468,10 @@ def build_benchmark_comparison(hist: pd.DataFrame, benchmark: pd.DataFrame, benc
         )
     )
     fig.update_layout(yaxis_title="走势（起点=100）")
+    # 横轴显式指定日期格式：不设的话Plotly会按语言环境自己挑，实测打出来是
+    # "Jun 282026"（英文月份、日和年之间还少一个空格，2026-09-11前端审计抓到）。
+    # 全站其它图表都用 月-日，这里对齐。
+    fig.update_xaxes(tickformat="%m-%d")
     _apply_chart_theme(fig, height=320, legend=True, hovermode="x unified")
     return fig
 

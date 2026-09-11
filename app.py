@@ -1433,13 +1433,23 @@ def _fmt_usd_signed(value, decimals: int = 0, default: str = "—") -> str:
 
 
 def _clean_name(name) -> str:
-    """去掉行情接口返回的名称里的空格。
+    """去掉行情接口返回的名称里的补位空格。
 
     2026-09-11前端审计抓到「南 京 港」这种——A股接口对三个字的名字会用
     全角空格补齐成四个字宽（老行情软件对齐用的习惯），原样渲染到网页上
-    就变成了字中间带空格。半角全角都要去，不能只strip两端。
+    就变成了字中间带空格。
+
+    2026-09-12再修（同一轮审计的另一条）：上一版把半角空格也一并删掉了，
+    结果英文名跟着遭殃——"Meta Platforms" 被压成了 "MetaPlatforms"。
+    这两种空格的性质完全不同：中文名里的空格必然是补位（中文词之间不写
+    空格），英文名里的空格是词的分隔符，删了就是错别字。所以只有在名称
+    含中文时才连半角空格一起删；纯英文名只做首尾strip和连续空格归一。
     """
-    return str(name or "").replace("　", "").replace(" ", "")
+    s = str(name or "").replace("　", "")
+    has_cjk = any("一" <= ch <= "鿿" for ch in s)
+    if has_cjk:
+        return s.replace(" ", "")
+    return " ".join(s.split())
 
 
 def _sim_note_for_display(note: str) -> str:
@@ -4526,7 +4536,13 @@ def _render_event_calendar():
             unsafe_allow_html=True,
         )
         for _sym, _e in sorted(earnings.items(), key=lambda kv: kv[1].get("date") or "9999"):
-            _eps = f"预期EPS {_e['eps_predict']}" if _e.get("eps_predict") else ""
+            # 预期EPS原样打印会出现"31.1615"这种四位小数（2026-09-11前端审计
+            # 抓到）——EPS是每股收益，行业惯例两位小数，多出来的位数不是精度
+            # 是噪声。拿不到数字时(None/字符串)退回原样显示，不硬转崩掉这一行。
+            try:
+                _eps = f"预期EPS {float(_e['eps_predict']):.2f}" if _e.get("eps_predict") is not None else ""
+            except (TypeError, ValueError):
+                _eps = f"预期EPS {_e['eps_predict']}" if _e.get("eps_predict") else ""
             st.markdown(
                 f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
                 f"border-bottom:1px solid var(--fa-border)'>"
