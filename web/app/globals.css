@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+/* 设计变量直接沿用 Streamlit 那版 app.py 里的同名变量和 theme.py 的涨跌色。
+   前端换框架不是换设计：同一个产品在两套前端下必须长得一样，否则迁移期间
+   两边并存会像两个网站。红涨绿跌是中式约定，跟 theme.py 的注释一致——
+   涨跌色只表示方向，"成功/失败"那套对错语义另有一组颜色，不要互相借用。 */
+:root {
+  --fa-bg: #fafafb;
+  --fa-surface: #ffffff;
+  --fa-fill: #f3f4f6;
+  --fa-border: #eaeaef;
+  --fa-border-2: #dbdce3;
+  --fa-text: #17181c;
+  --fa-text-2: #494c55;
+  --fa-muted: #82858e;
+  --fa-faint: #a8abb3;
+
+  --fa-up: #d0342c;      /* 涨 */
+  --fa-down: #12855f;    /* 跌 */
+  --fa-neutral: #8a8d95;
+}
+
+html,
+body {
+  background: var(--fa-bg);
+  color: var(--fa-text);
+  /* 等宽数字：比例字体里 1 比 0 窄一截，上下两行价格的小数点对不齐，
+     一列数字扫下来是锯齿状的。只影响数字字形宽度，可以全局开。 */
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+/* 板块标题。Streamlit 那版一开始做成了 13px 灰色小眉标，实测跟正文分不开
+   （前端审计原话"板块标题是14px的灰字，和正文分不开"），后来改成这个尺寸。
+   这里保持一致。 */
+.fa-section-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--fa-text);
+}
+
+.fa-hairline {
+  border-bottom: 1px solid var(--fa-border);
+}
+
+/* 链接整块可点时不要蓝色下划线 */
+a.fa-card {
+  color: inherit;
+  text-decoration: none;
+  display: block;
+}
+a.fa-card:hover {
+  opacity: 0.85;
+}
