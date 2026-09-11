@@ -949,11 +949,20 @@ def log_equity_snapshot(email: str, holdings_value_hkd: float, virtual_cash_hkd:
 
 
 def get_equity_snapshots(email: str, limit: int = 500) -> list[dict]:
+    """资产曲线用的净值快照。
+
+    只返回口径切换点之后的（见 _EQUITY_BASIS_CUTOVER）：切换前后的净值差着
+    那两笔非AI持仓的市值，混在同一条曲线上会画出一段从 HK$93,798 直落到
+    HK$78,000 的假暴跌——那不是账户真的亏了，是中途换了"净值"的定义。
+    旧记录不删，只是不画进这条曲线。
+    """
     init_db()
+    cutover = _EQUITY_BASIS_CUTOVER.astimezone(timezone.utc).isoformat()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
         rows = c.execute(
-            "SELECT * FROM sim_equity_snapshots WHERE email = ? ORDER BY snapshot_at DESC LIMIT ?", (email, limit),
+            "SELECT * FROM sim_equity_snapshots WHERE email = ? AND snapshot_at >= ? "
+            "ORDER BY snapshot_at DESC LIMIT ?", (email, cutover, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -989,6 +998,18 @@ def get_sim_agent_lessons(email: str, limit: int = 7) -> list[dict]:
 
 _CN_TZ = timezone(timedelta(hours=8))
 
+# 资产快照的口径切换时间点（2026-09-12）。这之前的快照，净值 = 富途账户里
+# 全部持仓市值 + 虚拟现金，其中"全部持仓"包含两笔从未经AI下单的遗留仓位
+# （HK$15,798，来源见 sim_trader.get_ledger_reconciled_holdings）；这之后
+# 改成只算AI自己按成交流水买入的仓位。
+#
+# 两种口径的净值差着那两笔仓位的市值，直接混在一起算日/月收益会得到一个
+# 假的暴跌：实测账户真实变化是 -0.01%，而"本日收益"按旧口径的基准点算出来
+# 是 -16.85%。这里不删历史快照（那是真实发生过的记录，而且删了就没法复盘
+# 这次口径变更本身），只是让收益计算从切换点之后开始取数。窗口内没有可用
+# 基准时，下面的逻辑本来就会如实返回 None、界面显示"暂无数据"。
+_EQUITY_BASIS_CUTOVER = datetime(2026, 9, 12, 1, 40, tzinfo=_CN_TZ)
+
 
 def get_period_pnl(email: str, current_net_value: float) -> dict:
     """本日/昨日/本月收益——用户明确要求"要有本日收益昨日收益本月收益三个
@@ -1016,7 +1037,11 @@ def get_period_pnl(email: str, current_net_value: float) -> dict:
             continue
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        parsed.append((dt.astimezone(_CN_TZ), net_value))
+        dt_cn = dt.astimezone(_CN_TZ)
+        # 切换点之前的快照是另一套口径，不参与收益计算（见 _EQUITY_BASIS_CUTOVER）
+        if dt_cn < _EQUITY_BASIS_CUTOVER:
+            continue
+        parsed.append((dt_cn, net_value))
 
     def _pct_block(base: float | None, end: float) -> dict | None:
         if base is None or base == 0:
