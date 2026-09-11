@@ -3338,6 +3338,19 @@ def get_economic_events(days: int = 14, min_star: str = "MEDIUM") -> list[dict]:
     return out
 
 
+def _target_pct(tp, ltp, change_type: str):
+    """目标价较上一次的变动幅度；算不出就返回 None（宁可不显示也不编一个）。"""
+    if change_type.upper() == "INIT":
+        return None
+    try:
+        tp, ltp = float(tp), float(ltp)
+    except (TypeError, ValueError):
+        return None
+    if not (tp > 0 and ltp > 0):   # NaN 在这里也会落到 False
+        return None
+    return (tp - ltp) / ltp * 100
+
+
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_rating_changes(market: str = "US", limit: int = 12) -> list[dict]:
     """分析师评级变动（含目标价调整）。
@@ -3368,7 +3381,11 @@ def get_rating_changes(market: str = "US", limit: int = 12) -> list[dict]:
             "institution": str(row.get("institution_name") or ""),
             "target_price": tp,
             "last_target_price": ltp,
-            "target_pct": ((tp - ltp) / ltp * 100) if (tp and ltp) else None,
+            # 首次覆盖按定义没有"前一次目标价"，富途在这类行上回的 last_target_price
+            # 常常是 0 或干脆把本次目标价抄一遍，照算就会打出"首次覆盖（较前目标价
+            # +100%）"这种自相矛盾的话（2026-09-11前端审计实测）。首次覆盖一律不给
+            # 变动幅度；另外挡一下 NaN 和 ltp<=0。
+            "target_pct": _target_pct(tp, ltp, str(row.get("change_type") or "")),
         })
     return out[:limit]
 
@@ -4150,12 +4167,28 @@ def get_crypto_regime() -> dict:
         hits = web_research.search("bitcoin ETF net flow today inflow million", limit=5)
         for h in hits:
             txt = f"{h.get('title','')} {h.get('snippet','')}"
-            m = _re.search(r"[Nn]et [Ff]low[^+\-]{0,30}([+\-]?\s*\$?\s*[\d,.]+)\s*(M|million|亿|万)",
-                           txt)
-            if m:
-                out["ETF净流"] = m.group(0)[:60]
-                out["ETF来源"] = h.get("domain", "")
-                break
+            m = _re.search(
+                r"[Nn]et\s+(?:flow|inflow|outflow)s?\D{0,30}?([+\-]?)\s*\$?\s*([\d,.]+)\s*"
+                r"(M|MM|million|B|bn|billion)",
+                txt, _re.I,
+            )
+            if not m:
+                continue
+            # 2026-09-11前端审计：这里原来是 m.group(0)[:60]，把正则匹配到的整段
+            # 英文原文直接塞进中文页面，实际渲染出来是"ETF资金流 net inflow of
+            # $234.5 million"这种半截英文。改成解析成数值再自己拼一句中文——
+            # 方向（净流入/净流出）取正则里的符号，没有符号就看关键词是
+            # inflow 还是 outflow。
+            try:
+                amount = float(m.group(2).replace(",", ""))
+            except ValueError:
+                continue
+            if m.group(3).upper().startswith("B"):
+                amount *= 1000          # 统一换算成百万美元
+            negative = m.group(1) == "-" or _re.search(r"net\s+outflow", m.group(0), _re.I)
+            out["ETF净流"] = f"净流{'出' if negative else '入'} ${amount:,.1f}M"
+            out["ETF来源"] = h.get("domain", "")
+            break
     except Exception:
         pass
     return out

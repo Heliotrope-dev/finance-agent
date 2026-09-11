@@ -194,20 +194,16 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
     padding-top: 6px !important;
 }
 
-/* 右下角AI浮标会盖住页面最底部那一行的数字（审计实测盖住过中信金属的
-   -9.97% 和模拟盘持仓的盈亏金额）。给主内容区底部留出比浮标更高的空白，
-   让最后一行始终能滚到浮标上方。浮标本身 56px 高、距底 26px，留 120px
-   够用还有余量。 */
-[data-testid="stMainBlockContainer"] { padding-bottom: 120px !important; }
-
 /* 内容收窄居中。原来是整屏铺满，超宽屏上一行数字能拉到两千多像素，
-   眼睛要横扫过去才读得完；收到1240再给足左右留白，行长回到舒适区间。 */
+   眼睛要横扫过去才读得完；收到1240再给足左右留白，行长回到舒适区间。
+   底部 120px 是给右下角AI浮标让位：浮标 56px 高、距底 26px，实测会盖住
+   最后一行的数字（中信金属的 -9.97%、模拟盘持仓的盈亏金额都被挡过）。 */
 [data-testid="stMainBlockContainer"] {
     max-width: 1240px !important;
-    padding: 26px 40px 88px !important;
+    padding: 26px 40px 120px !important;
 }
 @media (max-width: 900px) {
-    [data-testid="stMainBlockContainer"] { padding: 18px 18px 64px !important; }
+    [data-testid="stMainBlockContainer"] { padding: 18px 18px 108px !important; }
 }
 
 [data-testid="stHorizontalBlock"], [data-testid="stColumn"], [data-testid="stElementContainer"] {
@@ -962,6 +958,14 @@ if not st.session_state.get("logged_in") and not st.session_state.get("guest_mod
     _show_login_page()
     st.stop()
 
+# 主导航分区 ←→ 地址栏 slug。中文分区名直接进 URL 会被 percent-encode 成一长串
+# 看不懂的 %XX，所以对外用英文短名。
+_SLUG_BY_SECTION = {
+    "首页": "home", "行情": "market", "持仓": "positions",
+    "自选": "watchlist", "AI模拟炒股": "sim", "我的": "me",
+}
+_SECTION_BY_SLUG = {v: k for k, v in _SLUG_BY_SECTION.items()}
+
 # 个股详情页有稳定的可分享地址。旧的 open_* 是一次性跳转参数，第一次进入
 # 后会改写为 symbol/market/name/section 四个规范参数；后者不清理，刷新或复制
 # 地址仍能回到同一只标的。认证令牌不放进规范地址，登录态由七天 Cookie 维持。
@@ -1220,6 +1224,25 @@ def _resolve_add_symbol(q: str, market_code: str) -> str | None:
     return q.zfill(5) if market_code == "HK" else q.upper()
 
 
+# 搜索/弹窗进入详情页也必须写入同一套规范 URL。此前只有卡片链接经过文件
+# 顶部的 open_symbol 转换；搜索历史和添加持仓弹窗是直接改 session_state，
+# 导致地址栏仍是首页，刷新或复制链接就丢了当前标的。
+def _open_detail_route(symbol: str, market: str, name: str, section: str = "我的") -> None:
+    """跳到个股详情并保留可刷新、可分享的规范地址。
+
+    认证令牌故意不进入地址栏：登录态由七天 Cookie 维持，不能为了分享页面
+    把可登录凭证留在浏览器历史或服务器访问日志里。
+    """
+    st.session_state["_detail_symbol"] = symbol
+    st.session_state["_detail_market"] = market
+    st.session_state["_detail_name"] = name
+    st.session_state["_detail_return_section"] = section
+    st.session_state["_active_section"] = section
+    st.query_params.clear()
+    st.query_params.update({"symbol": symbol, "market": market, "name": name, "section": section})
+    st.rerun()
+
+
 # 搜索历史的点击跳转在这里处理，而不是跟其它 open_* 参数一起放在文件开头：
 # 这段要调用下面刚定义的 _resolve_add_symbol（搜索历史存的是用户当时输入的
 # 原始词，"Microsoft"、"苹果"、"nike"，不是股票代码，得现查）。模块级代码
@@ -1233,11 +1256,7 @@ if st.query_params.get("open_search"):
     _m = st.query_params.get("open_search_market", "A")
     _sym = _resolve_add_symbol(_q, _m)
     if _sym:
-        st.session_state["_detail_symbol"] = _sym
-        st.session_state["_detail_market"] = _m
-        st.session_state["_detail_name"] = _q
-        st.session_state["_detail_return_section"] = "我的"
-        st.session_state["_active_section"] = "我的"
+        _open_detail_route(_sym, _m, _q, "我的")
     else:
         # 查不到就别静默吞掉——这条历史可能是当时搜错的词，或者标的已经退市。
         st.session_state["_search_open_error"] = _q
@@ -1385,6 +1404,21 @@ def _fmt_price(value, default: str = "—") -> str:
     if av >= 0.01:
         return f"{v:,.4f}"
     return f"{v:,.6f}"
+
+
+def _fmt_usd_signed(value, decimals: int = 0, default: str = "—") -> str:
+    """带正负号的美元金额，负号写在货币符号外面。
+
+    2026-09-11前端审计抓到 f"${v:+,.0f}" 会打出「$-156」——符号被 f-string
+    塞进了 $ 后面。会计和行情软件的通行写法是 -$156：货币符号紧贴数字，
+    符号在最外层。正数保留 + 号（这几处指标就是要一眼看出方向）。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    sign = "-" if v < 0 else "+"
+    return f"{sign}${abs(v):,.{decimals}f}"
 
 
 def _clean_name(name) -> str:
@@ -5365,7 +5399,7 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
                 # 不指定的话，同一个页面上亏损的百分比是红的、而下面持仓里
                 # 下跌的股票是绿的，两套配色互相打架。
                 st.metric(
-                    label, f"${block['change'] / _usd_rate:+,.0f}",
+                    label, _fmt_usd_signed(block["change"] / _usd_rate),
                     f"{block['pct']:+.2f}%", delta_color="inverse",
                 )
             else:
@@ -5379,7 +5413,7 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
             # 展示——港股仓位除以汇率折成美元，美股仓位本来就是美元不用转。
             if p["pl_val"] is not None:
                 pl_usd = p["pl_val"] if p["currency"] == "USD" else p["pl_val"] / _usd_rate
-                pl_text = f"${pl_usd:+,.2f}"
+                pl_text = _fmt_usd_signed(pl_usd, decimals=2)
             else:
                 pl_text = "—"
             st.markdown(
@@ -5612,11 +5646,30 @@ def _render_ai_sim_dashboard():
         show_all_orders = st.session_state.get(_orders_key, False)
         visible_orders = orders if show_all_orders else orders[:10]
         for o in visible_orders:
-            status_color = {"成功": UP_COLOR, "失败": DOWN_COLOR, "跳过": NEUTRAL_COLOR}.get(o["status"], NEUTRAL_COLOR)
+            # 下单状态不能借用涨跌色。全站是"红涨绿跌"的中式配色，直接套上去
+            # 就是"成功"红、"失败"绿——2026-09-11前端审计实测读下来第一反应
+            # 是反的。状态是对错语义，不是方向语义，走另一套：成功绿、失败红
+            # （这两个词的通用约定），跳过灰。
+            status_color = {
+                "成功": "#12855F", "失败": "#D0342C", "跳过": NEUTRAL_COLOR,
+            }.get(o["status"], NEUTRAL_COLOR)
+            try:
+                _ordered = float(o.get("shares_ordered") or 0)
+            except (TypeError, ValueError):
+                _ordered = 0
+            try:
+                _requested = float(o.get("shares_signal") or 0)
+            except (TypeError, ValueError):
+                _requested = 0
+            # 模拟市价单在落单时没有可靠成交价，不能伪造价格或金额；至少把
+            # 实际委托数量（失败/跳过则计划数量）明确展示出来，方便复核执行。
+            _qty = f" · 委托 {_ordered:g} 股" if _ordered > 0 else (
+                f" · 计划 {_requested:g} 股" if _requested > 0 else ""
+            )
             st.markdown(
                 f"<div style='padding:4px 0'>{_to_cn_time_str(o['created_at'])} · "
                 f"{_esc(o['name'] or o['symbol'])}（{_esc(o['symbol'])}·{_esc(o['market'])}）· {_esc(o['action'])} · "
-                f"<span style='color:{status_color}'>{_esc(o['status'])}</span>"
+                f"<span style='color:{status_color}'>{_esc(o['status'])}</span>{_qty}"
                 + (f" · {_esc(o['note'])}" if o["note"] else "") + "</div>",
                 unsafe_allow_html=True,
             )
@@ -6652,6 +6705,10 @@ def _show_add_position_dialog(email: str):
                 upsert_position(email, confirmed["symbol"], confirmed["name"], confirmed["market"], shares, amount)
                 st.session_state.pop("_pos_add_confirmed", None)
                 st.rerun()
+            elif cost_price > 0:
+                # 成交均价本身不是仓位。以前会静默退化为“只关注”，用户以为
+                # 已录入成本、实际却没有任何持仓，之后浮盈亏会一直不对。
+                st.error("仅填写成交均价还不能建立持仓；请再填写股数或买入金额。")
             else:
                 add_watch_only(email, confirmed["symbol"], confirmed["name"], market=confirmed["market"])
                 st.session_state.pop("_pos_add_confirmed", None)
@@ -6719,10 +6776,7 @@ def _show_add_position_dialog(email: str):
             if st.button(row_label, key=f"_pos_hist_open_{h['id']}", use_container_width=True):
                 sym = _resolve_add_symbol(h["query"], h["market"])
                 if sym:
-                    st.session_state["_detail_symbol"] = sym
-                    st.session_state["_detail_market"] = h["market"]
-                    st.session_state["_detail_name"] = h["query"]
-                    st.rerun()
+                    _open_detail_route(sym, h["market"], h["query"], "持仓")
                 else:
                     st.error(f"没查到「{h['query']}」的行情。")
 
@@ -6857,7 +6911,15 @@ else:
         # 代码控制不了；从持仓点进详情页再返回时，需要能把选中项强制拨回"持仓"。
         # "首页"放在最前面且是默认分区——打开网站先看首页（世界地图+今日资讯），
         # 不是直接扔进"行情"这种数据密集页面。
-        st.session_state.setdefault("_active_section", "首页")
+        # 分区也写进地址栏。个股详情页已经有稳定地址了（见上面 symbol/market/name
+        # 那段），但主导航一直是纯 session 状态：刷新、收藏、或者把链接发给别人，
+        # 一律弹回"首页"——用户在"自选"里看到一半刷新一下就得重新点回去。用英文
+        # slug 而不是中文分区名，是因为中文要 percent-encode，复制出来的链接会是
+        # 一长串 %E8%87%AA%E9%80%89，看不出来是哪个页面。
+        if "_active_section" not in st.session_state:
+            st.session_state["_active_section"] = _SECTION_BY_SLUG.get(
+                st.query_params.get("tab", ""), "首页",
+            )
 
         # 包一层带key的容器：Streamlit会给它加上 st-key-fa_nav 这个class，
         # CSS靠它把这一组radio单独渲染成下划线标签页，而不影响页面里其它
@@ -6876,6 +6938,12 @@ else:
         _prev_sec = st.session_state.get("_last_rendered_section")
         _switching = _prev_sec is not None and _prev_sec != active_section
         st.session_state["_last_rendered_section"] = active_section
+
+        # 把当前分区同步回地址栏。只在值真的变了时才写，避免每次 rerun 都碰
+        # query_params。
+        _tab_slug = _SLUG_BY_SECTION.get(active_section, "home")
+        if st.query_params.get("tab") != _tab_slug:
+            st.query_params["tab"] = _tab_slug
         _sec_spinner = st.spinner("加载中…") if _switching else _nullcontext()
 
         if active_section == "首页":
