@@ -5075,65 +5075,6 @@ def _render_macro_briefs():
                         )
 
 
-def _render_home_index_strip():
-    """首页顶部的指数行情条（2026-09-12新增，前端审计第8条）。
-
-    审计原话："打开首页，第一屏整屏都是世界地图。最有价值的『今日可执行
-    清单』在页面约80%的位置。" 地图占了整个首屏却只承载十几个数字，信息
-    密度太低；而且标签在手机宽度下互相重叠，根本读不出来。
-
-    这里不动地图本身（它仍然有"一眼看全球"的价值，只是往下挪），先在最
-    顶上补一条紧凑的指数横条：名称/点位/涨跌幅，一行摆完，窄屏可以横向
-    滑动。数据直接复用地图那份预热缓存（warm_home_cache.py 每分钟写的
-    home_map_cache.json），不新增任何网络请求——缓存没命中就干脆不画这条，
-    绝不为了多一个模块去拖慢首屏，那正是这次审计要解决的问题本身。
-    """
-    cached = load_home_map_cache(max_age_sec=90)
-    if not cached:
-        return
-    snaps, global_idx = cached["snaps"], cached["global_idx"]
-
-    # 挑最常看的几个，顺序按"离用户最近"排：A股、港股、美股两个大盘，再加
-    # 两个国际参照。不把11个全塞进来——横条的价值在于一眼扫完。
-    wanted = [("上证指数", "A"), ("恒生指数", "HK"), ("标普500", "US"),
-              ("纳斯达克100", "US"), ("日经225", "GLOBAL"), ("德国DAX", "GLOBAL")]
-    cards = []
-    for name, mkt in wanted:
-        idx = (global_idx.get(name) if mkt == "GLOBAL"
-               else next((i for i in snaps.get(mkt, []) if i["名称"] == name), None))
-        if not idx:
-            continue
-        last, chg = idx.get("最新"), idx.get("涨跌")
-        if last is None or chg is None:
-            continue
-        prev = last - chg
-        pct = (chg / prev * 100) if prev else 0.0
-        color = UP_COLOR if chg >= 0 else DOWN_COLOR
-        cards.append(
-            f"<div>"
-            f"<div style='font-size:0.72rem;color:var(--fa-faint);white-space:nowrap'>{_esc(name)}</div>"
-            f"<div style='font-size:0.98rem;font-weight:650;color:{color};"
-            f"font-variant-numeric:tabular-nums;white-space:nowrap'>{last:,.2f}</div>"
-            f"<div style='font-size:0.72rem;color:{color};font-variant-numeric:tabular-nums'>"
-            f"{pct:+.2f}%</div></div>"
-        )
-    if not cards:
-        return
-    # 等分铺满整行，不是靠左排完剩一大段空白。原来用的是 flex + min-width
-    # 116px + overflow-x:auto，宽屏下6个卡片挤在左边约三分之二，右边空着，
-    # 看上去像没加载完。改成 grid 的 1fr 等分：列宽由容器宽度决定，间隔天然
-    # 一致，不用手调 padding。窄屏降到3列两行，比横向滑动好用——横条本来就
-    # 是"一眼扫完"，需要滑动就失去意义了。
-    st.markdown(
-        "<style>.fa-index-strip{display:grid;grid-template-columns:repeat(6,1fr);"
-        "gap:10px 12px;padding-bottom:12px;border-bottom:1px solid var(--fa-border);"
-        "margin-bottom:22px}"
-        "@media (max-width:640px){.fa-index-strip{grid-template-columns:repeat(3,1fr)}}</style>"
-        "<div class='fa-index-strip'>" + "".join(cards) + "</div>",
-        unsafe_allow_html=True,
-    )
-
-
 def _render_home_page():
     """首页——世界地图（几个常见指数的实时点位）+ 今日重磅资讯。
 
@@ -5144,24 +5085,38 @@ def _render_home_page():
     今天没有股票明显异动、或者富途连不上）才退回财新兜底，不会完全没有
     内容可看。
     """
-    # 2026-09-12重排（前端审计第8条）：原顺序是 地图 → 宏观/日历/IPO →
-    # 可执行清单 → 资讯，最有价值的清单落在页面约80%的位置，第一屏整屏只有
-    # 一张信息密度很低的地图。用户打开投资类产品，第一件事想知道的是"今天
-    # 该做什么"，不是"世界长什么样"。
-    # 新顺序：指数横条（一行看完大盘）→ 今日可执行清单+排行榜 → 宏观/日历/
-    # IPO → 世界地图 → 资讯。地图没删，只是降到"看完正事之后再看"的位置。
-    _render_home_index_strip()
+    # 2026-09-12重排。中间经过两版：
+    #
+    # 前端审计第8条指出"第一屏整屏都是世界地图、可执行清单落在80%的位置"，
+    # 于是把地图降到清单之后。用户看过之后要求把地图挪回最上面，并且跟宏观
+    # 那条横栏放在一起——"世界地图还是老样子移动到项目最上面吧，这个放在
+    # 美元黄金那栏下面"。
+    #
+    # 这一版是两者的合并而不是回退：审计真正反对的是"第一屏只有一张信息密度
+    # 很低的图"，不是地图本身的位置。现在第一屏是 指数横条 + 宏观横栏 + 地图
+    # 三层叠在一起——前两层是高密度的数字，地图在它们下面作为同一组"今天全球
+    # 什么情况"的收尾，可执行清单紧跟其后，不再被压到页面80%的位置。
+    #
+    # 指数横条（上证/恒生/标普/纳指/日经/DAX）在这一版删掉了：地图上本来就
+    # 标着这六个指数的点位和涨跌，横条是同一份缓存(home_map_cache.json)的
+    # 另一种画法。它当初存在的理由是"地图在页面很下面，顶上需要一行数字"，
+    # 地图挪回最上面之后这个理由就不成立了，留着只是把同一组数字讲两遍。
+    # 宏观横栏留下：VIX/美债/美元/金油铜地图上没有，不重复。
+    #
+    # 顺序：宏观横栏(VIX/美债/美元/金油铜) → 世界地图 →
+    #       今日可执行清单+排行榜 → 宏观议题/日历/IPO → 资讯。
+    _render_macro_strip()
 
+    st.markdown("**全球指数一览**")
+    _render_home_map()
+
+    st.divider()
     _render_advice_section()
 
     st.divider()
     _render_macro_briefs()
     _render_event_calendar()
     _render_ipo_briefs()
-
-    st.divider()
-    st.markdown("**全球指数一览**")
-    _render_home_map()
 
     st.divider()
     st.markdown("**今日重磅消息**")
@@ -7721,9 +7676,10 @@ else:
             # （比如"显示更多"、"更多板块"）都会带动其余几块跟着重新拉一遍
             # 数据，是页面交互卡顿的主要原因。现在各自是独立的@st.fragment，
             # 点一个按钮只重新跑对应那一块。
-            # 跨资产温度计在市场单选之上：它跟选哪个市场无关，是全球共用的
-            # 背景板（升级路线图第5条）。
-            _render_macro_strip()
+            # 跨资产温度计（VIX/美债/美元/金油铜）本来放在这里，2026-09-12
+            # 按用户要求移到首页，跟指数横条、世界地图叠成"今天全球什么情况"
+            # 的第一屏。这里不再重复渲染——同一条数据在两个页面各画一遍，用户
+            # 会以为是两份不同的东西。
             mkt_pick = st.radio("市场", ["A股", "港股", "美股", "虚拟货币"], horizontal=True, key="_market_overview_pick")
             mkt_code = {"A股": "A", "港股": "HK", "美股": "US", "虚拟货币": "CC"}[mkt_pick]
 

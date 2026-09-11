@@ -1152,18 +1152,32 @@ def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
     else:
         amounts = ["—"] * len(d)
 
+    # 方块上的文字在 Python 这边拼好，不用 texttemplate 的格式化占位符。
+    # 踩过的坑：customdata 里同时放了数字(涨跌幅)和字符串(成交额)，plotly 会
+    # 把整个 customdata 数组统一成字符串，于是 "%{customdata[0]:+.2f}" 的格式
+    # 化静默失效，方块上印出来的是 "1.8982873644758282%" 这种全精度原始值。
+    # 字符串在 hovertemplate 里照样能用（不带格式符即可），所以两边都改成
+    # 预先拼好的字符串，不给 plotly 猜类型的机会。
+    tile_text = [f"{lbl}<br>{p:+.2f}%"
+                 for lbl, p in zip(d["板块"].astype(str), pcts)]
+    hover_cd = [[f"{p:+.2f}%", a] for p, a in zip(pcts, amounts)]
+
     fig = go.Figure(go.Treemap(
         labels=d["板块"].astype(str).tolist(),
         parents=[""] * len(d),
         values=sizes.tolist(),
-        customdata=list(zip(pcts, amounts)),
+        text=tile_text,
+        customdata=hover_cd,
         # 板块名和涨跌幅都直接印在方块上——热力图的意义就是不用 hover 就能
         # 扫完，hover 只是补充成交额。
-        texttemplate="%{label}<br>%{customdata[0]:+.2f}%",
-        hovertemplate="<b>%{label}</b><br>涨跌幅 %{customdata[0]:+.2f}%"
+        texttemplate="%{text}",
+        hovertemplate="<b>%{label}</b><br>涨跌幅 %{customdata[0]}"
                       "<br>成交额 %{customdata[1]}<extra></extra>",
         textposition="middle center",
-        textfont=dict(family=_CHART_FONT, size=12, color="#FFFFFF"),
+        # 墨色字不是白字。色阶中点是接近白的浅灰(#F2F3F5)，不涨不跌的板块
+        # 方块几乎是白的，白字直接消失；而涨跌大的方块底色够深，墨色字在上面
+        # 仍然读得出来。两头取其一的话，深色字的可读区间宽得多。
+        textfont=dict(family=_CHART_FONT, size=12, color=_CHART_INK),
         marker=dict(
             colors=pcts,
             # 中式红涨绿跌。这里跟"日历热力图刻意不用UP/DOWN配色"的那条注释
@@ -1174,6 +1188,9 @@ def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
             line=dict(width=2, color="#FFFFFF"),
             showscale=False,
         ),
+        # 顶上那条深灰色横带是 pathbar（树状图的"面包屑"导航）。这张图只有
+        # 一层、没有下钻，面包屑没有任何用处，却占掉一条视觉最重的横带。
+        pathbar=dict(visible=False),
         tiling=dict(pad=1),
         sort=True,
         branchvalues="total",
@@ -1183,6 +1200,10 @@ def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=0, r=0, t=0, b=0),
         height=340,
+        # 小方块上的字必须能藏起来。30个板块里成交额最小的那几个只有几十像素
+        # 宽，文字塞不下就会溢出到相邻方块上互相重叠，糊成一团——实测就是这样。
+        # mode="hide"：装不下 9px 就整块不显示文字，靠 hover 看。
+        uniformtext=dict(minsize=9, mode="hide"),
         hoverlabel=dict(
             bgcolor="#FFFFFF", bordercolor="rgba(23,24,28,0.12)",
             font=dict(family=_CHART_FONT, size=11, color=_CHART_INK),
