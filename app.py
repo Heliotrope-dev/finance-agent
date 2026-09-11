@@ -217,12 +217,23 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
 [data-testid="stMarkdownContainer"] h3 { font-size: 1.02rem; font-weight: 600; letter-spacing: -0.008em; color: var(--fa-text); margin: 24px 0 10px; }
 [data-testid="stMarkdownContainer"] p { color: var(--fa-text-2) !important; line-height: 1.68; }
 /* 项目里所有小节标题都是 st.markdown("**标题**")，也就是一个只含<strong>的
-   <p>。统一渲染成小号大写字距的"眉标"，比原来直接粗体大一号更安静，也让
-   页面的层级只靠字号/字重/间距区分，不靠线条和色块。 */
+   <p>。
+   2026-09-12改（前端审计第14条"层级太平"）：上一版把它渲染成 0.825rem 的
+   灰色大写眉标，出发点是"安静"，但实测的结果是标题和正文分不出来——审计
+   原话"板块标题（宏观议题/投研观察排行榜）是14px的灰字，和正文分不开"。
+   安静和没有层次是两回事：一页里十几个板块，如果标题不比正文重，读者就
+   只能一行行读过去，没法先扫结构再决定看哪块。
+   改成 1.1rem / 600 字重 / 正文色，并去掉 uppercase（对中文无效，对夹在
+   中间的英文反而会把"IPO"之外的普通词也拉成全大写）。字距从 +0.05em 收到
+   -0.01em：大字号配正字距会显得松垮，标题本来就该比正文紧。 */
 [data-testid="stMarkdownContainer"] p > strong:only-child {
-    display: block; font-size: 0.825rem; font-weight: 600; letter-spacing: 0.05em;
-    color: var(--fa-text-2); text-transform: uppercase; margin: 32px 0 13px;
+    display: block; font-size: 1.1rem; font-weight: 600; letter-spacing: -0.01em;
+    color: var(--fa-text); margin: 34px 0 10px;
 }
+/* 数字统一用等宽数字（前端审计第14条最后一行）。比例字体里 1 比 0 窄一大截，
+   上下两行价格的小数点对不齐，一列数字扫下来是锯齿状的。tabular-nums 只改
+   数字的字形宽度，不影响中英文排版，所以可以全局开。 */
+html, body, [data-testid="stAppViewContainer"] { font-variant-numeric: tabular-nums; }
 /* 只给正文里真正的行内链接加下划线，并明确排除各种整卡可点的<a>。
    项目里推荐股/指数/板块/持仓卡片都是拿一个<a class="*-card-link">把若干
    <div>包起来的，而HTML规范不允许<p>里出现块级元素——浏览器解析到<div>
