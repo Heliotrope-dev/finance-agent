@@ -5437,8 +5437,16 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
     # 只改显示层，读到的还是港币金额，展示前统一除以USD_HKD_RATE换算成
     # 美元再打印"$"前缀，用户在页面上看到的从头到尾都是美元，感知不到
     # 背后其实是港币记账。
+    # 2026-09-11修：不能直接用snapshot["holdings_value_hkd"]——这个SIMULATE
+    # 账户不是AI独占的沙盒，账户里躺着两笔从未经AI下单、来源不明的持仓
+    # （前端审计发现的账目bug：虚拟现金因为AI没在这两笔上花过钱，一直停在
+    # 起始本金没被扣过，这两笔的市值原样加进净值，就凭空多出一截"收益"——
+    # 现金没花出去，市值却被当成赚的算了进去）。改成只用AI自己真正下单
+    # 买过的仓位（按simulated_orders成交流水核对），账户里其他仓位单独
+    # 展示，不静默丢弃。
+    _reconciled = sim_trader.get_ledger_reconciled_holdings(email, snapshot)
     _usd_rate = sim_trader.USD_HKD_RATE
-    holdings_value = snapshot["holdings_value_hkd"]
+    holdings_value = _reconciled["ai_value_hkd"]
     virtual_cash = get_sim_virtual_cash(email)
     if virtual_cash is None:
         virtual_cash = sim_agent._VIRTUAL_BUDGET_HKD
@@ -5448,9 +5456,20 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
     with col1:
         st.metric("虚拟现金（剩余可用）", f"${virtual_cash / _usd_rate:,.0f}")
     with col2:
-        st.metric("持仓市值", f"${holdings_value / _usd_rate:,.0f}")
+        st.metric("持仓市值（仅AI自己买入的）", f"${holdings_value / _usd_rate:,.0f}")
     with col3:
         st.metric("总额（起始$10,000）", f"${net_value / _usd_rate:,.0f}")
+
+    if _reconciled["foreign_positions"]:
+        _foreign_bits = "、".join(
+            f"{p.get('name') or p.get('code')} ¥{(p.get('market_val_hkd') or 0):,.0f}"
+            for p in _reconciled["foreign_positions"]
+        )
+        st.caption(
+            f"账户里还有 {len(_reconciled['foreign_positions'])} 笔非AI下单的持仓"
+            f"（{_foreign_bits}），不计入上面的净值/收益率——这些不是AI的操作记录，"
+            f"如果是你自己在富途App里手动交易的，可以在那边平仓清掉。"
+        )
 
     # 累计收益率的基准是起始本金，不是"图表窗口里第一个快照点"。
     # 2026-09-11修：原来拿equity_points的最早一点当基准，而那个列表只覆盖

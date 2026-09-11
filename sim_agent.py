@@ -797,7 +797,21 @@ def _run_cycle_locked(email: str) -> dict:
         advice_map = tracker.get_recent_advice_map()
     except Exception:
         advice_map = {}
-    holdings_value_hkd = snapshot.get("holdings_value_hkd", 0.0)
+    # 2026-09-11修：不能直接信snapshot["holdings_value_hkd"]——这个SIMULATE
+    # 账户不是AI独占的沙盒，账户里躺着两笔从未经这个agent下单、来源不明的
+    # 持仓（前端审计发现，见sim_trader.get_ledger_reconciled_holdings的
+    # 注释），原样计入的话，AI会以为自己已经用掉这部分预算、净值/战绩也会
+    # 被这两笔不相干的浮亏/浮盈污染。按simulated_orders这张成交流水核对一遍，
+    # 只有AI自己真正下单买过的仓位才计入holdings_value_hkd。
+    _reconciled = sim_trader.get_ledger_reconciled_holdings(email, snapshot)
+    holdings_value_hkd = _reconciled["ai_value_hkd"]
+    if _reconciled["foreign_positions"]:
+        _foreign_desc = "、".join(
+            f"{p.get('name') or p.get('code')}(¥{(p.get('market_val_hkd') or 0):,.0f})"
+            for p in _reconciled["foreign_positions"]
+        )
+    else:
+        _foreign_desc = ""
     # 这次决策"开始前"的净值快照——必须在AI调用/下单之前就固定下来，不能
     # 等这次交易执行完再算。之前的bug：交易执行完之后拿"决策前的持仓市值"
     # (这时还不包含刚买的这笔)去加"结算后的现金"(已经扣了这笔买入的钱)，
@@ -1173,7 +1187,11 @@ def _run_cycle_locked(email: str) -> dict:
         json.dumps(signals, ensure_ascii=False), "完成",
         f"{len(exec_results)}条信号，其中执行成功{sum(1 for r in exec_results if r.get('status') == '成功')}条"
         + (f"，{len(dropped_signals)}条超预算被拦截" if dropped_signals else "")
-        + (f"，本轮手续费共HK${total_fee_hkd:,.2f}" if total_fee_hkd > 0 else ""),
+        + (f"，本轮手续费共HK${total_fee_hkd:,.2f}" if total_fee_hkd > 0 else "")
+        # 账户里其他来源的仓位如实带出来，不能悄悄从holdings_value_hkd里
+        # 拿掉就当没这回事——用户去富途App对账时应该能在这里查到解释，
+        # 而不是自己去猜"净值算法是不是有bug"。
+        + (f"，账户内另有非AI仓位未计入净值：{_foreign_desc}" if _foreign_desc else ""),
     )
     return {"status": "完成", "reasoning": reasoning_text, "signals": signals, "dropped": dropped_signals, "executed": exec_results}
 

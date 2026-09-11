@@ -504,3 +504,70 @@ def get_agent_snapshot() -> dict:
         "skipped_markets": skipped_markets, "holdings_value_hkd": holdings_value_hkd,
         "holdings_value_partial": holdings_value_partial,
     }
+
+
+def _code_to_symbol(code: str) -> str:
+    """跟sim_agent._symbol_from_code同一个逻辑，这里单独抄一份而不是导入——
+    sim_agent.py本身import了这个模块，反过来导回去会成环。"""
+    for prefix in ("HK.", "US.", "SH.", "SZ."):
+        if code.upper().startswith(prefix):
+            return code[len(prefix):]
+    return code
+
+
+def get_ledger_reconciled_holdings(email: str, snapshot: dict | None = None) -> dict:
+    """把get_agent_snapshot()查到的账户真实持仓，按tracker.simulated_orders
+    这张成交流水表核对一遍，拆成"AI自己下单买的"和"账户里其他来源的仓位"
+    两组——不能假设这个SIMULATE账户是AI独占的沙盒。
+
+    2026-09-11真实故障（前端审计发现）：账户里长期躺着两笔从未出现在
+    simulated_orders里的持仓（新奥能源HK.02688、滨化股份HK.06745，合计
+    市值¥15798、都是浮亏），来源不明（大概率是这套记账体系上线前的手动
+    测试遗留）。get_agent_snapshot()把账户当前市值原样当成"AI的持仓"，
+    而虚拟现金(sim_virtual_cash_hkd)因为AI从没在这两笔上下过单、一分没扣，
+    还停在起始本金78000——现金没花出去、市值却被当成收益算了进去，"倒算"
+    出了净值(78000+15798)相对起始本金78000的+20.25%，两笔实际浮亏的持仓
+    反而让账面显示"赚钱"。
+
+    这不只是显示层的问题：sim_agent.py整条决策链路（净值、战绩摘要、
+    预算余量）都是拿holdings_value_hkd这一个数字往下传的，混入的这15798
+    还会让AI以为自己已经用掉这部分预算额度，budget_remaining被平白压低。
+    所以这个函数不只服务于页面展示，sim_agent.py的运行主循环也要用它
+    的ai_value_hkd替换原来直接读snapshot的holdings_value_hkd。
+
+    判断"是不是AI买的"：按(market, 去掉市场前缀的symbol)在simulated_orders
+    里核算净买入股数(成功的买入减成功的卖出)，大于0就算AI的持仓，否则算
+    "账户里其他仓位"——不静默丢弃，返回值里原样带出来，调用方要在界面上
+    如实展示，不能让用户去富途App对账时才发现"这两笔去哪了"。
+    """
+    if snapshot is None:
+        snapshot = get_agent_snapshot()
+    positions = snapshot.get("positions") or []
+
+    try:
+        orders = tracker.get_simulated_orders(email, limit=2000)
+    except Exception:
+        orders = []
+    net_qty: dict[tuple[str, str], float] = {}
+    for o in orders:
+        if o.get("status") != "成功":
+            continue
+        key = (o.get("market"), _code_to_symbol(o.get("symbol") or ""))
+        qty = float(o.get("shares_ordered") or 0)
+        sign = 1.0 if o.get("action") == "买入" else -1.0
+        net_qty[key] = net_qty.get(key, 0.0) + sign * qty
+
+    ai_positions, foreign_positions = [], []
+    for p in positions:
+        key = (p.get("market"), _code_to_symbol(p.get("code") or ""))
+        if net_qty.get(key, 0.0) > 1e-9:
+            ai_positions.append(p)
+        else:
+            foreign_positions.append(p)
+
+    ai_value_hkd = sum(p.get("market_val_hkd") or 0.0 for p in ai_positions)
+    foreign_value_hkd = sum(p.get("market_val_hkd") or 0.0 for p in foreign_positions)
+    return {
+        "ai_value_hkd": ai_value_hkd, "foreign_value_hkd": foreign_value_hkd,
+        "ai_positions": ai_positions, "foreign_positions": foreign_positions,
+    }
