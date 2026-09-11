@@ -6259,7 +6259,7 @@ def _render_portfolio_advice(email: str, positions: list):
 
 
 @st.fragment(run_every=10)
-def _render_position_rows(position_items: list, _email: str):
+def _render_position_rows(position_items: list, _email: str, sort_mode: str = "默认"):
     """持仓列表本体单独做成 fragment，价格/涨跌幅每10秒自己刷新（2026-09-02
     从3秒调宽到10秒，理由见_render_positions_today_pnl同一处注释——批量化
     之后单次调用变1次了，但3秒刷新叠加另一个同页fragment，还是有撞富途
@@ -6428,6 +6428,33 @@ def _render_position_rows(position_items: list, _email: str):
         st.session_state["_pos_seen_once"] = True
     else:
         _rows_data = _collect_rows()
+
+    # 排序放在取数之后：涨跌幅要等行情回来才知道，AI评分要读 advice 表，
+    # 两个排序键都不在调用方手上（2026-09-12，前端审计第9条"不能排序"）。
+    # 默认顺序不动（用户自己添加自选的先后顺序本身是一种信息，不该被
+    # 无条件重排）。
+    if sort_mode and sort_mode != "默认":
+        def _chg_pct(row):
+            _wspot = row[3] or {}
+            _last, _prev = _wspot.get("最新价"), _wspot.get("昨收")
+            if not _last or not _prev:
+                return None
+            return (_last - _prev) / _prev * 100
+
+        if sort_mode == "涨幅":
+            _rows_data.sort(key=lambda r: (_chg_pct(r) is None, -(_chg_pct(r) or 0)))
+        elif sort_mode == "跌幅":
+            _rows_data.sort(key=lambda r: (_chg_pct(r) is None, _chg_pct(r) or 0))
+        elif sort_mode == "AI评分":
+            _adv_for_sort = {}
+            try:
+                _adv_for_sort = get_position_advice(_email)
+            except Exception:
+                pass
+            def _score(row):
+                _a = _adv_for_sort.get(row[2]) or {}
+                return _a.get("score")
+            _rows_data.sort(key=lambda r: (_score(r) is None, -(_score(r) or 0)))
 
     # AI持仓判断——只是本地SQLite读一次(不是每行都查、也不触发AI调用)，
     # 这个fragment本身每3秒会重跑，一起刷新代价很小。数据来自advisor.py
@@ -7550,7 +7577,32 @@ else:
                             unsafe_allow_html=True,
                         )
                 else:
-                    _render_position_rows(watch_items, _email)
+                    # 2026-09-12（前端审计第9条）：52支混在一个列表里、不能
+                    # 筛也不能排。市场筛选放在这里（只看 item 自带的 market
+                    # 字段，不需要行情数据，最便宜）；排序要用到行情和AI评分，
+                    # 塞不进这一层，作为参数交给 _render_position_rows 在取完
+                    # 数之后做。
+                    _mkt_labels = {"全部": None, "港股": "HK", "美股": "US", "A股": "A", "加密": "CC"}
+                    _present = {it.get("market", "A") for it in watch_items}
+                    _opts = ["全部"] + [k for k, v in _mkt_labels.items() if v in _present]
+                    _f_col, _s_col = st.columns([2, 1], vertical_alignment="center")
+                    with _f_col:
+                        _mkt_pick = st.radio(
+                            "市场", _opts, horizontal=True, label_visibility="collapsed",
+                            key="_watch_market_filter",
+                        )
+                    with _s_col:
+                        _sort_pick = st.selectbox(
+                            "排序", ["默认", "涨幅", "跌幅", "AI评分"],
+                            label_visibility="collapsed", key="_watch_sort_mode",
+                        )
+                    _want = _mkt_labels.get(_mkt_pick)
+                    _shown = [it for it in watch_items if _want is None or it.get("market", "A") == _want]
+                    if not _shown:
+                        st.caption("这个市场下没有自选。")
+                    else:
+                        st.caption(f"共 {len(_shown)} 支")
+                        _render_position_rows(_shown, _email, sort_mode=_sort_pick)
 
                 # 同上——挪到稳定作用域，避开run_every fragment失效的问题；
                 # shares<=0过滤只处理"自选"这边点的卖出/取消关注。
