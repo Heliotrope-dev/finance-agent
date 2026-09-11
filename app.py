@@ -4068,6 +4068,17 @@ def _render_my_page():
     _render_data_source_health()
 
 
+# AI咨询浮窗空对话时给的示例问题。挑的是"只有这个网站答得上来"的四个方向
+# （自己的持仓/某个分数怎么来的/模拟盘在干嘛/推荐准不准），不是通用金融问答，
+# 后两个正好也是审计里用户真的会问的那两个。
+_ASSISTANT_EXAMPLE_QUESTIONS = (
+    "我的持仓现在要不要动",
+    "这支股票为什么打这个分",
+    "AI模拟盘最近在买什么、为什么",
+    "推荐股排行榜到底准不准",
+)
+
+
 @st.fragment
 def _render_ai_assistant():
     """右下角"AI 咨询"悬浮按钮——不管在哪个分区都常驻显示，点开是个能聊天的
@@ -4129,7 +4140,16 @@ def _render_ai_assistant():
         # 高度跟着视口走（封顶560px），消息区自己滚，输入框固定在底部
         # 永远可见。
         "display:flex!important;flex-direction:column!important;"
-        "max-height:min(70vh,560px)!important;overflow:hidden!important;}"
+        # 2026-09-12再修（前端审计第10条）：
+        # 一、宽度写死。原来没设宽度，popover 跟着内容自适应——空对话时窄、
+        #    AI 回一段长文之后突然变宽，审计原话"发送消息后面板宽度会跳变"。
+        #    聊天面板的宽度不该由某一条回答的长短决定。
+        # 二、高度从 min(70vh,560px) 放宽到 min(78vh,620px)。上一版这个上限
+        #    叠上内部消息容器自己的固定高度，在矮窗口下把可见消息区挤到只剩
+        #    一百多像素（审计实测约130px），一条回答要在里面滚很久。
+        "width:420px!important;max-width:92vw!important;"
+        "max-height:min(78vh,620px)!important;overflow:hidden!important;}"
+        "@media (max-width:640px){[data-testid='stPopoverBody']{width:92vw!important;}}"
         # 消息区：吃掉剩余高度并单独滚动。选的是浮层里第一层竖向容器，
         # 命中不了也只是退回原来的行为，不会把布局搞坏。
         "[data-testid='stPopoverBody']>[data-testid='stVerticalBlock']{"
@@ -4181,21 +4201,28 @@ def _render_ai_assistant():
                 # 但它其实是静态文案、不进上下文。改成一段安静的说明文字，
                 # 不伪装成对话；顺便把能问什么按类别列清楚，比一句话更实用。
                 st.markdown(
-                    "<div style='padding:10px 2px;color:var(--fa-faint);font-size:0.82rem;"
+                    "<div style='padding:10px 2px 4px;color:var(--fa-faint);font-size:0.82rem;"
                     "line-height:1.9'>"
                     "我能看到你的持仓、自选、历史判断记录，以及AI模拟盘的实时状态。<br>"
-                    "可以问我：<br>"
-                    "· 我的持仓现在要不要动<br>"
-                    "· 这支股票为什么打这个分<br>"
-                    "· AI模拟盘最近在买什么、为什么<br>"
-                    "· 推荐股排行榜到底准不准"
+                    "可以直接点下面这几个，也可以自己打字："
                     "</div>",
                     unsafe_allow_html=True,
                 )
+                # 2026-09-12（前端审计第10条"四个示例问题只是文字，不能点"）：
+                # 做成真按钮，点一下直接发出去。用 session_state 传递而不是
+                # 直接调用发送逻辑——发送那段在下面、依赖 bubble_box 等局部
+                # 变量，这里提前调会把渲染顺序搞乱；存一个待发问题再
+                # rerun(scope="fragment") 只重跑这个浮窗，不惊动整页。
+                for _i, _q in enumerate(_ASSISTANT_EXAMPLE_QUESTIONS):
+                    if st.button(_q, key=f"_ai_example_q_{_i}", use_container_width=True):
+                        st.session_state["_assistant_pending_q"] = _q
+                        st.rerun(scope="fragment")
             for m in st.session_state["_assistant_messages"]:
                 st.markdown(_chat_bubble(m["role"], m["content"]), unsafe_allow_html=True)
 
-        prompt = st.chat_input("问点什么...")
+        # 示例问题按钮把问题放进 session_state，这里跟手输的问题走完全同一条
+        # 发送链路——不给它们单开一条，不然两条路径以后一定会走偏。
+        prompt = st.chat_input("问点什么...") or st.session_state.pop("_assistant_pending_q", None)
         if prompt:
             st.session_state["_assistant_messages"].append({"role": "user", "content": prompt})
             with bubble_box:
