@@ -3323,14 +3323,19 @@ def _score_breakdown_bars_html(verdict_text: str) -> str:
         if val is None or not mx:
             continue
         pct = max(0.0, min(1.0, val / mx)) * 100
+        # 刻意不用 flex + 绝对定位画这条：第一版那么写，在排行榜这个
+        # "<a> 包一堆 <div>" 的嵌套结构里 flex 没生效，标签和数值挤在一起、
+        # 中间的条整个塌成0宽（实测截图确认）。改成固定宽度的 inline-block
+        # 轨道 + linear-gradient 填充，不依赖父容器是不是 flex 容器，也没有
+        # 需要定位上下文的绝对定位，在任何外层结构里都能画出来。
         bars.append(
-            "<div style='display:flex;align-items:center;gap:8px;margin-top:3px'>"
-            f"<span style='flex:0 0 56px;font-size:0.7rem;color:var(--fa-faint)'>{_esc(label)}</span>"
-            "<span style='flex:1;height:4px;border-radius:2px;background:var(--fa-border);"
-            "position:relative;overflow:hidden'>"
-            f"<span style='position:absolute;left:0;top:0;bottom:0;width:{pct:.0f}%;"
-            "background:var(--fa-text-2);border-radius:2px'></span></span>"
-            f"<span style='flex:0 0 40px;text-align:right;font-size:0.7rem;color:var(--fa-faint);"
+            "<div style='margin-top:3px;line-height:1.5'>"
+            f"<span style='display:inline-block;width:60px;font-size:0.7rem;"
+            f"color:var(--fa-faint)'>{_esc(label)}</span>"
+            f"<span style='display:inline-block;width:120px;height:4px;border-radius:2px;"
+            f"vertical-align:middle;background:linear-gradient(to right,"
+            f"var(--fa-text-2) 0 {pct:.0f}%,var(--fa-border) {pct:.0f}% 100%)'></span>"
+            f"<span style='font-size:0.7rem;color:var(--fa-faint);margin-left:8px;"
             f"font-variant-numeric:tabular-nums'>{val}/{mx}</span></div>"
         )
     if not bars:
