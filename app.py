@@ -79,6 +79,7 @@ from assistant import build_context as build_assistant_context, stream_reply as 
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
     get_advice_accuracy, get_recent_advice_outcomes, get_advice_outcome_summary,
+    extract_score_breakdown,
     get_accuracy_trend, get_daily_accuracy, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_leaderboard, get_user_overview,
     get_latest_macro_briefs,
@@ -3296,6 +3297,47 @@ def _normalize_dimension_line(text: str) -> str:
     return text[:head_start] + "维度打分：" + line + rest
 
 
+def _score_breakdown_bars_html(verdict_text: str) -> str:
+    """把"维度打分"那一行画成六条迷你进度条。
+
+    2026-09-12新增（前端审计第14条："六个维度打分挤在一行12px的灰字里"）。
+    六个数字连成一串，要一个个读过去才知道哪一维强哪一维弱；画成条形之后，
+    长度就是比例，扫一眼就能看出这支票是靠基本面撑着还是靠技术面撑着。
+
+    分母取每条记录自己解析出来的满分，不写死——2026-09-05权重从四维
+    40/30/15/15 改成六维 22/20/20/20/8/10，写死分母的地方当时全线失效过
+    一次（见 tracker.extract_score_breakdown 里那段注释）。解析不出来的
+    维度直接不画，不用0充数：没解析到和真的0分是两回事。
+    """
+    try:
+        breakdown = extract_score_breakdown(verdict_text or "")
+    except Exception:
+        return ""
+    _labels = (
+        ("fundamental", "基本面"), ("price_position", "价格位置"), ("technical", "技术面"),
+        ("chips", "筹码面"), ("analyst", "分析师"), ("data_certainty", "数据确定性"),
+    )
+    bars = []
+    for key, label in _labels:
+        val, mx = breakdown.get(key), breakdown.get(f"{key}_max")
+        if val is None or not mx:
+            continue
+        pct = max(0.0, min(1.0, val / mx)) * 100
+        bars.append(
+            "<div style='display:flex;align-items:center;gap:8px;margin-top:3px'>"
+            f"<span style='flex:0 0 56px;font-size:0.7rem;color:var(--fa-faint)'>{_esc(label)}</span>"
+            "<span style='flex:1;height:4px;border-radius:2px;background:var(--fa-border);"
+            "position:relative;overflow:hidden'>"
+            f"<span style='position:absolute;left:0;top:0;bottom:0;width:{pct:.0f}%;"
+            "background:var(--fa-text-2);border-radius:2px'></span></span>"
+            f"<span style='flex:0 0 40px;text-align:right;font-size:0.7rem;color:var(--fa-faint);"
+            f"font-variant-numeric:tabular-nums'>{val}/{mx}</span></div>"
+        )
+    if not bars:
+        return ""
+    return "<div style='margin-top:8px'>" + "".join(bars) + "</div>"
+
+
 def _parse_advice_text(text: str) -> dict:
     """advisor.py 里 judge_stock() 的输出是固定格式的多段文本（结论/置信度/
     基本面/技术面/价格位置/理由几段），这里按段名切开，首页卡片只挑"理由"
@@ -3557,7 +3599,19 @@ def _render_advice_section():
                     f"<span style='color:var(--fa-faint);font-weight:500'>{rank}</span>&nbsp;&nbsp;{_esc(row.get('name',''))}"
                     f"<span style='font-weight:400;color:var(--fa-faint);font-size:0.78rem'> · {_market_label.get(market_key, market_key)}</span></span>"
                     f"<span style='display:flex;align-items:center;gap:9px'>"
-                    + (f"<span style='font-size:0.8rem;color:var(--fa-muted)'>{score}</span>" if score is not None else "")
+                    # 2026-09-12（前端审计第14条"综合评分81是一个很小的数字"）：
+                    # 评分是这一行里信息量最大的一个数，之前只是一串跟其它元信息
+                    # 一样大的灰字，扫一眼榜单根本注意不到。改成圆形徽章，并按
+                    # 分数深浅分档（高分深色、中段中灰、低分浅灰），不引入新的
+                    # 颜色——红绿在这套界面里只表示涨跌，不能拿来表示"分高分低"。
+                    + (
+                        f"<span style='display:inline-flex;align-items:center;justify-content:center;"
+                        f"width:34px;height:34px;border-radius:50%;font-size:0.84rem;font-weight:650;"
+                        f"font-variant-numeric:tabular-nums;"
+                        f"background:{'#17181C' if score >= 80 else ('#5B6470' if score >= 60 else '#DBDCE3')};"
+                        f"color:{'#FFFFFF' if score >= 60 else '#5B6470'}'>{score}</span>"
+                        if score is not None else ""
+                    )
                     + f"<span style='color:var(--fa-muted);border-radius:5px;padding:2px 9px;"
                     f"font-size:0.74rem;font-weight:600;letter-spacing:.02em'>研究观点：{_esc(action)}</span></span></div>"
                     f"<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:3px'>{_esc(row.get('symbol',''))} · 现价{price_text}{_esc(price_time)}"
@@ -3571,7 +3625,14 @@ def _render_advice_section():
                     # 硬性要求AI附上的，落在数据里。榜单一屏十几张卡，同一句重复
                     # 十几遍，占地方，而且重复到一定次数人眼就自动跳过了，反而不如
                     # 只说一次有效。渲染时剥掉，改成榜单末尾统一出现一次。
-                    f"<div style='margin-top:8px'>{_esc(_strip_disclaimer(parts.get('理由', '')))}</div>"
+                    # 六维打分原来只在上面那行元信息里以"基本面22/22 · 价格位置
+                    # 15/20 · ..."的形式挤成一串12px灰字，六个数字连在一起，
+                    # 哪一维强哪一维弱要一个个读过去才知道（审计第14条）。
+                    # 画成六条迷你进度条，长度即比例，一眼就能看出结构。
+                    # 分母用每条记录自己存的满分（tracker那边09-11加的*_max列），
+                    # 不写死——权重改过一次，以后还可能改。
+                    + _score_breakdown_bars_html(_vtext)
+                    + f"<div style='margin-top:8px'>{_esc(_strip_disclaimer(parts.get('理由', '')))}</div>"
                     f"</a>",
                     unsafe_allow_html=True,
                 )
