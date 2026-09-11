@@ -78,7 +78,7 @@ from analysis import (
 from assistant import build_context as build_assistant_context, stream_reply as stream_assistant_reply
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
-    get_advice_accuracy, get_recent_advice_outcomes,
+    get_advice_accuracy, get_recent_advice_outcomes, get_advice_outcome_summary,
     get_accuracy_trend, get_daily_accuracy, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_leaderboard, get_user_overview,
     get_latest_macro_briefs,
@@ -4033,15 +4033,22 @@ def _render_my_page():
         if not _outcomes:
             st.caption("还没有已回填事后价格的判断记录。")
         else:
-            _directional = [o for o in _outcomes if o["hit"] is not None]
-            if _directional:
-                _win = sum(1 for o in _directional if o["hit"])
-                _avg = sum(o["return_pct"] for o in _directional) / len(_directional)
+            # 顶部三个数字用全样本算，不是只算下面列出来的这20条：实测最近
+            # 的判断绝大多数是"持有/观望"，只看最近20条经常一条方向判断都
+            # 没有，胜率就永远显示不出来。明细看最近的，汇总看全样本。
+            try:
+                _summary = get_advice_outcome_summary()
+            except Exception:
+                _summary = {}
+            if _summary.get("directional_count"):
                 _c1, _c2, _c3 = st.columns(3)
-                _c1.metric("方向判断胜率", f"{_win / len(_directional) * 100:.0f}%",
-                           help=f"最近{len(_directional)}条买入/卖出判断；持有/观望不算方向判断")
-                _c2.metric("平均事后涨跌", f"{_avg:+.2f}%")
-                _c3.metric("已回填条数", f"{len(_outcomes)}")
+                _c1.metric(
+                    "方向判断胜率", f"{_summary['win_rate']:.0f}%",
+                    help=f"全部{_summary['directional_count']}条买入/卖出判断中说对"
+                         f"{_summary['hits']}条；持有/观望不声称方向，不计入",
+                )
+                _c2.metric("平均事后涨跌", f"{_summary['avg_return_pct']:+.2f}%")
+                _c3.metric("已回填判断", f"{_summary['total_reviewed']}")
             _rows_html = []
             for _o in _outcomes:
                 _ret = _o["return_pct"]

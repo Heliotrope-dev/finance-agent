@@ -1970,6 +1970,46 @@ def get_recent_advice_outcomes(limit: int = 20, source: str | None = None) -> li
     return out
 
 
+def get_advice_outcome_summary() -> dict:
+    """全样本的方向类判断战绩（给"AI战绩墙"的顶部三个数字用）。
+
+    2026-09-12新增。为什么不直接拿 get_recent_advice_outcomes 那20条算：
+    实测最近的判断绝大多数是"持有/观望"（已回填的1430条里观望752、持有547，
+    真正带方向的买入86+卖出45只有131条），只看最近20条很可能一条方向判断
+    都没有，顶部就永远显示不出胜率。明细列表看最近的、汇总数字看全样本，
+    两个问题分开回答。
+
+    口径跟 _advice_accuracy_from_rows 一致：只有买入/卖出算方向判断，
+    持有/观望不计入胜率——它们本来就没声称方向。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        row = c.execute(
+            "SELECT COUNT(*) AS n, "
+            "AVG((review_price - price_at_advice) / price_at_advice * 100) AS avg_ret, "
+            "SUM(CASE WHEN (action = '买入' AND review_price > price_at_advice) "
+            "          OR (action = '卖出' AND review_price <= price_at_advice) "
+            "         THEN 1 ELSE 0 END) AS hits "
+            "FROM advice WHERE review_price IS NOT NULL AND price_at_advice IS NOT NULL "
+            "AND price_at_advice > 0 AND action IN ('买入', '卖出')"
+        ).fetchone()
+        total_reviewed = c.execute(
+            "SELECT COUNT(*) FROM advice WHERE review_price IS NOT NULL "
+            "AND price_at_advice IS NOT NULL AND price_at_advice > 0"
+        ).fetchone()[0]
+
+    n = (row["n"] or 0) if row else 0
+    hits = (row["hits"] or 0) if row else 0
+    return {
+        "directional_count": n,
+        "hits": hits,
+        "win_rate": (hits / n * 100) if n else None,
+        "avg_return_pct": row["avg_ret"] if (row and row["avg_ret"] is not None) else None,
+        "total_reviewed": total_reviewed,
+    }
+
+
 def get_score_evidence_text(source: str = "watchlist") -> str:
     """把打分体系的事后回测结论整理成一段可以直接塞进prompt的实证文字。
 
