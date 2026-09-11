@@ -6136,7 +6136,22 @@ def _render_position_rows(position_items: list, _email: str):
     # 边取数据边画一行，用户反馈"一个一个蹦出来很慢"。取数据本身的耗时省不掉
     # （网络请求），但至少不会让用户看着页面一行一行往外挤，而是等一下之后
     # 整批一起出现，观感上干脆很多。
-    def _fetch_one(item, hk_us_quotes: dict):
+    def _fetch_quote(item, hk_us_quotes: dict):
+        """只取实时价，不碰迷你图的历史数据。
+
+        2026-09-12改（前端审计"自选52只要等25秒、前面只有2只有价格、其余
+        全是—"）：这个函数原来叫_fetch_one，把两件性质完全不同的事捆在
+        一次调用里——港美股的实时价其实已经在外面用
+        get_stock_realtime_futu_batch 一次性批量取回来了（实测21支0.14秒，
+        根本不是瓶颈），而迷你图的日线历史是每支单独查、并且在
+        data_sources._futu_call 那层串到单个常驻worker线程上排队的（实测
+        21支串行12.57秒，52支就是半分钟量级）。两者共用同一个4秒deadline，
+        结果就是慢的那件事把快的那件事一起拖死：deadline一到整行被丢掉，
+        连同手里明明已经拿到的价格，一起渲染成"—"。
+
+        拆成两段之后，价格这一段几乎不可能超时（数据已在内存里），迷你图
+        单独走另一个deadline，取不到就先不画、后续刷新再补，不再影响价格。
+        """
         item_market = item.get("market", "A")
         symbol = item["symbol"]
         if item_market in ("HK", "US"):
@@ -6154,8 +6169,7 @@ def _render_position_rows(position_items: list, _email: str):
                 wspot = get_stock_realtime(symbol, market=item_market)
             except Exception:
                 wspot = {}
-        closes = _fetch_sparkline_closes(symbol, item_market)
-        return (item, item_market, symbol, wspot, closes)
+        return wspot
 
     def _collect_rows():
         # 之前是for循环一只一只顺序取（实时价+迷你图两个接口都要等网络返回），
@@ -6186,15 +6200,31 @@ def _render_position_rows(position_items: list, _email: str):
         except Exception:
             hk_us_quotes = {}
 
-        results = _run_concurrent_with_deadline(
-            position_items, lambda item: _fetch_one(item, hk_us_quotes), timeout=4,
+        # 第一段：价格。港美股的值已经在上面那次批量调用里了，这一段基本是
+        # 内存取值；只有A股需要真的发请求（走BaoStock/akshare各自的全局锁）。
+        quote_results = _run_concurrent_with_deadline(
+            position_items, lambda item: _fetch_quote(item, hk_us_quotes), timeout=4,
+        )
+        # 第二段：迷你图历史。单独一个deadline，超时只是这一轮没有走势图，
+        # 不影响价格显示；缓存是按自然日存的（_sparkline_closes_cached），
+        # 所以每次刷新都会多暖热几支，几轮之后全部补齐，属于渐进加载而不是
+        # "整页卡在那里等"。给6秒而不是4秒：它已经不阻塞价格了，可以多等一会
+        # 一次多补几支，减少补齐所需的刷新轮数。
+        spark_results = _run_concurrent_with_deadline(
+            position_items,
+            lambda item: _fetch_sparkline_closes(item["symbol"], item.get("market", "A")),
+            timeout=6,
         )
         rows = []
         for i, item in enumerate(position_items):
-            if i in results:
-                rows.append(results[i])
-            else:
-                rows.append((item, item.get("market", "A"), item["symbol"], {}, []))
+            item_market = item.get("market", "A")
+            symbol = item["symbol"]
+            wspot = quote_results.get(i)
+            if wspot is None:
+                # 并发那一轮没赶上，但批量结果里可能本来就有，直接兜底取用，
+                # 不要因为调度没排上就把已经到手的价格丢掉渲染成"—"。
+                wspot = hk_us_quotes.get((symbol, item_market)) or {}
+            rows.append((item, item_market, symbol, wspot, spark_results.get(i) or []))
         return rows
 
     # 这个fragment每3秒自动刷新一次——只有真正第一次加载（session里还没有
