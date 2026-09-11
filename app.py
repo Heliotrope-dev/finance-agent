@@ -3605,11 +3605,13 @@ def _render_advice_section():
             with st.container(key=f"lb_row_{market_key}_{row.get('symbol','')}"):
                 st.markdown(
                     f"<a class='pos-card-link' href='{href}' target='_self'>"
-                    f"<div style='display:flex;justify-content:space-between;align-items:center'>"
-                    f"<span style='font-weight:600;letter-spacing:-.01em'>"
-                    f"<span style='color:var(--fa-faint);font-weight:500'>{rank}</span>&nbsp;&nbsp;{_esc(row.get('name',''))}"
-                    f"<span style='font-weight:400;color:var(--fa-faint);font-size:0.78rem'> · {_market_label.get(market_key, market_key)}</span></span>"
-                    f"<span style='display:flex;align-items:center;gap:9px'>"
+                    # 用 float 而不是 flex 做"左名称/右分数"这一行：flex 在这个
+                    # <a> 包 <div> 的嵌套结构里不生效（迷你条形图那次已经实测
+                    # 过一遍，右侧那组会掉到第二行、左对齐，右边空一大片，
+                    # 整行重心全歪）。float 不依赖父容器是不是 flex 容器。
+                    # 右侧那组写在源码里更靠前，是 float 的标准写法。
+                    f"<div style='overflow:hidden'>"
+                    f"<span style='float:right;white-space:nowrap'>"
                     # 2026-09-12（前端审计第14条"综合评分81是一个很小的数字"）：
                     # 评分是这一行里信息量最大的一个数，原来只是一串跟其它元信息
                     # 一样大的灰字，扫一眼榜单根本注意不到。
@@ -3627,8 +3629,11 @@ def _render_advice_section():
                         f"color:{'var(--fa-text)' if score >= 60 else 'var(--fa-muted)'}'>{score}</span>"
                         if score is not None else ""
                     )
-                    + f"<span style='color:var(--fa-muted);border-radius:5px;padding:2px 9px;"
-                    f"font-size:0.74rem;font-weight:600;letter-spacing:.02em'>研究观点：{_esc(action)}</span></span></div>"
+                    + f"<span style='color:var(--fa-muted);margin-left:10px;"
+                    f"font-size:0.74rem;font-weight:600;letter-spacing:.02em'>研究观点：{_esc(action)}</span></span>"
+                    f"<span style='font-weight:600;letter-spacing:-.01em'>"
+                    f"<span style='color:var(--fa-faint);font-weight:500'>{rank}</span>&nbsp;&nbsp;{_esc(row.get('name',''))}"
+                    f"<span style='font-weight:400;color:var(--fa-faint);font-size:0.78rem'> · {_market_label.get(market_key, market_key)}</span></span></div>"
                     f"<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:3px'>{_esc(row.get('symbol',''))} · 现价{price_text}{_esc(price_time)}"
                     f" · 置信度{_esc(parts.get('置信度','—'))}"
                     # 目标价和投资期限是研报格式里最该被一眼看到的两项——"买入"
@@ -3640,13 +3645,11 @@ def _render_advice_section():
                     # 硬性要求AI附上的，落在数据里。榜单一屏十几张卡，同一句重复
                     # 十几遍，占地方，而且重复到一定次数人眼就自动跳过了，反而不如
                     # 只说一次有效。渲染时剥掉，改成榜单末尾统一出现一次。
-                    # 六维打分原来只在上面那行元信息里以"基本面22/22 · 价格位置
-                    # 15/20 · ..."的形式挤成一串12px灰字，六个数字连在一起，
-                    # 哪一维强哪一维弱要一个个读过去才知道（审计第14条）。
-                    # 画成六条迷你进度条，长度即比例，一眼就能看出结构。
-                    # 分母用每条记录自己存的满分（tracker那边09-11加的*_max列），
-                    # 不写死——权重改过一次，以后还可能改。
-                    + _score_breakdown_bars_html(_vtext)
+                    # 六维拆解不画在卡片正面：2026-09-12实机看下来，六条各占
+                    # 一行、一张卡就被撑高一半，把真正该读的"理由"挤到了屏幕
+                    # 外面——一屏五张卡要滚很久，跟"简约清爽"背道而驰。卡片
+                    # 正面只留结论链路（名称/分数/观点/一行元信息/理由），
+                    # 拆解收进下面已有的那个展开区，想看的人点一下就有。
                     + f"<div style='margin-top:8px'>{_esc(_strip_disclaimer(parts.get('理由', '')))}</div>"
                     f"</a>",
                     unsafe_allow_html=True,
@@ -3657,8 +3660,15 @@ def _render_advice_section():
                     "多头逻辑", "空头逻辑", "基本面", "技术面", "价格位置",
                     "关键假设与催化剂", "证伪条件",
                 ]
-                if any(parts.get(sec) for sec in _detail_secs):
-                    with st.expander("多空逻辑 / 基本面 / 催化剂与证伪"):
+                _bars_html = _score_breakdown_bars_html(_vtext)
+                if _bars_html or any(parts.get(sec) for sec in _detail_secs):
+                    with st.expander("维度打分 / 多空逻辑 / 催化剂与证伪"):
+                        if _bars_html:
+                            st.markdown(
+                                "<div style='font-size:0.74rem;color:var(--fa-faint);"
+                                "margin-bottom:2px'>维度打分</div>" + _bars_html,
+                                unsafe_allow_html=True,
+                            )
                         for sec in _detail_secs:
                             if parts.get(sec):
                                 st.markdown(_labeled_line(sec, parts[sec]), unsafe_allow_html=True)
