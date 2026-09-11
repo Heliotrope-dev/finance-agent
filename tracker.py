@@ -1926,6 +1926,50 @@ def get_position_advice(email: str) -> dict:
         return {r["symbol"]: dict(r) for r in rows}
 
 
+def get_recent_advice_outcomes(limit: int = 20, source: str | None = None) -> list[dict]:
+    """最近N条"已经能对照事后价格"的AI判断，给"AI战绩墙"用。
+
+    2026-09-12新增（升级路线图第1条）。这套系统一直在记"当时判断是什么、
+    当时价格多少"，也一直在回填"N天后价格多少"，但这两头从来没有在页面上
+    并排摆出来过——用户能看到一个汇总的"方向一致率XX%"，看不到任何一条
+    具体的"这支当时说买入，后来涨了还是跌了"。汇总数字很容易被当成宣传，
+    逐条明细（包括亏的那些）才是可核对的。
+
+    只返回真的已经回填过价格的记录，不做任何预测或补值；亏损的一条不藏。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        sql = (
+            "SELECT symbol, name, market, source, action, score, price_at_advice, "
+            "review_price, created_at, review_at FROM advice "
+            "WHERE review_price IS NOT NULL AND price_at_advice IS NOT NULL "
+            "AND price_at_advice > 0"
+        )
+        params: list = []
+        if source:
+            sql += " AND source = ?"
+            params.append(source)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = [dict(r) for r in c.execute(sql, params).fetchall()]
+
+    out = []
+    for r in rows:
+        ret_pct = (r["review_price"] - r["price_at_advice"]) / r["price_at_advice"] * 100
+        # "说对了没有"只对买入/卖出这种带方向的结论成立；持有/观望不是方向
+        # 判断，不给对错，跟 _advice_accuracy_from_rows 的口径保持一致。
+        hit = None
+        if r["action"] == "买入":
+            hit = ret_pct > 0
+        elif r["action"] == "卖出":
+            hit = ret_pct <= 0
+        r["return_pct"] = ret_pct
+        r["hit"] = hit
+        out.append(r)
+    return out
+
+
 def get_score_evidence_text(source: str = "watchlist") -> str:
     """把打分体系的事后回测结论整理成一段可以直接塞进prompt的实证文字。
 

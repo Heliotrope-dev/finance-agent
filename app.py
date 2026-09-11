@@ -78,7 +78,7 @@ from analysis import (
 from assistant import build_context as build_assistant_context, stream_reply as stream_assistant_reply
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
-    get_advice_accuracy,
+    get_advice_accuracy, get_recent_advice_outcomes,
     get_accuracy_trend, get_daily_accuracy, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_leaderboard, get_user_overview,
     get_latest_macro_briefs,
@@ -4018,6 +4018,57 @@ def _render_my_page():
             )
         else:
             st.caption("还没有满足回看窗口的自动判断记录（advisor.py每天17:30生成，watchlist口径需满6.9天才回填）。")
+
+        # ── AI 战绩墙 ───────────────────────────────────────────────────
+        # 2026-09-12新增（升级路线图第1条，两份文档都把它列为最重要的一项）。
+        # 上面那两块给的是汇总数字，汇总很容易被当成宣传；这里逐条摆出
+        # "当时判断/当时价格/事后价格/涨跌"，亏的那几条一样列出来。数据全
+        # 来自已经回填过事后价格的真实记录，不预测、不补值。
+        st.divider()
+        st.markdown("**AI 战绩墙**")
+        try:
+            _outcomes = get_recent_advice_outcomes(limit=20)
+        except Exception:
+            _outcomes = []
+        if not _outcomes:
+            st.caption("还没有已回填事后价格的判断记录。")
+        else:
+            _directional = [o for o in _outcomes if o["hit"] is not None]
+            if _directional:
+                _win = sum(1 for o in _directional if o["hit"])
+                _avg = sum(o["return_pct"] for o in _directional) / len(_directional)
+                _c1, _c2, _c3 = st.columns(3)
+                _c1.metric("方向判断胜率", f"{_win / len(_directional) * 100:.0f}%",
+                           help=f"最近{len(_directional)}条买入/卖出判断；持有/观望不算方向判断")
+                _c2.metric("平均事后涨跌", f"{_avg:+.2f}%")
+                _c3.metric("已回填条数", f"{len(_outcomes)}")
+            _rows_html = []
+            for _o in _outcomes:
+                _ret = _o["return_pct"]
+                _ret_color = UP_COLOR if _ret > 0 else (DOWN_COLOR if _ret < 0 else "var(--fa-muted)")
+                if _o["hit"] is True:
+                    _mark, _mark_color = "说对", OK_COLOR
+                elif _o["hit"] is False:
+                    _mark, _mark_color = "说错", BAD_COLOR
+                else:
+                    _mark, _mark_color = "无方向", "var(--fa-faint)"
+                _rows_html.append(
+                    "<div style='display:flex;align-items:center;gap:10px;padding:7px 2px;"
+                    "border-bottom:1px solid var(--fa-border);font-size:0.8rem'>"
+                    f"<span style='color:var(--fa-faint);min-width:42px'>{_esc((_o.get('created_at') or '')[5:10])}</span>"
+                    f"<span style='flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;"
+                    f"white-space:nowrap'>{_esc(_clean_name(_o.get('name') or _o.get('symbol')))}</span>"
+                    f"<span style='min-width:34px;color:var(--fa-text-2)'>{_esc(_o.get('action') or '')}</span>"
+                    f"<span style='min-width:30px;color:var(--fa-faint)'>{_o.get('score') if _o.get('score') is not None else '—'}</span>"
+                    f"<span style='min-width:62px;text-align:right;color:{_ret_color};font-weight:600'>{_ret:+.2f}%</span>"
+                    f"<span style='min-width:44px;text-align:right;color:{_mark_color};font-size:0.74rem'>{_mark}</span>"
+                    "</div>"
+                )
+            st.markdown("".join(_rows_html), unsafe_allow_html=True)
+            st.caption(
+                "「说对/说错」只对买入、卖出这类带方向的结论成立，持有/观望不计入胜率。"
+                "事后价格是系统按固定回看窗口自动补录的，不是挑出来的时点。"
+            )
 
         # ── 风险偏好 ────────────────────────────────────────────────────
         # 放在"我的"而不是"持仓"：清单里那句"低于风险档案下限2:1"是全站性的
