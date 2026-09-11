@@ -1,11 +1,18 @@
 # -*- coding: utf-8 -*-
-"""盘前Top3推荐——09:00港股/21:00美股的编排入口，全部北京时间。
+"""自选股逐支评分简报——09:00港股/21:00美股的编排入口，全部北京时间。
 
-2026-09-08新增。流程：交易日守卫 -> advisor.judge_market_watchlist(市场50支
-候选池打分) -> daily_plan.build_market_plan(生成Top3) -> render_market_text
-(推送文案) -> 落盘market快照。全部资料链路复用advisor._judge_one()现成的
-完整数据收集（财务+季度趋势+估值+技术面+新闻+价格位置+分析师一致预期+
-筹码面+公司行为+市场环境），不简化、不裁剪——这一步是整个系统的地基。
+2026-09-08新增，2026-09-11改版。流程：交易日守卫 -> advisor.judge_market_
+watchlist(该市场自选逐支打分) -> render_watchlist_report(每支都出：评分+
+方向+一句话理由) -> render_market_text -> 落盘market快照。全部资料链路复用
+advisor._judge_one()现成的完整数据收集（财务+季度趋势+估值+技术面+新闻+
+价格位置+分析师一致预期+筹码面+公司行为+市场环境），不简化、不裁剪。
+
+2026-09-11改版原因：老版本候选池是"自选+热门榜凑到50支"，还要求盈亏比
+≥3:1才能进Top3——用户反馈两个问题都是真的：(1)天天在扫一堆自己根本不
+关心的热门股，白费token；(2)盈亏比闸门太严，连续好几天Top3是空的，报告
+变成"无"，等于没有产出。现在改成：候选池就是自选本身（不再补热门股），
+每一支都出评分+方向+理由，不再用盈亏比卡掉大多数——盈亏比信息还在，作为
+每支的参考数据点，不再是能不能出现在报告里的门槛。
 
 默认只把正文打印到 stdout，方便人工排查；加 ``--deliver`` 后，由项目内
 已验证回执的微信桥直接投递。不要经由 OpenClaw agentTurn 转发：这份扫描
@@ -19,9 +26,13 @@ import sys
 from pathlib import Path
 
 import advisor
-import daily_plan
 
 _TRADING_CAL = Path("/root/.openclaw/workspace/scripts/trading_cal.py")
+
+# 结论排序：买入排最前面，其次持有，然后观望，卖出排最后——用户翻简报
+# 时最想先看到的是"现在能不能买"，其次是"已经在拿的还要不要留"，"不用管"
+# 的排后面，跟“操作紧迫度”对齐，不是随便挑的顺序。
+_ACTION_ORDER = {"买入": 0, "持有": 1, "观望": 2, "卖出": 3}
 
 
 def _is_trading_day(market: str) -> bool:
@@ -36,6 +47,40 @@ def _is_trading_day(market: str) -> bool:
         return True
 
 
+def render_watchlist_report(market: str, judged: list[dict]) -> str:
+    """每支自选都出一行：名称(代码) 方向 评分分 | 一句话理由。按"结论紧迫度
+    优先、同结论内按分数降序"排序——跟老版本"只挑几支"的Top3思路不同，这里
+    是"全员点名"，用户自己的自选股不该有谁被悄悄漏掉不提。"""
+    market_label = {"HK": "港股", "US": "美股"}.get(market, market)
+    rows = []
+    for e in judged:
+        text = e.get("fundamental_verdict", "") or ""
+        reason = advisor._extract_short_reason(text) or "（未能解析出理由，见完整判断记录）"
+        rows.append({
+            "symbol": e.get("symbol", ""),
+            "name": e.get("name") or e.get("symbol", ""),
+            "action": e.get("action", "观望"),
+            "score": e.get("score"),
+            "price": e.get("price"),
+            "reason": reason,
+        })
+    rows.sort(key=lambda r: (_ACTION_ORDER.get(r["action"], 9), -(r["score"] or 0)))
+
+    lines = [f"【{market_label}自选评分】{len(rows)}支，逐支给方向和理由，不是下单指令："]
+    for r in rows:
+        score_text = f"{r['score']}分" if r["score"] is not None else "分数未知"
+        price_text = f"{r['price']:.2f}" if isinstance(r["price"], (int, float)) else "—"
+        lines.append(
+            f"\n{r['name']}({r['symbol']}) 现价{price_text} · {r['action']} · {score_text}\n"
+            f"  {r['reason']}"
+        )
+    lines.append(
+        "\n仅供参考，不构成投资建议——过往判断的方向一致率参见「我的」页"
+        "AI判断准确率，目前还在被验证阶段，不是确定性预测。"
+    )
+    return "\n".join(lines)
+
+
 def run_premarket(market: str, *, deliver: bool = False) -> int:
     if not _is_trading_day(market):
         print("NO_REPLY")
@@ -44,22 +89,25 @@ def run_premarket(market: str, *, deliver: bool = False) -> int:
     advisor._load_secrets_into_env()
     judged = advisor.judge_market_watchlist(market)
     if not judged:
-        text = f"{market}候选池今天没有判断出任何有效结果（可能是数据源或AI供应商全挂了），不生成推荐。"
+        text = f"{market}自选今天没有判断出任何有效结果（可能是自选为空、数据源或AI供应商全挂了），不生成推荐。"
         print(text)
         if deliver:
             import wechat_delivery
             wechat_delivery.send_text(text)
         return 1
 
-    plan = daily_plan.build_market_plan(market)
-    text = daily_plan.render_market_text(plan)
+    text = render_watchlist_report(market, judged)
     print(text)
 
     import json
     out = Path(__file__).resolve().parent / "data" / f"daily_plan_{market.lower()}.json"
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(plan, ensure_ascii=False, indent=1), encoding="utf-8")
+        out.write_text(
+            json.dumps({"市场": market, "候选池规模": len(judged), "结果": judged},
+                       ensure_ascii=False, indent=1, default=str),
+            encoding="utf-8",
+        )
     except Exception as e:
         print(f"[market_recommendation/{market}] 落盘失败: {e}")
     if deliver:
