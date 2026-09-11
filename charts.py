@@ -1101,6 +1101,28 @@ def build_fed_rate_path_chart(series: dict) -> go.Figure:
     return fig
 
 
+# 热力图专用的低饱和色阶。不直接用 UP_COLOR/DOWN_COLOR（#D0342C / #12855F）：
+# 那两个是给数字用的——一行几十像素的小字，饱和度高才看得清。热力图是大色块，
+# 整屏铺满同样的饱和度，会把这一页从"黑白灰为主、克制用色"变成一张花图，
+# 用户原话："我们的项目的风格是简约清爽高级有颜色以黑白灰为主这个你要协调一下"。
+#
+# 做法是保留红涨绿跌的色相（这是这张图唯一的信息通道，不能丢），把饱和度压到
+# 灰调区间、亮度提上去，让色块更接近"带一点颜色的灰"。中点用页面底色附近的
+# 浅灰，不涨不跌的板块于是几乎融进背景——这正是想要的：注意力只落在两头。
+_HEAT_DOWN_STRONG = "#6F9788"   # 跌：灰调墨绿
+_HEAT_DOWN_SOFT = "#BCCFC8"
+_HEAT_NEUTRAL = "#F1F2F3"       # 0%：接近页面底色的浅灰
+_HEAT_UP_SOFT = "#E3C4C0"
+_HEAT_UP_STRONG = "#B77B73"     # 涨：灰调砖红
+_HEAT_COLORSCALE = [
+    [0.0, _HEAT_DOWN_STRONG],
+    [0.25, _HEAT_DOWN_SOFT],
+    [0.5, _HEAT_NEUTRAL],
+    [0.75, _HEAT_UP_SOFT],
+    [1.0, _HEAT_UP_STRONG],
+]
+
+
 def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
     """板块热力图：面积=成交额，颜色=涨跌幅。
 
@@ -1180,10 +1202,10 @@ def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
         textfont=dict(family=_CHART_FONT, size=12, color=_CHART_INK),
         marker=dict(
             colors=pcts,
-            # 中式红涨绿跌。这里跟"日历热力图刻意不用UP/DOWN配色"的那条注释
-            # 不冲突：那张图讲的是新股破发率，不是价格；这张图的颜色含义就是
-            # 涨跌本身，用全站的涨跌色才是对的。
-            colorscale=[[0.0, DOWN_COLOR], [0.5, "#F2F3F5"], [1.0, UP_COLOR]],
+            # 中式红涨绿跌，但走上面那套低饱和色阶。这里跟"日历热力图刻意不用
+            # UP/DOWN配色"的那条注释不冲突：那张图讲的是新股破发率、不是价格；
+            # 这张图的颜色含义就是涨跌本身，色相该跟全站一致，只是饱和度要压。
+            colorscale=_HEAT_COLORSCALE,
             cmid=0.0, cmin=-lim, cmax=lim,
             line=dict(width=2, color="#FFFFFF"),
             showscale=False,
