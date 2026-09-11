@@ -161,6 +161,18 @@ def init_db():
         if "score_analyst" not in _advice_cols:
             c.execute("ALTER TABLE advice ADD COLUMN score_analyst INTEGER")
 
+        # 老库升级：2026-09-11——六个维度各自的满分（"基本面X/40"里的分母）
+        # 也存成独立列。权重08-20上线是四维40/30/15/15，09-05改成六维
+        # 22/20/20/20/8/10，两次权重下同一维度的满分不一样，之前只存了分子
+        # （比如"32"），跨权重版本比较高低时把32(40分制)和20(22分制)当成
+        # 同一把尺子比，明显更强的新权重记录反而会被排成"分数更低"。见
+        # get_dimension_predictive_value里改成比例(分子/分母)比较之后的注释。
+        for _dim in ("fundamental", "price_position", "technical",
+                     "chips", "analyst", "data_certainty"):
+            _col = f"score_{_dim}_max"
+            if _col not in _advice_cols:
+                c.execute(f"ALTER TABLE advice ADD COLUMN {_col} INTEGER")
+
         # positions：取代 watchlist 表的"持仓分析"数据模型。shares=0 表示"只
         # 关注不持仓"（详情页"关注"按钮走这个状态）。
         # cost_total存累计成本(原币种)而不是均价——用户输入的是"股数+金额"，
@@ -1293,7 +1305,9 @@ def extract_score_breakdown(text: str) -> dict:
     "解析不出来不代表0分"的原则一致。
     """
     result = {"fundamental": None, "price_position": None, "technical": None,
-              "chips": None, "analyst": None, "data_certainty": None}
+              "chips": None, "analyst": None, "data_certainty": None,
+              "fundamental_max": None, "price_position_max": None, "technical_max": None,
+              "chips_max": None, "analyst_max": None, "data_certainty_max": None}
     # 窗口不能限制在"维度打分"那一行以内。2026-09-06真实故障：这里原本是
     # re.search(r"维度打分[：:]([^\n]+)")，要求六个分数跟"维度打分："在同一行。
     # 模型实际输出有三种写法，只有第一种能被解析到：
@@ -1328,18 +1342,29 @@ def extract_score_breakdown(text: str) -> dict:
     # 把分母参数化掉，以后再调权重这里就不会跟着失效。分母本身对解析没有
     # 意义（我们要的是分子），当初写死纯粹是为了让正则更"精确"，结果精确
     # 变成了脆弱。
+    # 分母现在也捕获下来存成 *_max（2026-09-11新增，Sonnet 5复核时发现的
+    # 缺口）：09-05权重从四维40/30/15/15改成六维22/20/20/20/8/10之后，
+    # get_dimension_predictive_value 一直是拿"基本面32/40"（旧权重）跟
+    # "基本面20/22"（新权重）的原始分子32、20直接排序比高低——32>20，
+    # 但32/40只是80%，20/22其实是91%，新权重下明显更强的基本面反而被
+    # 排进了"低分组"。分母本来就写在原文里，此前只是没存下来，不需要另建
+    # 一张"哪次权重改动生效于哪个日期"的映射表去反推——那种映射表本身还要
+    # 应对未来权重再次调整时忘记更新的风险，不如直接从每条记录自己的原文
+    # 里把分母也存下来，永远知道"这条记录当时满分是多少"，比对时用比例
+    # （分子/分母）而不是原始分子，天然不受权重怎么改的影响。
     patterns = {
-        "fundamental": r"基本面\s*(\d+)\s*/\s*\d+",
-        "price_position": r"价格位置\s*(\d+)\s*/\s*\d+",
-        "technical": r"技术面\s*(\d+)\s*/\s*\d+",
-        "chips": r"筹码面\s*(\d+)\s*/\s*\d+",
-        "analyst": r"分析师预期\s*(\d+)\s*/\s*\d+",
-        "data_certainty": r"数据确定性\s*(\d+)\s*/\s*\d+",
+        "fundamental": r"基本面\s*(\d+)\s*/\s*(\d+)",
+        "price_position": r"价格位置\s*(\d+)\s*/\s*(\d+)",
+        "technical": r"技术面\s*(\d+)\s*/\s*(\d+)",
+        "chips": r"筹码面\s*(\d+)\s*/\s*(\d+)",
+        "analyst": r"分析师预期\s*(\d+)\s*/\s*(\d+)",
+        "data_certainty": r"数据确定性\s*(\d+)\s*/\s*(\d+)",
     }
     for key, pat in patterns.items():
         pm = re.search(pat, line)
         if pm:
             result[key] = int(pm.group(1))
+            result[f"{key}_max"] = int(pm.group(2))
     return result
 
 
@@ -1355,13 +1380,18 @@ def log_advice(
             "INSERT INTO advice (email, symbol, market, name, created_at, price_at_advice, "
             "fundamental_verdict, technical_signal, action, source, score, "
             "score_fundamental, score_price_position, score_technical, score_data_certainty, "
-            "score_chips, score_analyst) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "score_chips, score_analyst, "
+            "score_fundamental_max, score_price_position_max, score_technical_max, "
+            "score_data_certainty_max, score_chips_max, score_analyst_max) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (email, symbol, market, name, datetime.now(timezone.utc).isoformat(), price_at_advice,
              fundamental_verdict, technical_signal, action, source, score,
              breakdown["fundamental"], breakdown["price_position"],
              breakdown["technical"], breakdown["data_certainty"],
-             breakdown["chips"], breakdown["analyst"]),
+             breakdown["chips"], breakdown["analyst"],
+             breakdown["fundamental_max"], breakdown["price_position_max"],
+             breakdown["technical_max"], breakdown["data_certainty_max"],
+             breakdown["chips_max"], breakdown["analyst_max"]),
         )
         c.commit()
         return cur.lastrowid
@@ -1428,6 +1458,18 @@ def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict
     市场混在同一批分数区间里回测，A股这类跟基本面无关的噪音会污染"这套
     打分体系到底有没有预测力"这个问题的检验结果。总体的bands还保留（有
     些场景就是想看整体），但同时也按市场各自独立算一遍，方便对照。
+
+    2026-09-11新增"按打分口径"拆分（多一个"按打分口径"键），跟"按市场"
+    是同一类问题、同一个解法：综合得分虽然08-20的四维40/30/15/15和09-05
+    的六维22/20/20/20/8/10都总分100（数值范围本身没变，能落进同一批
+    0-100分档），但两套权重下"75分"的构成含义完全不同——旧权重下能拿到
+    75分主要靠基本面和价格位置扎实，新权重下同样75分可能是技术面和筹码
+    面在扛。混在一起统计虽然不会造成前面维度分那种"分子分母对不上"的硬
+    错误，但会让"这套打分有没有预测力"这个问题的答案掺进两种不可比的
+    构成，观感上是同一件事的两个不同版本被强行拼在一起。这里不需要额外
+    维护"哪次改动哪天生效"的日期表——签名直接从每条记录自带的六个*_max
+    列拼出来，权重以后再怎么调整都能自动区分成新的一组，不用记得回来
+    改这个函数。
     """
     def _compute_bands(rows: list[dict]) -> list[dict]:
         bands = []
@@ -1449,7 +1491,10 @@ def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
         rows = c.execute(
-            "SELECT score, market, price_at_advice, review_price FROM advice WHERE source = ? "
+            "SELECT score, market, price_at_advice, review_price, "
+            "score_fundamental_max, score_price_position_max, score_technical_max, "
+            "score_chips_max, score_analyst_max, score_data_certainty_max "
+            "FROM advice WHERE source = ? "
             "AND score IS NOT NULL AND review_price IS NOT NULL "
             "AND price_at_advice IS NOT NULL AND price_at_advice > 0",
             (source,),
@@ -1461,10 +1506,32 @@ def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict
         for m in sorted(set(r.get("market", "A") for r in rows))
         for mrows in [[r for r in rows if r.get("market", "A") == m]]
     }
+    by_scheme = {
+        sig: {"total_reviewed": len(srows), "bands": _compute_bands(srows)}
+        for sig in sorted(set(_weight_scheme_label(r) for r in rows))
+        for srows in [[r for r in rows if _weight_scheme_label(r) == sig]]
+    }
     return {
         "total_reviewed": len(rows), "min_sample": min_sample,
-        "bands": _compute_bands(rows), "按市场": by_market,
+        "bands": _compute_bands(rows), "按市场": by_market, "按打分口径": by_scheme,
     }
+
+
+def _weight_scheme_label(row: dict) -> str:
+    """把一条advice记录的六个维度满分拼成一个可比较、自解释的标签，用来
+    在回测里区分"这条记录是哪一版权重打出来的"——不用维护单独的版本号/
+    生效日期映射表，签名直接从数据自己带的*_max列算出来，权重以后再调整
+    也不用回来改这个函数。缺满分数据的老记录（这次改动之前写入、还没跑
+    backfill_dimensions的）统一归到"未知口径"，不瞎猜。
+    """
+    maxes = (row.get("score_fundamental_max"), row.get("score_price_position_max"),
+             row.get("score_technical_max"), row.get("score_chips_max"),
+             row.get("score_analyst_max"), row.get("score_data_certainty_max"))
+    if all(m is None for m in maxes):
+        return "未知口径"
+    return "基本面{}·价格位置{}·技术面{}·筹码面{}·分析师{}·数据确定性{}".format(
+        *(m if m is not None else "-" for m in maxes)
+    )
 
 
 _DIMENSION_COLUMNS = {
@@ -1490,12 +1557,24 @@ def get_dimension_predictive_value(source: str = "watchlist", min_sample: int = 
     更不容易被过度解读，跟这个项目一贯"宁可少给结论也不编"的原则一致。
     单个维度里某次判断没解析出这个维度的分数（extract_score_breakdown
     返回None的情况）就不计入这个维度的统计，不当0分处理。
+
+    2026-09-11修正（Sonnet 5复核发现）：排序/分组必须用比例（分子/该条
+    记录自己的分母），不能用原始分子。09-05权重从四维40/30/15/15改成
+    六维22/20/20/20/8/10之后，"基本面"这一维满分从40变成22——一条09-05前
+    "基本面32/40"(80%)的记录，原始数字32会大于一条09-05后"基本面20/22"
+    (91%)的记录的20，直接按原始分子排序会把后者错判成"基本面更弱"排进
+    低分组，跟事实相反。改成percentile（比值），权重不管怎么调整，
+    同一维度不同时期的记录都能公平比较，不需要另外维护一张"哪次改动在
+    哪天生效、当时权重是多少"的映射表——分母本来就在原文里、已经存进
+    *_max列了，直接用记录自带的分母算比例即可。
     """
     init_db()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
+        max_cols = [f"{col}_max" for col in _DIMENSION_COLUMNS.values()]
         rows = c.execute(
-            f"SELECT {', '.join(_DIMENSION_COLUMNS.values())}, price_at_advice, review_price "
+            f"SELECT {', '.join(_DIMENSION_COLUMNS.values())}, {', '.join(max_cols)}, "
+            "price_at_advice, review_price "
             "FROM advice WHERE source = ? AND review_price IS NOT NULL "
             "AND price_at_advice IS NOT NULL AND price_at_advice > 0",
             (source,),
@@ -1504,12 +1583,16 @@ def get_dimension_predictive_value(source: str = "watchlist", min_sample: int = 
 
     result = {}
     for label, col in _DIMENSION_COLUMNS.items():
-        valid = [r for r in rows if r.get(col) is not None]
+        max_col = f"{col}_max"
+        # 缺分母的旧数据（这次改动之前写入、还没跑过backfill_dimensions的
+        # 记录）连同缺分子的一起排除——比例算不出来就不该硬凑，跟"解析不到
+        # 不当0分"是同一个原则。
+        valid = [r for r in rows if r.get(col) is not None and r.get(max_col)]
         n = len(valid)
         if n < min_sample:
             result[label] = {"count": n, "min_sample": min_sample, "note": "样本不够，暂不计算"}
             continue
-        valid.sort(key=lambda r: r[col])
+        valid.sort(key=lambda r: r[col] / r[max_col])
         mid = n // 2
         low_group, high_group = valid[:mid], valid[mid:]
 
@@ -1873,6 +1956,17 @@ def get_score_evidence_text(source: str = "watchlist") -> str:
     "这套打分到底有没有用"失去干净的对照。这里只把事实和它的边界如实交给AI。
 
     样本不足时返回空字符串——没有证据就不要编一段"经验"出来误导它。
+
+    2026-09-11修正：上面这段分析写于09-04，当时权重还是四维40/30/15/15，
+    "基本面40分+价格位置30分占七成"这句话是那批数据的真实写照。但09-05
+    晚上权重改成六维22/20/20/20/8/10之后，这句话就应该跟着变成"22+20=42%"
+    ——问题是这段docstring是写死的文字，不会跟着权重改动自动更新，而这个
+    函数的返回值是直接喂给AI当"客观统计"用的（assistant.py/sim_agent.py），
+    一旦权重再调一次、没人记得回来改这几行字，AI就会拿着一句关于"当年那套
+    权重"的过时描述去解释"现在这套评分"，这正是这次复核要修的"数据要是
+    最新的"那个坑。修法：不再把权重占比写死在返回的字符串里，改成下面从
+    `_weight_scheme_label`/*_max列现查最新一条记录的真实权重，动态拼出这句
+    话——权重以后再怎么改，这里都不用回来改代码。
     """
     try:
         bt = get_score_band_backtest(source=source, min_sample=5)
@@ -1931,6 +2025,54 @@ def get_score_evidence_text(source: str = "watchlist") -> str:
     if not mkt_lines:
         return ""
 
+    # 按打分口径分开报告，跟按市场是同一个防混淆逻辑（见函数上方2026-09-11
+    # 注释）。样本目前几乎全落在一种口径里（新权重的记录还没到回填年龄），
+    # 但这段文字要在口径真正开始混合的那天之前就写好，不能等出问题了再改。
+    by_scheme = bt.get("按打分口径") or {}
+    scheme_lines = []
+    for sig, sub in sorted(by_scheme.items()):
+        bands = sub.get("bands") if isinstance(sub, dict) else sub
+        bits = [
+            f"{b['band']}分档{b['count']}条平均{b['avg_return_pct']:+.2f}%、上涨{b['win_rate_pct']:.0f}%"
+            for b in (bands or [])
+            if b.get("count") and b.get("avg_return_pct") is not None
+        ]
+        if bits:
+            scheme_lines.append(f"    [{sig}]：" + "；".join(bits))
+    scheme_block = ""
+    if len(by_scheme) > 1 and scheme_lines:
+        scheme_block = (
+            "  当前样本里混着不止一种打分口径（权重调整过），按口径分开看：\n"
+            + "\n".join(scheme_lines) + "\n"
+            "  权重变了之后，同样是\"75分\"，构成可能完全不同（旧权重靠基本面"
+            "和价格位置堆出来，新权重可能是技术面和筹码面在扛），跟按市场拆开"
+            "是同一个道理——不拆开会把两种不可比的口径混成一个假的\"整体结论\"。\n"
+        )
+
+    # 当前权重占比不写死在代码里，现查最新一条有六维满分记录的真实权重
+    # ——权重以后再调，这句话也会跟着变，不用回来改这个函数（就是这次要
+    # 修的"数据要是最新的"）。
+    weight_txt = "综合得分的具体权重构成"
+    try:
+        with closing(_conn()) as c:
+            c.row_factory = sqlite3.Row
+            latest = c.execute(
+                "SELECT score_fundamental_max, score_price_position_max, score_technical_max, "
+                "score_chips_max, score_analyst_max, score_data_certainty_max FROM advice "
+                "WHERE score_fundamental_max IS NOT NULL ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        if latest:
+            fund_max = latest["score_fundamental_max"] or 0
+            price_max = latest["score_price_position_max"] or 0
+            total_max = sum(v for v in dict(latest).values() if v is not None) or 100
+            slow_pct = round((fund_max + price_max) / total_max * 100)
+            weight_txt = (
+                f"当前权重下基本面质量{fund_max}分+价格位置{price_max}分，"
+                f"占综合得分{slow_pct}%"
+            )
+    except Exception:
+        pass
+
     return (
         f"本系统打分体系的事后实证（{total}条已回填样本，{window_txt}，"
         f"是客观统计不是理论）：\n"
@@ -1939,13 +2081,13 @@ def get_score_evidence_text(source: str = "watchlist") -> str:
         "港美股是人气榜/蓝筹），混在一起统计会出现辛普森悖论——港股整体基线更差、"
         "又在高分档占比更高，会把合并后的高分档拖低，看上去像\"分数越高越差\"，"
         "拆开后并不成立。\n"
+        + scheme_block +
         "  站得住的结论只有一条：在上面这个窗口上，这套综合得分没有可证实的预测力。"
-        "需要说明的是，之前绝大多数样本是按\"次日核对\"回填的，而综合得分里"
-        "基本面质量40分+价格位置30分占了七成权重，衡量的是公司质地和估值位置，"
-        "那是按季度起作用的东西——拿它去打一天的分，从设计上就不可能成立，"
-        "这是衡量口径错配，不代表这套评分本身没有价值。校验窗口已于2026-09-04"
-        "从次日改成一周，新样本会在更接近它该被检验的尺度上重新积累，在那之前"
-        "不要拿旧结论下死判断。\n"
+        f"需要说明的是，之前绝大多数样本是按\"次日核对\"回填的，而{weight_txt}，"
+        "衡量的是公司质地和估值位置，那是按季度起作用的东西——拿它去打一天的分，"
+        "从设计上就不可能成立，这是衡量口径错配，不代表这套评分本身没有价值。"
+        "校验窗口已于2026-09-04从次日改成一周，新样本会在更接近它该被检验的尺度"
+        "上重新积累，在那之前不要拿旧结论下死判断。\n"
         "  怎么用：把综合得分当作\"这家公司的质地和估值位置如何\"的描述，不要当作"
         "\"明天会不会涨\"的理由。短周期的买卖时点要靠技术面确认（真实放量、趋势"
         "成立）和当下的盘面证据，不能靠高分背书。尤其\"52周低位所以安全\"这句话，"

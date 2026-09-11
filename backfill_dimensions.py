@@ -3,12 +3,16 @@
 为什么需要这个脚本：维度分是 log_advice 写库那一刻用
 tracker.extract_score_breakdown 从 fundamental_verdict 里现解析的，解析器
 一旦有缺陷，那一刻起写进去的就全是 NULL，而且总分照常落库、页面完全看不
-出异常。这类失败已经发生过两次：
+出异常。这类失败已经发生过三次：
 
   2026-09-05  打分从四维扩到六维、分母改了，正则里的分母还写死着旧数字，
               六列全部落空（1749条）。
   2026-09-06  解析窗口写死在"维度打分"那一行以内，模型换行写就取不到，
               当天642条观察池判断里390条落空。
+  2026-09-11  发现分母本身（"基本面X/40"里的40）之前压根没存，导致
+              get_dimension_predictive_value 拿09-05前后两套权重下量纲
+              不同的原始分子直接比高低——这次给六个维度各加一列
+              *_max，同样需要把历史记录重新解析一遍才能补上。
 
 原文一直好好存在 fundamental_verdict 里，所以每次修完解析器都能重新跑一遍
 把历史补回来——维度分是 get_dimension_predictive_value（回答"六个维度里
@@ -32,6 +36,12 @@ _COLUMNS = (
     ("score_chips", "chips"),
     ("score_analyst", "analyst"),
     ("score_data_certainty", "data_certainty"),
+    ("score_fundamental_max", "fundamental_max"),
+    ("score_price_position_max", "price_position_max"),
+    ("score_technical_max", "technical_max"),
+    ("score_chips_max", "chips_max"),
+    ("score_analyst_max", "analyst_max"),
+    ("score_data_certainty_max", "data_certainty_max"),
 )
 
 
