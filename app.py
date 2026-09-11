@@ -3611,16 +3611,20 @@ def _render_advice_section():
                     f"<span style='font-weight:400;color:var(--fa-faint);font-size:0.78rem'> · {_market_label.get(market_key, market_key)}</span></span>"
                     f"<span style='display:flex;align-items:center;gap:9px'>"
                     # 2026-09-12（前端审计第14条"综合评分81是一个很小的数字"）：
-                    # 评分是这一行里信息量最大的一个数，之前只是一串跟其它元信息
-                    # 一样大的灰字，扫一眼榜单根本注意不到。改成圆形徽章，并按
-                    # 分数深浅分档（高分深色、中段中灰、低分浅灰），不引入新的
-                    # 颜色——红绿在这套界面里只表示涨跌，不能拿来表示"分高分低"。
+                    # 评分是这一行里信息量最大的一个数，原来只是一串跟其它元信息
+                    # 一样大的灰字，扫一眼榜单根本注意不到。
+                    # 第一版做成了深色圆形徽章（审计文档建议的做法），用户看了
+                    # 实机反馈"这个黑色圈圈太丑了"——一个实心深色圆盘在这套
+                    # 近乎无色、全靠字重和留白分层的界面里，是整页对比度最高的
+                    # 元素，抢戏程度远超它该有的分量，跟右下角那颗AI浮标当初从
+                    # 实心黑圆改成白底细边是同一个问题。
+                    # 改成不加任何底色，只把数字本身做得站得住：字号提上去、
+                    # 字重加粗、用正文墨色（低分压灰）。可见性来自字本身，
+                    # 不靠色块。
                     + (
-                        f"<span style='display:inline-flex;align-items:center;justify-content:center;"
-                        f"width:34px;height:34px;border-radius:50%;font-size:0.84rem;font-weight:650;"
+                        f"<span style='font-size:1.02rem;font-weight:650;letter-spacing:-.02em;"
                         f"font-variant-numeric:tabular-nums;"
-                        f"background:{'#17181C' if score >= 80 else ('#5B6470' if score >= 60 else '#DBDCE3')};"
-                        f"color:{'#FFFFFF' if score >= 60 else '#5B6470'}'>{score}</span>"
+                        f"color:{'var(--fa-text)' if score >= 60 else 'var(--fa-muted)'}'>{score}</span>"
                         if score is not None else ""
                     )
                     + f"<span style='color:var(--fa-muted);border-radius:5px;padding:2px 9px;"
