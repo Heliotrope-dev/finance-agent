@@ -228,6 +228,67 @@ def _build_watchlist() -> list[dict]:
     return items
 
 
+# 不是从Futu"自选"分组同步来的、用户直接要求加进候选池的标的（大宗商品/
+# 宏观ETF——2026-09-11应用户要求加的原油/黄金/美元指数）。这几支在用户
+# 自己的Futu账户里并不在"自选"系统分组里，如果跟其余条目一样按"Futu自选
+# 有没有它"来决定删不删，每次同步都会把它们清掉——因为它们本来就不是从
+# Futu自选来的。同步逻辑只负责"跟Futu自选对齐"这一件事，这几支是独立的
+# 手动钉住的例外，不受"自选里没有就删"这条规则约束。
+_PINNED_EXTRAS = {("USO", "US"), ("GLD", "US"), ("UUP", "US")}
+
+
+def sync_futu_watchlist(market: str) -> None:
+    """把Futu账户里真实的自选（港股/美股系统分组）同步进本地positions表——
+    2026-09-11新增。用户在Futu客户端里天天会调整自选，本地positions表
+    之前只能靠手动加，跟Futu实际自选早晚会脱节（这次实测就发现少了21支）。
+    改成每次build_market_watchlist跑之前先过一遍这个同步，候选池永远是
+    "今天在Futu里真实自选的"，不用再手动维护。
+
+    只对本地"仅关注"(shares=0)的条目做增删；真持仓(shares>0)一律不动——
+    就算某支真持仓因为某种原因没出现在Futu自选分组里，也不能被这个同步
+    误删，持仓数据的权威来源是用户自己在app里的买入/卖出记录，不是自选
+    分组这个标签。_PINNED_EXTRAS里的标的同样不受删除规则约束（见上面
+    的说明），实测已经踩过一次坑：第一版没有这个例外，第一次跑同步就把
+    刚加进去的USO/GLD/UUP当成"Futu自选里没有的脏数据"直接删掉了。
+    """
+    try:
+        live = ds.get_futu_watchlist(market)
+    except Exception as e:
+        print(f"（{market}自选同步失败，跳过本次同步，沿用本地已有数据：{e}）")
+        return
+    if not live:
+        return  # 拉不到/为空都不动本地数据，避免误清空
+
+    try:
+        local = tracker.get_positions(_EMAIL)
+    except Exception as e:
+        print(f"（本地{market}自选读取失败，本次同步跳过：{e}）")
+        return
+
+    live_keys = {(item["symbol"], item["market"]) for item in live}
+    local_all = {(str(p.get("symbol")), p.get("market")) for p in local if p.get("market") == market}
+    local_watch_only = {
+        (str(p.get("symbol")), p.get("market")) for p in local
+        if p.get("market") == market and not (p.get("shares") or 0)
+    }
+
+    added = 0
+    for item in live:
+        key = (item["symbol"], item["market"])
+        if key not in local_all:
+            if tracker.add_watch_only(_EMAIL, item["symbol"], item["name"], item["market"]):
+                added += 1
+
+    removed = 0
+    for symbol, mkt in local_watch_only:
+        if (symbol, mkt) not in live_keys and (symbol, mkt) not in _PINNED_EXTRAS:
+            tracker.delete_position(_EMAIL, symbol)
+            removed += 1
+
+    if added or removed:
+        print(f"（{market}自选同步：新增{added}支，移除{removed}支，与Futu实时自选对齐）")
+
+
 def build_market_watchlist(market: str) -> list[dict]:
     """单市场版的_build_watchlist，给09:00/21:00盘前推荐用——推荐要
     港股/美股分开出榜，不能像_build_watchlist那样把三个市场混在一个池子
@@ -241,8 +302,10 @@ def build_market_watchlist(market: str) -> list[dict]:
     票，每一支现在怎么样"，不是"市场上有什么新鲜票值得关注"（那是另一个
     产品形态，这个报告不做）。现在池子就是自选（仅该市场）本身，没有
     target_size上限、也不再用热门榜凑数——有多少自选就判断多少支，用户
-    加/删自选，这份报告的范围跟着变。
+    加/删自选，这份报告的范围跟着变。同时先调用sync_futu_watchlist把本地
+    自选跟Futu账户实时对齐，不用再手动维护本地数据。
     """
+    sync_futu_watchlist(market)
     items: list[dict] = []
     seen: set[tuple[str, str]] = set()
 

@@ -1624,6 +1624,38 @@ def _futu_call(fn, timeout: float = 8, default=None):
     return default if result is None else result
 
 
+# Futu系统自选分组里除了个股，还混着恒生科技/恒生指数/纳斯达克综合这类指数
+# 和期货主连——对这类标的做"基本面/技术面逐支AI判断"没有意义，同步进
+# positions表之前先按代码过滤掉。这份列表是硬编码的已知项，不是通用规则，
+# 以后Futu系统分组里新出现别的指数/期货代码，要跟着补进来。
+_FUTU_WATCHLIST_SKIP_CODES = {"HTImain", "800700", "800000", "IXIC"}
+
+
+def get_futu_watchlist(market: str) -> list[dict]:
+    """读取Futu账户里"港股"/"美股"这两个系统自选分组的真实持仓清单（不是
+    本地positions表，是用户在Futu客户端里手动维护的那份）——2026-09-11
+    新增，配合advisor.py的自选同步，让每天的盘前报告候选池自动跟着用户
+    在Futu App里的实际自选走，不用再靠人工在本地positions表里补录。
+
+    返回[{"symbol":..,"market":..,"name":..}, ...]，已经过滤掉指数/期货
+    代码，跟build_market_watchlist消费的item形状对齐。
+    """
+    _group = {"HK": "港股", "US": "美股"}.get(market)
+    if not _group:
+        return []
+    ret, data = _futu_call(lambda ctx: ctx.get_user_security(_group), timeout=15, default=(None, None))
+    if ret != 0 or data is None or data.empty:
+        return []
+    items: list[dict] = []
+    for _, row in data.iterrows():
+        code = str(row.get("code", ""))
+        _, _, sym = code.partition(".")
+        if not sym or sym in _FUTU_WATCHLIST_SKIP_CODES or sym.startswith("."):
+            continue
+        items.append({"symbol": sym, "market": market, "name": str(row.get("name") or sym)})
+    return items
+
+
 _BREAKER_DISPLAY_NAMES = {
     "index_snapshot_A": "A股指数快照兜底",
     "index_snapshot_HK": "港股指数快照兜底",
