@@ -742,6 +742,10 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
     .st-key-fa_nav [data-testid="stRadio"] > div { overflow-x: auto; flex-wrap: nowrap !important; }
     .st-key-fa_nav [data-testid="stRadio"] label { margin-right: 18px !important; white-space: nowrap; }
     .stButton button { font-size: 0.8rem !important; padding: 6px 11px !important; }
+    /* 右下角那个 AI 悬浮按钮是 position:fixed，不占文档流，窄屏上会直接压在
+       正文最后几行上（2026-09-11前端审计："右下角的 AI 悬浮按钮会盖住正文"）。
+       给主内容区留出一段底部安全区，滚到底时最后一行也不会被它挡住。 */
+    section.main .block-container { padding-bottom: 96px !important; }
 }
 </style>
 """
@@ -4304,30 +4308,36 @@ def _render_ipo_briefs():
         _ups = [i for i in ((perf or {}).get("items") or []) if (i.get("first_day_pct") or 0) > 0]
         _up_rate = len(_ups) / _st["count"] * 100 if _st.get("count") else 0.0
 
-        m1, m2, m3, m4, m5 = st.columns(5)
+        # 2026-09-12改（前端审计第13条手机端 + 第15条颜色语义）：
+        # 一、原来用 st.columns(5)，Streamlit 在窄屏会把列竖着堆起来，五个
+        #     数字占掉整整一屏（审计原话"竖着排成一列，太占地方"）。改成一个
+        #     自己控制的 grid：桌面五列，手机两列，不依赖 st.columns 的断点。
+        # 二、"上涨占比"原来用涨色（红）、"破发率"用跌色（绿）。这两个是
+        #     比率，不是方向——按红涨绿跌的习惯读，绿色的破发率会被读成
+        #     "好事"，可破发率高恰恰是坏事。比率型指标一律走中性色，红绿
+        #     只留给真正的涨跌（均值/中位数那两个是涨跌幅本身，保留配色）。
         _avg_c = UP_COLOR if _st["avg"] > 0 else DOWN_COLOR
         _med_c = UP_COLOR if _st["median"] > 0 else DOWN_COLOR
-        m1.markdown(
-            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>首日涨跌幅均值</div>"
-            f"<div style='font-size:1.3rem;font-weight:600;color:{_avg_c}'>{_st['avg']:+.1f}%</div>",
-            unsafe_allow_html=True)
-        m2.markdown(
-            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>中位数</div>"
-            f"<div style='font-size:1.3rem;font-weight:600;color:{_med_c}'>{_st['median']:+.1f}%</div>",
-            unsafe_allow_html=True)
-        m3.markdown(
-            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>上涨占比</div>"
-            f"<div style='font-size:1.3rem;font-weight:600;color:{UP_COLOR}'>{_up_rate:.0f}%</div>",
-            unsafe_allow_html=True)
-        m4.markdown(
-            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>破发率</div>"
-            f"<div style='font-size:1.3rem;font-weight:600;color:{DOWN_COLOR}'>{_st['break_rate']:.0f}%</div>",
-            unsafe_allow_html=True)
-        m5.markdown(
-            f"<div style='font-size:0.76rem;color:var(--fa-faint)'>区间</div>"
-            f"<div style='font-size:1.05rem;font-weight:600;color:var(--fa-text)'>"
-            f"{_st['min']:+.0f}% ~ {_st['max']:+.0f}%</div>",
-            unsafe_allow_html=True)
+        _cells = [
+            ("首日涨跌幅均值", f"{_st['avg']:+.1f}%", _avg_c, "1.3rem"),
+            ("中位数", f"{_st['median']:+.1f}%", _med_c, "1.3rem"),
+            ("上涨占比", f"{_up_rate:.0f}%", "var(--fa-text)", "1.3rem"),
+            ("破发率", f"{_st['break_rate']:.0f}%", "var(--fa-text)", "1.3rem"),
+            ("区间", f"{_st['min']:+.0f}% ~ {_st['max']:+.0f}%", "var(--fa-text)", "1.05rem"),
+        ]
+        st.markdown(
+            "<style>.fa-ipo-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}"
+            "@media (max-width:640px){.fa-ipo-stats{grid-template-columns:repeat(2,1fr)}}</style>"
+            "<div class='fa-ipo-stats'>"
+            + "".join(
+                f"<div><div style='font-size:0.76rem;color:var(--fa-faint)'>{_esc(_label)}</div>"
+                f"<div style='font-size:{_size};font-weight:600;color:{_color};"
+                f"font-variant-numeric:tabular-nums'>{_esc(_val)}</div></div>"
+                for _label, _val, _color, _size in _cells
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
         st.caption(f"前两项是涨跌幅本身，后两项才是只数占比：{_st['count']}只里"
                    f"{len(_ups)}只首日收涨。新股首日收益是典型长尾分布，均值被少数"
                    f"翻倍股拉高，判断随便打一只大概赚多少要看中位数。")
@@ -4763,6 +4773,58 @@ def _render_macro_briefs():
                         )
 
 
+def _render_home_index_strip():
+    """首页顶部的指数行情条（2026-09-12新增，前端审计第8条）。
+
+    审计原话："打开首页，第一屏整屏都是世界地图。最有价值的『今日可执行
+    清单』在页面约80%的位置。" 地图占了整个首屏却只承载十几个数字，信息
+    密度太低；而且标签在手机宽度下互相重叠，根本读不出来。
+
+    这里不动地图本身（它仍然有"一眼看全球"的价值，只是往下挪），先在最
+    顶上补一条紧凑的指数横条：名称/点位/涨跌幅，一行摆完，窄屏可以横向
+    滑动。数据直接复用地图那份预热缓存（warm_home_cache.py 每分钟写的
+    home_map_cache.json），不新增任何网络请求——缓存没命中就干脆不画这条，
+    绝不为了多一个模块去拖慢首屏，那正是这次审计要解决的问题本身。
+    """
+    cached = load_home_map_cache(max_age_sec=90)
+    if not cached:
+        return
+    snaps, global_idx = cached["snaps"], cached["global_idx"]
+
+    # 挑最常看的几个，顺序按"离用户最近"排：A股、港股、美股两个大盘，再加
+    # 两个国际参照。不把11个全塞进来——横条的价值在于一眼扫完。
+    wanted = [("上证指数", "A"), ("恒生指数", "HK"), ("标普500", "US"),
+              ("纳斯达克100", "US"), ("日经225", "GLOBAL"), ("德国DAX", "GLOBAL")]
+    cards = []
+    for name, mkt in wanted:
+        idx = (global_idx.get(name) if mkt == "GLOBAL"
+               else next((i for i in snaps.get(mkt, []) if i["名称"] == name), None))
+        if not idx:
+            continue
+        last, chg = idx.get("最新"), idx.get("涨跌")
+        if last is None or chg is None:
+            continue
+        prev = last - chg
+        pct = (chg / prev * 100) if prev else 0.0
+        color = UP_COLOR if chg >= 0 else DOWN_COLOR
+        cards.append(
+            f"<div style='flex:0 0 auto;min-width:116px;padding:8px 14px 8px 0'>"
+            f"<div style='font-size:0.72rem;color:var(--fa-faint);white-space:nowrap'>{_esc(name)}</div>"
+            f"<div style='font-size:0.98rem;font-weight:650;color:{color};"
+            f"font-variant-numeric:tabular-nums;white-space:nowrap'>{last:,.2f}</div>"
+            f"<div style='font-size:0.72rem;color:{color};font-variant-numeric:tabular-nums'>"
+            f"{pct:+.2f}%</div></div>"
+        )
+    if not cards:
+        return
+    st.markdown(
+        "<div style='display:flex;overflow-x:auto;gap:2px;padding-bottom:2px;"
+        "border-bottom:1px solid var(--fa-border);margin-bottom:14px'>"
+        + "".join(cards) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _render_home_page():
     """首页——世界地图（几个常见指数的实时点位）+ 今日重磅资讯。
 
@@ -4773,8 +4835,15 @@ def _render_home_page():
     今天没有股票明显异动、或者富途连不上）才退回财新兜底，不会完全没有
     内容可看。
     """
-    st.markdown("**全球指数一览**")
-    _render_home_map()
+    # 2026-09-12重排（前端审计第8条）：原顺序是 地图 → 宏观/日历/IPO →
+    # 可执行清单 → 资讯，最有价值的清单落在页面约80%的位置，第一屏整屏只有
+    # 一张信息密度很低的地图。用户打开投资类产品，第一件事想知道的是"今天
+    # 该做什么"，不是"世界长什么样"。
+    # 新顺序：指数横条（一行看完大盘）→ 今日可执行清单+排行榜 → 宏观/日历/
+    # IPO → 世界地图 → 资讯。地图没删，只是降到"看完正事之后再看"的位置。
+    _render_home_index_strip()
+
+    _render_advice_section()
 
     st.divider()
     _render_macro_briefs()
@@ -4782,7 +4851,8 @@ def _render_home_page():
     _render_ipo_briefs()
 
     st.divider()
-    _render_advice_section()
+    st.markdown("**全球指数一览**")
+    _render_home_map()
 
     st.divider()
     st.markdown("**今日重磅消息**")
