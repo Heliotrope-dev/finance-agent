@@ -4920,15 +4920,22 @@ def _render_chips_section(symbol: str, market: str):
     _cur = {"HK": "HK$", "US": "$", "A": "¥"}.get(market, "")
 
     def _amt(v):
-        """金额按数量级换单位。资金流动辄以亿计，原样打印一串数字没人读得出来。"""
+        """金额按数量级换单位。资金流动辄以亿计，原样打印一串数字没人读得出来。
+
+        负号要写在货币符号外面：2026-09-11前端审计抓到主力净流出显示成
+        「$-744万」——负号被夹在了 $ 和数字之间。会计和行情软件的通行写法是
+        -$744万（货币符号紧贴数字，正负号在最外层），跟_fmt_usd_signed同一个
+        约定。这里原来把 v 整个丢进 f-string，负数的符号自然跟在 _cur 后面。
+        """
         if v is None:
             return "-"
         a = abs(v)
+        sign = "-" if v < 0 else ""
         if a >= 1e8:
-            return f"{_cur}{v / 1e8:,.2f}亿"
+            return f"{sign}{_cur}{a / 1e8:,.2f}亿"
         if a >= 1e4:
-            return f"{_cur}{v / 1e4:,.0f}万"
-        return f"{_cur}{v:,.0f}"
+            return f"{sign}{_cur}{a / 1e4:,.0f}万"
+        return f"{sign}{_cur}{a:,.0f}"
 
     if cap:
         _mn = cap.get("main_net")
