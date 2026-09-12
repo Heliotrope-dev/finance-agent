@@ -834,6 +834,31 @@ a.macro-card-link:hover { background: rgba(23, 24, 28, 0.045); }
     30%           { opacity: 1;    transform: translateY(-3px); }
 }
 
+/* ── 重跑期间的视觉处理 ───────────────────────────────────────────────────
+   Streamlit 是整页 rerun：从首页点到行情页，服务端要重新把行情页跑一遍，
+   这期间浏览器里挂着的是**上一页的全部内容**——实测切 tab 要 5-8 秒，这几秒
+   里首页的可执行清单、投研榜、财经日历、新股、新闻全都还在，第一眼会以为
+   自己点错了。
+
+   这是 Streamlit 的架构决定的，CSS 解决不了根因。能做的是让"正在变"这件事
+   可见：正文压到 40% 不透明度并禁用点击，用户立刻知道页面在换，而不是盯着
+   上一页发呆、以为没反应又点一次。
+
+   判据用 stStatusWidget —— Streamlit 自己那个"Running…"指示器，脚本一开始
+   跑它就出现在 DOM 里。上面已经把它视觉隐藏（不是 display:none，正是为了
+   这类判据还能用它），:has() 在这里读的是它存不存在，跟它可不可见无关。
+
+   120ms 的过渡是刻意的短：太长会让每一次普通交互都显得"卡了一下"，
+   太短又变成硬闪。
+   注意 fragment 的局部重跑不会挂起 stStatusWidget 的全局态，所以自选列表
+   每 3 秒的自动刷新不会触发这层压暗——那正是我们要的，它本来就该无感。 */
+[data-testid="stAppViewContainer"]:has([data-testid="stStatusWidget"]) [data-testid="stMainBlockContainer"] {
+    opacity: 0.4;
+    pointer-events: none;
+    transition: opacity 120ms ease;
+}
+[data-testid="stMainBlockContainer"] { transition: opacity 120ms ease; }
+
 /* ── 窄屏 ─────────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
     .fa-flex-row { flex-wrap: wrap !important; }

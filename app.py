@@ -2321,6 +2321,7 @@ def _macro_sparkline(name: str, color: str) -> str:
     )
 
 
+@st.fragment
 def _render_macro_strip():
     """行情页顶部的跨资产温度计：VIX / 美债10年期 / 美元指数 / 黄金 / 原油 / 铜。
 
@@ -2741,7 +2742,9 @@ _HOME_MAP_MARKERS = [
     ("富时100", "GLOBAL", 51.5155, -0.0983, -30, 0),     # 伦交所 Paternoster Square
     ("德国DAX", "GLOBAL", 50.1155, 8.6796, 32, 10),      # 法兰克福交易所 Börsenplatz
     ("印度SENSEX", "GLOBAL", 18.9296, 72.8331, -8, 0),   # 孟买交易所 Dalal Street
-    ("巴西IBOVESPA", "GLOBAL", -23.5475, -46.6340, 0, 0),# B3 圣保罗
+    # 圣保罗跟悉尼同一个问题，只是没那么极端：300px 高度下实测标签下沿落在
+    # 299/300，差 1px 就要被裁。字体渲染稍有差异就会露出来，一并抬到点上方。
+    ("巴西IBOVESPA", "GLOBAL", -23.5475, -46.6340, 0, -44),  # B3 圣保罗
     # 悉尼是全图最南的一个点，标签挂在圆点下方时下沿正好压着地图容器的底边。
     # 2026-09-13 把地图从 420px 压到 300px 之后这一处直接露馅：名字还在，
     # 点数和涨跌幅整整两行被容器裁掉了，只剩一个"澳大利亚ASX200"。
@@ -2766,6 +2769,7 @@ _HOME_MAP_TENCENT_CODE = {
     "标普500": "usINX", "纳斯达克100": "usNDX",
 }
 
+@st.fragment
 def _render_home_map():
     """首页世界地图——Leaflet.js + OpenStreetMap 免费瓦片（不需要API key/信用卡），
     在几个指数所在交易所城市的真实经纬度上放小图标，图标里显示指数名+当前点数+
@@ -3486,6 +3490,7 @@ def _load_watch_only_items(market: str) -> list[dict]:
     return [item for item in (plan.get("关注候选") or []) if not _is_order_ready(item)]
 
 
+@st.fragment
 def _render_advice_section():
     """首页"AI投研候选"——跟其它模块（世界地图/今日资讯）唯一的本质区别：
     这里明确给买入/卖出/持有/观望结论，其它模块刻意"只摆事实不下结论"。
@@ -4687,6 +4692,7 @@ def _render_us_ipo_calculator(items: list[dict]):
                        f"单只的开盘和收盘经常差出几十个百分点。")
 
 
+@st.fragment
 def _render_a_ipo_briefs():
     """沪深新股认购专区（2026-09-13 用户要求，参照港股那块）。
 
@@ -4749,6 +4755,7 @@ def _render_a_ipo_briefs():
         )
 
 
+@st.fragment
 def _render_us_ipo_briefs():
     """美股新股（2026-09-13 用户要求做成跟港股一致，标签切换）。
 
@@ -4950,6 +4957,7 @@ def _render_ipo_perf_block(perf: dict, show_calculator: bool = True, key_suffix:
                         unsafe_allow_html=True)
 
 
+@st.fragment
 def _render_ipo_briefs():
     """港股新股认购专区。
 
@@ -5281,6 +5289,7 @@ def _render_event_calendar():
             )
 
 
+@st.fragment
 def _render_macro_briefs():
     """首页宏观议题专区——美联储/通胀/就业/中国政策。
 
