@@ -5132,11 +5132,16 @@ def _render_us_ipo_calculator(items: list[dict]):
         if not _rows:
             return
 
+        # 负号写在货币符号前面（-$2），不是后面（$-2）。后者是 f-string 直接拼
+        # 出来的样子，看着像个笔误。
+        def _usd(v: float) -> str:
+            return f"-${abs(v):,.0f}" if v < 0 else f"${v:,.0f}"
+
         _cols = st.columns(len(_rows))
         for _col, (_label, _move, r) in zip(_cols, _rows):
             with _col:
                 st.metric(f"{_label}（首日中位数 {_move:+.1f}%）",
-                          f"${r['net_profit']:,.0f}")
+                          _usd(r["net_profit"]))
         _r0 = _rows[0][2]
         st.caption(f"预期获配 \\${_r0['allotted_amount']:,.0f}——"
                    f"这个数才是真正在赚钱的部分，认购金额里剩下的会在上市当天退回。")
