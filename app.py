@@ -1765,6 +1765,7 @@ def _render_index_snapshot(mkt_code: str):
     st.markdown(
         "<div class='fa-flex-row' style='display:flex;padding:4px 8px;font-size:0.78rem;color:var(--fa-muted)'>"
         "<div style='flex:2.4'>指数</div>"
+        "<div style='flex:1.1;text-align:center'>走势</div>"
         "<div style='flex:1;text-align:right'>最新</div>"
         "<div style='flex:1;text-align:right'>涨幅</div>"
         "<div style='flex:1;text-align:right'>涨跌</div>"
@@ -1792,11 +1793,25 @@ def _render_index_snapshot(mkt_code: str):
         # "透明底 + 一条底部发丝线"的扁平行，只有这里还是老样式，三个白框
         # 摞在一起在这套灰白底子上特别扎眼。改成带 key 的容器，复用
         # st-key-idx_row_ 的扁平样式（跟 pos_row_ 同一套）。
+        # 迷你走势图（2026-09-13）。指数行原来每行 79px，一行里只有四个数字，
+        # 剩下的全是空白；压到 44px 之后省出来的横向空间正好给一张 20 日走势。
+        # 一个点位数字回答"现在多少"，一条线回答"这几天怎么走的"——后者才是
+        # 看指数真正想知道的，而且这张图是本地算的 SVG，不是又一个图表库。
+        #
+        # 取数走的是持仓列表那套已经存在的函数：按自然日缓存 + session 兜底
+        # （一旦成功过就不会再变空）。指数代码取不到形状时 _build_sparkline_svg
+        # 自己会退化成一个"--"，不会把行撑坏，所以这里只需要挡住异常。
+        try:
+            _idx_closes = _fetch_sparkline_closes(idx_code, mkt_code) if idx_code else []
+        except Exception:
+            _idx_closes = []
+        _idx_spark = _build_sparkline_svg(_idx_closes, color)
         with st.container(key=f"idx_row_{mkt_code}_{idx['名称']}"):
             st.markdown(
                 f"<a class='idx-card-link' href='{href}' target='_self'>"
                 f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:2px'>"
                 f"<div style='flex:2.4;font-weight:600;color:var(--fa-text);text-decoration:none'>{_esc(idx['名称'])}</div>"
+                f"<div style='flex:1.1;display:flex;justify-content:center'>{_idx_spark}</div>"
                 f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{idx['最新']:,.2f}</div>"
                 f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
                 f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌']:+.2f}</div>"
@@ -2356,16 +2371,11 @@ def _render_sector_heatmap(market: str):
     if fig is None:
         return
     st.markdown("**板块热力图**")
-    # 必须标明分类口径。审计第11条：沪深这张图里"通信设备 +1.90%"，紧挨着的
-    # 「热门板块」写"通信设备 +0.42%"，同一页两个数打架。查下来不是bug——
-    # 热力图走富途，板块名带"Ⅱ"是申万二级；热门板块走同花顺，是另一套行业
-    # 分类，同名不同成分（美股两处完全一致可以佐证）。但界面一个字都没说，
-    # 用户没法知道这是两套分类而不是数据错了。
+    # 2026-09-13：不再需要那句"跟下面「热门板块」不是同一套，数值对不上正常"。
+    # 涨跌幅现在只有这一处在报（下面那栏改成只给热度排名），两个数打架的情况
+    # 从源头上没有了，也就不必再向用户解释一个本来就不该存在的矛盾。
     _src = "申万二级行业（富途）" if market == "A" else "行业板块（富途）"
-    st.caption(
-        f"面积=成交额，深浅=涨跌幅度，涨跌看方块上的正负号。"
-        f"取成交额前16的板块，分类是{_src}——跟下面「热门板块」不是同一套，数值对不上正常。"
-    )
+    st.caption(f"面积=成交额，深浅=涨跌幅度，涨跌看方块上的正负号。取成交额前16的板块，分类是{_src}。")
     st.plotly_chart(fig, use_container_width=True, config=_PLOTLY_CONFIG)
 
 
@@ -2400,13 +2410,26 @@ def _render_hot_sectors(market: str):
     #
     # 顺带解决了宫格本身的一个毛病：三列等宽，但板块名长短差很多（"元件"两个
     # 字和"数码解决方案服务"七个字挤在同宽的格子里），列表布局天然没这个问题。
+    # 2026-09-13：这一栏不再给涨跌幅，只给热度排名。
+    #
+    # 同一页上面的「板块热力图」走富途的申万二级分类，这一栏走同花顺的行业
+    # 分类，两套分类里都有"通信设备"这个名字但成分股不是同一批，于是热力图
+    # 写 +1.90%、这里写 +0.42%——同一个板块名、同一个页面、两个数打架。
+    # 之前的处理是在两块的说明文字里各写一句"跟另一块不是同一套，数值对不上
+    # 正常"。那是把一个矛盾解释给用户听，而不是解决它：读者要么没读到那句话
+    # 而困惑，要么读到了、然后得自己判断该信哪个。
+    #
+    # 真正的解法是让两块各自只回答自己有资格回答的问题：
+    #   热力图   面积=成交额、深浅=涨跌幅 —— 完整回答"今天钱往哪走、涨了多少"
+    #   这一栏   按热度排的名单           —— 只回答"哪些板块今天最热、点进去看成分股"
+    # 排名是这一栏真正的入口价值（它是可点的成分股列表），涨跌幅不是——
+    # 那个数上面已经有一个更完整的版本了。去掉之后两块不再冲突，也不用再向
+    # 用户解释什么。
     for idx, row in shown.iterrows():
-        s_color = UP_COLOR if row["涨跌幅"] >= 0 else DOWN_COLOR
         inner = (
             f"<div style='display:flex;align-items:center'>"
-            f"<div style='flex:3;font-weight:600;color:var(--fa-text)'>{_esc(str(row['板块']))}</div>"
-            f"<div style='flex:1;text-align:right;color:{s_color};font-weight:600'>{row['涨跌幅']:+.2f}%</div>"
-            f"<div style='flex:1;text-align:right;color:var(--fa-faint);font-size:0.78rem'>热度第{idx + 1}名</div>"
+            f"<div style='flex:1;font-weight:600;color:var(--fa-text)'>{_esc(str(row['板块']))}</div>"
+            f"<div style='text-align:right;color:var(--fa-muted);font-size:0.78rem'>热度第 {idx + 1} 名</div>"
             f"</div>"
         )
         with st.container(key=f"sector_row_{market}_{idx}"):
@@ -7038,7 +7061,8 @@ def _render_portfolio_advice(email: str, positions: list):
 
 
 @st.fragment(run_every=10)
-def _render_position_rows(position_items: list, _email: str, sort_mode: str = "默认"):
+def _render_position_rows(position_items: list, _email: str, sort_mode: str = "添加时间",
+                          compact: bool = False):
     """持仓列表本体单独做成 fragment，价格/涨跌幅每10秒自己刷新（2026-09-02
     从3秒调宽到10秒，理由见_render_positions_today_pnl同一处注释——批量化
     之后单次调用变1次了，但3秒刷新叠加另一个同页fragment，还是有撞富途
@@ -7076,7 +7100,9 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
     )
     _head_dynamic_col.markdown(
         "<div class='fa-flex-row' style='display:flex;align-items:center;padding:4px 8px;font-size:0.75rem;color:var(--fa-muted)'>"
-        "<div style='flex:1.3;text-align:right'>最新/成交额</div>"
+        # 表头要跟着密度走：紧凑档下面根本不画成交额，表头还写着"最新/成交额"
+        # 就是在指一个不存在的列。
+        f"<div style='flex:1.3;text-align:right'>{'最新' if compact else '最新/成交额'}</div>"
         "<div style='flex:1;text-align:right'>涨跌幅</div>"
         "</div>",
         unsafe_allow_html=True,
@@ -7194,7 +7220,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
     # 两个排序键都不在调用方手上（2026-09-12，前端审计第9条"不能排序"）。
     # 默认顺序不动（用户自己添加自选的先后顺序本身是一种信息，不该被
     # 无条件重排）。
-    if sort_mode and sort_mode != "默认":
+    if sort_mode and sort_mode not in ("默认", "添加时间"):
         def _chg_pct(row):
             _wspot = row[3] or {}
             _last, _prev = _wspot.get("最新价"), _wspot.get("昨收")
@@ -7206,6 +7232,16 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
             _rows_data.sort(key=lambda r: (_chg_pct(r) is None, -(_chg_pct(r) or 0)))
         elif sort_mode == "跌幅":
             _rows_data.sort(key=lambda r: (_chg_pct(r) is None, _chg_pct(r) or 0))
+        elif sort_mode == "成交额":
+            # 成交额缺失的排最后而不是当成 0 混在最小的那一批里——"没取到"和
+            # "今天没什么成交"是两回事，混在一起会让人以为这支冷清。
+            def _turnover(row):
+                _v = (row[3] or {}).get("成交额")
+                try:
+                    return float(_v) if _v is not None else None
+                except (TypeError, ValueError):
+                    return None
+            _rows_data.sort(key=lambda r: (_turnover(r) is None, -(_turnover(r) or 0)))
         elif sort_mode == "AI评分":
             _adv_for_sort = {}
             try:
@@ -7266,29 +7302,36 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
             if not is_stale and prev is not None and prev != wspot["最新价"]:
                 flash_class = "price-flash-up" if wspot["最新价"] > prev else "price-flash-down"
 
-            stale_tag = " <span style='font-size:0.65rem;color:var(--fa-muted)'>T-1</span>" if is_stale else ""
+            stale_tag = " <span style='font-size:0.68rem;color:var(--fa-muted)'>T-1</span>" if is_stale else ""
+            # 成交额那一行在紧凑档收起来。它是价格下面的第二行，一支占掉的
+            # 垂直空间跟价格本身一样多，却只在"想细看某一支"时才有用——而想
+            # 细看有详情页。收掉它是自选页行高从 83px 降到 48px 的主要来源。
+            _turnover_line = (
+                "" if compact else
+                f"<div style='font-size:var(--fs-xs);color:var(--fa-muted);margin-top:1px'>"
+                f"{_fmt_turnover(wspot.get('成交额'))}</div>"
+            )
             price_html = (
                 f"<div class='{flash_class}' style='text-align:right;border-radius:2px'>"
                 f"<div style='font-weight:600;color:{color}'>{wspot['最新价']:.2f}{stale_tag}</div>"
-                f"<div style='font-size:0.72rem;color:var(--fa-muted)'>{_fmt_turnover(wspot.get('成交额'))}</div>"
-                f"</div>"
+                f"{_turnover_line}</div>"
             )
-            # 涨跌幅原来是"实色块+白字"。一屏二十来行，就是二十来个饱和色块
-            # 竖着排下来，页面上最抢眼的变成了这一列色块本身，而不是数字。
-            # 改成同色系的淡底+彩字：颜色照样一眼分得出涨跌，但重量轻得多，
-            # 视线回到数字上。用 color-mix 把同一个色号兑淡，不另外挑一个浅色，
-            # 保证以后改 theme.py 时深浅两档自动同步。
+            # 涨跌幅改成纯文字着色，去掉色块。
+            # 这一列改造前是个淡底色块（更早之前是实色块+白字）。52 行排下来，
+            # 页面上最抢眼的是这一列重复五十遍的色块本身，而不是任何一个数字；
+            # 色块还占掉 min-width:60px 的固定宽度，把"84.20"这种四位数挤得
+            # 更靠左。颜色本身已经把涨跌说清楚了，底色不增加任何信息。
+            # 色块是消费级 App 的做法，纯文字着色+右对齐是专业终端的做法。
             badge_html = (
-                f"<div style='text-align:right'>"
-                f"<span style='background:color-mix(in srgb, {color} 11%, transparent);"
-                f"color:{color};font-size:0.78rem;font-weight:600;letter-spacing:.01em;"
-                f"padding:3px 8px;border-radius:2px;display:inline-block;min-width:60px;text-align:center'>"
-                f"{wchange_pct:+.2f}%</span></div>"
+                f"<div style='text-align:right;color:{color};font-weight:600;"
+                f"letter-spacing:.01em'>{wchange_pct:+.2f}%</div>"
             )
 
             # 真正持仓(shares>0)才算市值/浮盈——纯关注(shares=0)不显示这一行，
             # 跟原来持仓的观感保持一致，不会突然多出一堆"0股"的噪音信息。
-            if shares > 0:
+            # 紧凑档同样收起来：自选页绝大多数是 shares=0 的纯关注，真有持仓的
+            # 那几支在"持仓"分区里看，那边默认走舒适档。
+            if shares > 0 and not compact:
                 market_value = shares * wspot["最新价"]
                 pnl = market_value - cost_total
                 pnl_pct = (pnl / cost_total * 100) if cost_total else 0
@@ -7336,7 +7379,14 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                 # a.pos-card-link{{color:inherit!important}}死活压不过浏览器
                 # 默认的a:link蓝色，元素自己的inline style优先级天然最高，不用
                 # 再跟CSS特异性较劲。
-                f"<div style='flex:2.1;font-weight:600;color:var(--fa-text);text-decoration:none'>{_esc(item['name'])}（{_esc(symbol)}）</div>"
+                # 代码降成 12px 次要色，不再跟名称一样粗一样黑。改造前是
+                # "老铺黄金（06181）"整串同一个字重同一个颜色，扫一列名字时
+                # 括号和代码跟名字抢同样的注意力，而代码只在需要精确指认某一支
+                # 时才用得上。
+                f"<div style='flex:2.1;text-decoration:none'>"
+                f"<span style='font-weight:600;color:var(--fa-text)'>{_esc(item['name'])}</span>"
+                f"<span style='font-size:var(--fs-xs);color:var(--fa-muted);margin-left:6px'>{_esc(symbol)}</span>"
+                f"</div>"
                 f"<div style='flex:1.1;display:flex;justify-content:center'>{spark_svg}</div>"
                 f"</div></a>",
                 unsafe_allow_html=True,
@@ -8223,11 +8273,7 @@ else:
                 _render_sector_heatmap(mkt_code)
                 st.markdown("**热门板块**")
                 # 跟上面热力图标同一件事：两处用的是不同的行业分类体系，
-                # 同名板块涨跌幅对不上是分类差异不是数据错误（审计第11条）。
-                st.caption(
-                    "同花顺行业分类，按成交额排——跟上面热力图不是同一套，数值对不上正常。"
-                    if mkt_code == "A" else "按成交额排热度，跟上面热力图同源。"
-                )
+                st.caption("按成交额排热度，点进去看成分股。涨跌幅看上面的热力图。")
                 _render_hot_sectors(mkt_code)
                 # 异动榜/热度榜/新股放在板块之后：板块回答"哪个方向在动"，
                 # 这一块回答"具体哪几支在动"，从面到点，顺序上是收敛的。
@@ -8370,16 +8416,31 @@ else:
                     _mkt_labels = {"全部": None, "港股": "HK", "美股": "US", "沪深": "A", "加密": "CC"}
                     _present = {it.get("market", "A") for it in watch_items}
                     _opts = ["全部"] + [k for k, v in _mkt_labels.items() if v in _present]
-                    _f_col, _s_col = st.columns([2, 1], vertical_alignment="center")
+                    _f_col, _s_col, _d_col = st.columns([2, 1, 1], vertical_alignment="center")
                     with _f_col:
                         _mkt_pick = st.radio(
                             "市场", _opts, horizontal=True, label_visibility="collapsed",
                             key="_watch_market_filter",
                         )
                     with _s_col:
+                        # 2026-09-13：选项从"默认/涨幅/跌幅/AI评分"改成说清楚
+                        # 是什么顺序的四项。"默认"没有回答任何问题——用户看到
+                        # 它不知道列表现在是按什么排的，也就无从判断要不要换。
+                        # 它实际上是"添加时间"（自己加自选的先后顺序），直接
+                        # 写出来。涨幅/跌幅合并成一个"涨跌幅"（点两次切方向没
+                        # 有意义，两个独立选项更直接），另加成交额。
                         _sort_pick = st.selectbox(
-                            "排序", ["默认", "涨幅", "跌幅", "AI评分"],
+                            "排序", ["添加时间", "涨幅", "跌幅", "成交额", "AI评分"],
                             label_visibility="collapsed", key="_watch_sort_mode",
+                        )
+                    with _d_col:
+                        # 密度开关。52 支自选在改造前每行 83px，一屏看 7 支要滚
+                        # 八屏；紧凑档把成交额和持仓盈亏那两行次要信息收起来，
+                        # 行高减半。默认紧凑——自选列表的用途是"扫一眼谁在动"，
+                        # 不是逐支细看，细看有详情页。
+                        _density = st.selectbox(
+                            "密度", ["紧凑", "舒适"],
+                            label_visibility="collapsed", key="_watch_density",
                         )
                     _want = _mkt_labels.get(_mkt_pick)
                     _shown = [it for it in watch_items if _want is None or it.get("market", "A") == _want]
@@ -8387,7 +8448,8 @@ else:
                         st.caption("这个市场下没有自选。")
                     else:
                         st.caption(f"共 {len(_shown)} 支")
-                        _render_position_rows(_shown, _email, sort_mode=_sort_pick)
+                        _render_position_rows(_shown, _email, sort_mode=_sort_pick,
+                                              compact=(_density == "紧凑"))
 
                 # 同上——挪到稳定作用域，避开run_every fragment失效的问题；
                 # shares<=0过滤只处理"自选"这边点的卖出/取消关注。
