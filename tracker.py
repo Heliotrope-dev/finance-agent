@@ -505,6 +505,13 @@ def init_db():
             )
             """
         )
+        # market：2026-09-13 新增，之前这张表只存港股。美股的新股首日表现
+        # 实测也能算（富途 last_close 即发行价这条约定在美股同样成立，
+        # 154只近120天新股全部取得到首日K线），要跟港股并排展示就得按市场分开存。
+        # 老记录一律回填成 HK——这张表在此之前存的确实只有港股。
+        _ipo_cols = [r[1] for r in c.execute("PRAGMA table_info(ipo_performance)").fetchall()]
+        if "market" not in _ipo_cols:
+            c.execute("ALTER TABLE ipo_performance ADD COLUMN market TEXT NOT NULL DEFAULT 'HK'")
         # chart_json：这条议题配套的结构化数据，页面拿它画图（比如美联储那条
         # 存的是CME FedWatch的利率概率表）。存下来而不是渲染时现查，是因为
         # 首页每个访客都要画一次，现查等于每次打开都打一次Futu接口。
@@ -848,22 +855,48 @@ def bump_closure_notice_count(email: str, day: str) -> None:
 
 
 
-def log_ipo_performance(payload_json: str) -> None:
+def log_ipo_performance(payload_json: str, market: str = "HK") -> bool:
+    """写入一份新股首日表现统计。样本明显缩水时拒绝覆盖，返回 False。
+
+    2026-09-13 真实事故：富途的历史K线有每日额度，一天里反复重算会把额度耗光，
+    之后每只新股的首日K线都取不到——函数不会报错，只是 items 从 57 条缩到 19
+    条，照样算出一份"看起来正常"的统计覆盖上去。页面上的均值/中位数/破发率
+    全变了，而且没有任何迹象表明这是额度问题而不是市场变化。
+
+    这不是只有手工重算才会踩：ipo_brief 那条 cron 每个交易日都跑，哪天额度
+    紧张就会静默劣化同一份统计。所以把防线放在写入这一层——新样本不足上一份
+    的一半时直接不写，保留旧的那份。宁可用昨天的完整统计，也不要今天的残缺
+    统计：这块数据本来就是按天更新的，晚一天没有实质影响，样本砍半则会让
+    均值/破发率这些数字发生肉眼可见但无法解释的跳变。
+    """
     init_db()
+    try:
+        _new_n = len(json.loads(payload_json).get("items") or [])
+    except Exception:
+        _new_n = 0
+    _prev_n = len((get_latest_ipo_performance(market) or {}).get("items") or [])
+    if _prev_n and _new_n < _prev_n * 0.5:
+        print(f"[ipo_performance] {market} 新样本只有 {_new_n} 条、上一份有 {_prev_n} 条，"
+              f"疑似行情额度不足导致取数失败，保留旧数据不覆盖")
+        return False
     with closing(_conn()) as c:
-        c.execute("INSERT INTO ipo_performance (payload_json, created_at) VALUES (?, ?)",
-                  (payload_json, datetime.now(timezone.utc).isoformat()))
-        # 只留最近5次，这是个可重算的派生统计，没必要无限堆历史
-        c.execute("DELETE FROM ipo_performance WHERE id NOT IN "
-                  "(SELECT id FROM ipo_performance ORDER BY id DESC LIMIT 5)")
+        c.execute("INSERT INTO ipo_performance (payload_json, created_at, market) VALUES (?, ?, ?)",
+                  (payload_json, datetime.now(timezone.utc).isoformat(), market))
+        # 只留最近5次，这是个可重算的派生统计，没必要无限堆历史。
+        # 注意要**按市场**各留5条：原来是全表留5条，加了美股之后两个市场会互相
+        # 挤掉对方的记录——港股刚写完5条，美股再写5条就把港股全删光了。
+        c.execute("DELETE FROM ipo_performance WHERE market = ? AND id NOT IN "
+                  "(SELECT id FROM ipo_performance WHERE market = ? ORDER BY id DESC LIMIT 5)",
+                  (market, market))
         c.commit()
+    return True
 
 
-def get_latest_ipo_performance() -> dict:
+def get_latest_ipo_performance(market: str = "HK") -> dict:
     init_db()
     with closing(_conn()) as c:
         row = c.execute("SELECT payload_json, created_at FROM ipo_performance "
-                        "ORDER BY id DESC LIMIT 1").fetchone()
+                        "WHERE market = ? ORDER BY id DESC LIMIT 1", (market,)).fetchone()
     if not row:
         return {}
     try:

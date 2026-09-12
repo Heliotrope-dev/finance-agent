@@ -3886,8 +3886,15 @@ def get_earnings_dates(symbols: tuple, days: int = 21) -> dict:
             }
     return found
 
-def get_recent_ipo_performance(days: int = 120, max_count: int = 60) -> dict:
-    """近期港股新股的首日表现统计。返回 {"items":[...], "stats":{...}, "monthly":[...]}。
+def get_recent_ipo_performance(days: int = 120, max_count: int = 60,
+                               market: str = "HK") -> dict:
+    """近期新股的首日表现统计。返回 {"items":[...], "stats":{...}, "monthly":[...]}。
+
+    market 支持 HK / US。2026-09-13 实测美股同样成立——"上市首日那根日K的
+    last_close 就是发行价"这条约定在美股一样（US.AAC.U 首日 last_close=10.0、
+    close=10.05、change_rate=0.5%），近120天有154只新股且首日K线全部取得到。
+    A股取不到：这个账号没有A股行情权限，request_history_kline 直接返回空，
+    所以 A 股那块走的是另一套（发行PE vs 行业PE，见 app._render_a_ipo_briefs）。
 
     2026-09-05新增。用户要求"列一个近期已经上市的新股的涨跌幅，把近几个月新股
     首日涨跌幅的平均值算一下"。这个统计对打新的判断价值比单只新股的招股材料
@@ -3905,8 +3912,11 @@ def get_recent_ipo_performance(days: int = 120, max_count: int = 60) -> dict:
     """
     import datetime as _dt
 
-    r = _futu_call(lambda c: c.get_stock_basicinfo(ft.Market.HK, ft.SecurityType.STOCK),
-                   timeout=40, default=None)
+    _mk = {"HK": ft.Market.HK, "US": ft.Market.US}.get(market)
+    if _mk is None:
+        return {"items": [], "stats": {}, "monthly": []}
+    r = _futu_call(lambda c: c.get_stock_basicinfo(_mk, ft.SecurityType.STOCK),
+                   timeout=60, default=None)
     df = _unwrap_futu(r)
     if df is None or df.empty or "listing_date" not in df.columns:
         return {"items": [], "stats": {}, "monthly": []}
@@ -3914,6 +3924,9 @@ def get_recent_ipo_performance(days: int = 120, max_count: int = 60) -> dict:
     cut = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
     today = _dt.date.today().isoformat()
     recent = df[(df["listing_date"].astype(str) >= cut) & (df["listing_date"].astype(str) <= today)]
+    # 窗口内实际上市多少只，要在 head(max_count) 截断**之前**数——截断之后
+    # 数出来永远等于 max_count，那测的是取样量不是市场真实的新股数量。
+    listed_in_window = int(len(recent))
     recent = recent.sort_values("listing_date", ascending=False).head(max_count)
 
     items = []
@@ -3962,6 +3975,13 @@ def get_recent_ipo_performance(days: int = 120, max_count: int = 60) -> dict:
     broke = sum(1 for p in pcts if p < 0)
     stats = {
         "count": n,
+        # listed_in_window：窗口内实际上市的总只数，跟 count（真正取到首日
+        # 数据的只数）分开。美股这两个数差很多——2026-09-13 实测近120天上市
+        # 154 只，取样 40 只里只有 14 只拿得到可用的首日K线（其余多为 SPAC
+        # 的 unit/warrant 这类没有正常首日行情的品种）。港股两者基本相等。
+        # 不记这个数的话，页面会把"14只"写成"近120天已上市14只"，把抽样
+        # 说成了全样本。
+        "listed_in_window": listed_in_window,
         "avg": sum(pcts) / n,
         # 中位数一定要给：新股首日收益是典型的长尾分布，一只翻倍能把均值拉起
         # 十几个点，只看均值会高估"随便打一只大概能赚多少"。

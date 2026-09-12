@@ -282,18 +282,24 @@ def main() -> int:
     # 先算近期已上市新股的首日表现。放在最前面是因为它不依赖AI，就算后面
     # AI调用全挂了、甚至当天没有待上市新股，这块统计仍然能更新——而这块
     # 恰恰是打新判断里最硬的依据，也是首页“暂无可申购新股”状态的更新时间来源。
-    try:
-        perf = ds.get_recent_ipo_performance(days=120, max_count=60)
-        if perf.get("items"):
-            tracker.log_ipo_performance(json.dumps(perf, ensure_ascii=False))
-            st = perf["stats"]
-            print(f"近{st['days']}天共{st['count']}只新股上市："
-                  f"首日平均{st['avg']:+.1f}%、中位数{st['median']:+.1f}%、"
-                  f"破发率{st['break_rate']:.0f}%")
-        else:
-            print("没有算出新股首日表现（可能是接口没返回）")
-    except Exception as e:
-        print(f"首日表现统计失败（不影响后面的单只简报）：{e}")
+    # 港股和美股各算一份。美股是2026-09-13加的——首页新股那块按市场分了标签，
+    # 美股要跟港股一样有"首日表现统计"和"开盘vs收盘"散点，就得有同样的底层数据。
+    # 美股 max_count 压到 40：近120天有154只新股，每只要发一次历史K线请求，
+    # 全跑等于一次用掉一百多次额度，而统计意义上 40 只已经够稳（港股才57只）。
+    # 两个市场分开 try：美股挂了不能连累港股那份已经跑了一个多月的统计。
+    for _mkt, _label, _cap in (("HK", "港股", 60), ("US", "美股", 40)):
+        try:
+            perf = ds.get_recent_ipo_performance(days=120, max_count=_cap, market=_mkt)
+            if perf.get("items"):
+                tracker.log_ipo_performance(json.dumps(perf, ensure_ascii=False), market=_mkt)
+                st = perf["stats"]
+                print(f"[{_label}]近{st['days']}天共{st['count']}只新股上市："
+                      f"首日平均{st['avg']:+.1f}%、中位数{st['median']:+.1f}%、"
+                      f"破发率{st['break_rate']:.0f}%")
+            else:
+                print(f"[{_label}]没有算出新股首日表现（可能是接口没返回）")
+        except Exception as e:
+            print(f"[{_label}]首日表现统计失败（不影响其余部分）：{e}")
 
     if not ipos:
         print("当前没有待上市的港股新股")

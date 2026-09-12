@@ -4987,22 +4987,17 @@ def _render_ipo_open_vs_close(items: list[dict]):
         summ = {}
 
     st.markdown("**开盘就卖，还是持到收盘**")
-    lines = []
+    # 原来是三条 caption 堆在一起（结论 / 两个中位数 / 怎么读图），占了三行。
+    # 压成一句：先给结论，再用括号补上读图规则。中位数那句砍掉——图上直接
+    # 看得出来，而且结论里已经给了"高多少个百分点"这个更有用的数。
+    _bits = []
     if "hold_better_rate" in summ:
-        r = summ["hold_better_rate"]
-        lines.append(
-            f"这{summ.get('n', 0)}只里，持到收盘比开盘卖更划算的占 {r:.0%}"
-            f"（收盘涨幅中位数比开盘高 {summ.get('hold_gain_median', 0):+.1f} 个百分点）。"
+        _bits.append(
+            f"{summ.get('n', 0)}只里持到收盘更划算的占 {summ['hold_better_rate']:.0%}"
+            f"（中位数高 {summ.get('hold_gain_median', 0):+.1f} 个百分点）"
         )
-    if "open_median" in summ and "close_median" in summ:
-        lines.append(
-            f"开盘涨幅中位数 {summ['open_median']:+.1f}%，收盘涨幅中位数 "
-            f"{summ['close_median']:+.1f}%。"
-        )
-    lines.append("点在虚线上方＝开盘后还在涨，持到收盘更好；落在下方＝高开回落，"
-                 "开盘就该走。左下那一片是开盘和收盘都破发的。")
-    for ln in lines:
-        st.caption(ln)
+    _bits.append("虚线上方＝持到收盘更好，下方＝高开回落，左下＝开盘收盘都破发")
+    st.caption("；".join(_bits) + "。")
     st.plotly_chart(fig, use_container_width=True, config=_PLOTLY_CONFIG,
                     key="_ipo_open_close")
 
@@ -5097,7 +5092,6 @@ def _render_a_ipo_briefs():
     if not ipos:
         return
 
-    st.markdown("**A股新股申购**")
     # 未定价的单独归一类：A股在申购前几天才公布发行价，这期间接口返回的是0。
     # 把0当成"发行价0元"显示出来是错的，当成"没有这只票"藏掉也是错的。
     priced = [ip for ip in ipos if (ip.get("ipo_price") or 0) > 0]
@@ -5140,32 +5134,45 @@ def _render_a_ipo_briefs():
 
 
 def _render_us_ipo_briefs():
-    """美股新股上市日程（2026-09-13 用户要求，三个市场对齐）。
+    """美股新股（2026-09-13 用户要求做成跟港股一致，标签切换）。
 
-    跟港股/A股那两块都不一样，因为美股的两件事本质不同：
+    首日表现统计/开盘vs收盘散点/按月拆解跟港股完全同构，共用
+    _render_ipo_perf_block——底层那条"上市首日 last_close 即发行价"的约定
+    在美股一样成立（实测 US.AAC.U：last_close=10.0、close=10.05、+0.5%）。
 
-    1. **没有散户打新**。美股 IPO 的配售由承销商分配给机构和特定客户，散户
-       基本只能等上市后在二级市场买。所以这块不叫"认购"叫"上市日程"，也不
-       提中签率/申购上限那套——写了等于误导用户去找一个不存在的入口。
-    2. **接口只给日期和定价区间**，没有发行PE/行业PE（A股有）也没有招股要素
-       （港股有 ipo_brief 挖）。所以就老老实实呈现这两样。
+    只有两处按市场差异处理：
+
+    1. **没有打新测算器**。美股 IPO 由承销商配售给机构和特定客户，散户没有
+       申购入口，摆一个算中签收益的工具等于引导用户去找不存在的东西。
+    2. **没有 AI 招股简报**。港股那份的保荐人/基石/超额认购是 ipo_brief.py
+       用 AI 从公开网页挖的，美股没有对应管线，就只给日程和定价区间。
 
     富途一次返回上百条（实测102条），其中很多是没有确定上市日的。只列出已经
     定了日期、且还没上市的，按日期升序——没定日期的堆在页面上没有行动价值。
     """
+    # 首日表现统计跟港股共用同一块（数据由 ipo_brief.py 按 market="US" 另存一份）。
+    # 不给打新测算器：美股散户没有申购入口。
+    try:
+        _perf_us = get_latest_ipo_performance(market="US")
+    except Exception:
+        _perf_us = {}
+    _render_ipo_perf_block(_perf_us, show_calculator=False)
+
     try:
         ipos = get_ipo_calendar("US", limit=60)
     except Exception:
-        return
+        ipos = []
     _today = cn_now().strftime("%Y-%m-%d")
-    upcoming = [ip for ip in ipos if (ip.get("list_date") or "") >= _today]
+    upcoming = [ip for ip in ipos if (ip.get("list_date") or "") >= _today][:8]
     if not upcoming:
+        if not (_perf_us or {}).get("stats"):
+            st.caption("暂时没有美股新股数据。")
         return
-    upcoming = upcoming[:8]
 
-    st.markdown("**美股新股上市日程**")
-    st.caption("美股 IPO 由承销商配售给机构，散户没有打新入口——这里只作上市日程"
-               "和定价区间参考，上市后才能在二级市场买。")
+    st.markdown(
+        "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 6px'>"
+        "即将上市</div>", unsafe_allow_html=True)
+    st.caption("美股 IPO 由承销商配售给机构，散户没有申购入口——只作日程和定价区间参考。")
     for ip in upcoming:
         _lo, _hi = ip.get("price_min"), ip.get("price_max")
         if _lo and _hi:
@@ -5188,83 +5195,28 @@ def _render_us_ipo_briefs():
         )
 
 
-def _render_ipo_briefs():
-    """港股新股认购专区。
+def _render_ipo_perf_block(perf: dict, show_calculator: bool = True):
+    """新股"首日表现统计 + 开盘vs收盘散点 + 按月拆解"这一整块。
 
-    2026-09-05用户要求。跟宏观专区同一个模式：数据和AI判断预先算好落库，
-    首页只读一行，不在渲染路径里跑AI。
+    2026-09-13 从 _render_ipo_briefs 里抽出来，给港股和美股共用——用户要求
+    美股那块做成跟港股一致并且能标签切换。两个市场的这部分完全同构：底层都是
+    "上市首日那根日K的 last_close 即发行价"这条约定（实测美股同样成立）。
 
-    列表只显示还没上市的——打新窗口过了之后这块内容对用户就没有行动价值了，
-    留在页面上只会占位置。认购截止日单独标出来并且做了紧迫度提示：新股最容易
-    错过的不是"不知道有这只"，是"知道但忘了截止日"。
+    show_calculator：只有港股给打新测算器。美股 IPO 由承销商配售给机构，
+    散户没有申购入口，摆一个算中签收益的工具等于引导用户去找不存在的东西。
     """
-    try:
-        briefs = get_latest_ipo_briefs(limit=6)
-    except Exception:
-        briefs = []
-
-    import datetime as _d
-    today = _d.date.today()
-
-    st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
-    st.markdown("**港股新股认购**")
-
-    # 先摆近期整体表现，再列具体新股。顺序是有意的：打新最该先看的不是某一只
-    # 的招股书，而是"最近这个窗口打新整体赚不赚钱"——破发率六成的时候，单只
-    # 的基本面再好也要掂量一下。
-    try:
-        perf = get_latest_ipo_performance()
-    except Exception:
-        perf = {}
-
-    # 简报不是在页面渲染时生成的。没有最近一次任务的时间，就不能把空列表
-    # 表述成“当前没有”；尤其是任务失效时，那会把“未知”伪装成“没有”。
-    updated_at = (perf or {}).get("created_at")
-    updated_text = ""
-    is_stale = True
-    if updated_at:
-        try:
-            updated = _d.datetime.fromisoformat(updated_at)
-            if updated.tzinfo is None:
-                updated = updated.replace(tzinfo=timezone.utc)
-            updated_text = updated.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
-            is_stale = (datetime.now(timezone.utc) - updated.astimezone(timezone.utc)) > timedelta(hours=24)
-        except (TypeError, ValueError):
-            pass
-    # "超过24小时没更新"要分两种情况说，不能都当故障报。
-    # ipo_brief.py 的定时任务是 `25 7 * * 1-5`，周末根本不跑——所以每到周六
-    # 周日，这里必然超过24小时，然后弹一条"刷新任务恢复前请以券商页面为准"
-    # 的黄色警告。用户2026-09-13（周日）截图问"这个没刷新不知道咋回事"，
-    # 就是被这句话误导了：任务没坏，是周末不开市、本来就不刷新。
-    # 把"计划内的不刷新"降级成普通说明，"计划外的过期"才保留警告。
-    _today_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
-    _no_refresh_today = _today_cn.weekday() >= 5  # 5=周六 6=周日
-    if is_stale and _no_refresh_today:
-        st.caption(
-            f"周末不更新新股数据（刷新任务只在交易日 07:25 跑一次）。"
-            f"以下是最近一次更新的结果：{updated_text}（北京时间）。"
-        )
-    elif is_stale:
-        st.warning(
-            "港股新股数据超过24小时未更新；以下结果不应视为当前认购清单。"
-            "刷新任务恢复前，请以券商认购页面为准。"
-        )
-    elif updated_text:
-        st.caption(f"数据更新：{updated_text}（北京时间）")
-    if not briefs:
-        st.caption(
-            ("当前未发现处于认购期、且尚未上市的港股新股。"
-             if (not is_stale or _no_refresh_today)
-             else "新股数据未及时更新，无法确认当前是否有处于认购期的港股新股。")
-            + (f" 最近一次数据更新：{updated_text}。" if updated_text else "")
-        )
-        return
-
     _st = (perf or {}).get("stats") or {}
     if _st.get("count"):
+        # 取到数据的只数和窗口内实际上市只数不一定相等（美股差很多，见
+        # data_sources 里 listed_in_window 的注释）。不相等时如实写成"N只中的M只"，
+        # 否则会把抽样说成全样本。
+        _listed = _st.get("listed_in_window") or _st["count"]
+        _scope = (f"近{_st['days']}天已上市 {_st['count']} 只的首日表现"
+                  if _listed <= _st["count"] else
+                  f"近{_st['days']}天已上市 {_listed} 只，其中 {_st['count']} 只取到首日数据")
         st.markdown(
             f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 8px'>"
-            f"近{_st['days']}天已上市 {_st['count']} 只的首日表现</div>",
+            f"{_esc(_scope)}</div>",
             unsafe_allow_html=True,
         )
         # 上涨占比这一项是用户看到"首日平均+55.7%"时问出来的：他不确定这个数
@@ -5313,7 +5265,8 @@ def _render_ipo_briefs():
         _items = (perf or {}).get("items") or []
 
         _render_ipo_open_vs_close(_items)
-        _render_ipo_calculator(_items)
+        if show_calculator:
+            _render_ipo_calculator(_items)
 
         with st.expander(f"按月拆解与逐只明细（{len(_items)} 只）"):
             if _monthly:
@@ -5353,7 +5306,69 @@ def _render_ipo_briefs():
                         f"<span style='color:{_c};font-size:0.88rem;min-width:80px;text-align:right'>"
                         f"{it['first_day_pct']:+.1f}%</span></div>",
                         unsafe_allow_html=True)
-        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+
+def _render_ipo_briefs():
+    """港股新股认购专区。
+
+    2026-09-05用户要求。跟宏观专区同一个模式：数据和AI判断预先算好落库，
+    首页只读一行，不在渲染路径里跑AI。
+
+    列表只显示还没上市的——打新窗口过了之后这块内容对用户就没有行动价值了，
+    留在页面上只会占位置。认购截止日单独标出来并且做了紧迫度提示：新股最容易
+    错过的不是"不知道有这只"，是"知道但忘了截止日"。
+    """
+    try:
+        briefs = get_latest_ipo_briefs(limit=6)
+    except Exception:
+        briefs = []
+
+    import datetime as _d
+    today = _d.date.today()
+
+    st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
+
+    # 先摆近期整体表现，再列具体新股。顺序是有意的：打新最该先看的不是某一只
+    # 的招股书，而是"最近这个窗口打新整体赚不赚钱"——破发率六成的时候，单只
+    # 的基本面再好也要掂量一下。
+    try:
+        perf = get_latest_ipo_performance()
+    except Exception:
+        perf = {}
+
+    # 简报不是在页面渲染时生成的。没有最近一次任务的时间，就不能把空列表
+    # 表述成“当前没有”；尤其是任务失效时，那会把“未知”伪装成“没有”。
+    updated_at = (perf or {}).get("created_at")
+    updated_text = ""
+    is_stale = True
+    if updated_at:
+        try:
+            updated = _d.datetime.fromisoformat(updated_at)
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            updated_text = updated.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
+            is_stale = (datetime.now(timezone.utc) - updated.astimezone(timezone.utc)) > timedelta(hours=24)
+        except (TypeError, ValueError):
+            pass
+    # 常规的"数据更新：X（北京时间）"和周末那条解释全部去掉——用户
+    # 2026-09-13："什么刷新时间刷新日期什么的时效性的话都可以删掉"。
+    # 这类时间戳每页都挂一条，累积起来是纯噪音，而且数据正常时它不回答任何
+    # 问题。ipo_brief 的定时任务是 `25 7 * * 1-5`，周末本来就不跑，所以周末
+    # 也不再提示。
+    #
+    # 只保留一种情况：**交易日**超过24小时没更新——那是真出问题了，不说
+    # 用户会把过期的认购清单当成当前的。这不是时效性噪音，是安全提示。
+    _today_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
+    _no_refresh_today = _today_cn.weekday() >= 5  # 5=周六 6=周日
+    if is_stale and not _no_refresh_today:
+        st.warning("新股数据超过24小时未更新，以下不应视为当前认购清单，请以券商页面为准。")
+    if not briefs:
+        st.caption("当前没有处于认购期、且尚未上市的港股新股。")
+        return
+
+    # 首日表现统计/散点/按月拆解跟美股共用同一个函数（见 _render_ipo_perf_block）。
+    _render_ipo_perf_block(perf, show_calculator=True)
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
     st.markdown(
         "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 4px'>"
@@ -5785,12 +5800,22 @@ def _render_home_page():
     st.divider()
     _render_macro_briefs()
     _render_event_calendar()
-    _render_ipo_briefs()
-    # 三个市场的新股依次排开。三块形态都不一样，是数据和市场规则共同决定的，
-    # 不是没做统一：港股有招股要素+AI简报、A股有发行PE/行业PE、美股只有日期和
-    # 定价区间且根本没有散户打新。各自用手上真有的东西，不互相硬凑。
-    _render_a_ipo_briefs()
-    _render_us_ipo_briefs()
+    # 三个市场的新股收进一组标签，而不是竖着排三段——竖排的话首页要多滚三屏，
+    # 而用户一次只关心一个市场（用户2026-09-13："上面设置三个标签港股，A股，
+    # 美股三个小标签任意切换"）。
+    #
+    # 港股和美股的内容是同构的（首日表现统计/开盘vs收盘散点/按月拆解，共用
+    # _render_ipo_perf_block）；A股那块形态不同是数据决定的——这个账号没有A股
+    # 行情权限，取不到历史新股的首日K线，所以算不出首日表现统计，改成用富途
+    # 直接给的发行PE/行业PE，那也是A股打新判断贵贱的通行口径。
+    st.markdown("**新股**")
+    _ipo_tab_hk, _ipo_tab_a, _ipo_tab_us = st.tabs(["港股", "A股", "美股"])
+    with _ipo_tab_hk:
+        _render_ipo_briefs()
+    with _ipo_tab_a:
+        _render_a_ipo_briefs()
+    with _ipo_tab_us:
+        _render_us_ipo_briefs()
 
     st.divider()
     st.markdown("**今日重磅消息**")
