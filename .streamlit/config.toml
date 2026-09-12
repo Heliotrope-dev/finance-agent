@@ -10,9 +10,10 @@
 #      的默认蓝+默认圆角，跟页面其余部分不是一套。
 #   2. **闪一下。** 注入的 CSS 要等页面渲染到那一步才生效，首屏会先按默认主题
 #      画一遍再被盖掉——st.metric 那个数字尤其明显，默认 2.25rem 先画出来，
-#      然后跳到 1.5rem。主题配置是在首次绘制之前就进去的，没有这一跳。
+#      然后跳到 24px。主题配置是在首次绘制之前就进去的，没有这一跳。
 #
-# 下面每个色值都跟 app.py 里 :root 那组 --fa-* 变量一一对应，改一边必须改另一边。
+# 下面每个数值都跟 assets/theme.css 的 :root 里的 token 一一对应，
+# 改一边必须改另一边——这两边是同一套设计系统的两个出口，不是两套配置。
 [theme]
 base = "light"
 # 2026-09-04前端重做：主色从品牌红改成墨色。整个界面现在只有一条配色规矩
@@ -20,16 +21,16 @@ base = "light"
 # 用墨色而不是红色，涨跌数字才是页面上最跳的东西，这也是这类金融界面看着
 # 专业的根本原因：品牌色一旦也很红，涨跌红就不再是最醒目的信息了。
 primaryColor = "#17181C"
-backgroundColor = "#FAFAFB"          # --fa-bg
-secondaryBackgroundColor = "#F3F4F6" # --fa-fill
-textColor = "#17181C"                # --fa-text
+backgroundColor = "#FAFAFB"          # --bg-page
+secondaryBackgroundColor = "#F3F4F6" # --bg-fill
+textColor = "#17181C"                # --text-primary
 # 链接同样走墨色而不是默认的蓝。这个项目里链接几乎都是"点进详情"这类导航，
 # 不是外链引用，用一个饱和蓝会在满屏灰阶里变成最跳的东西，抢掉涨跌红绿。
 linkColor = "#17181C"
-# --fa-border。这一条影响的范围比看上去大：dataframe 的网格线、expander 的
+# --line-divider。这一条影响的范围比看上去大：dataframe 的网格线、expander 的
 # 分隔线、下拉弹层的描边全走它，而这些正是 CSS 补丁够不着的地方。
-borderColor = "#EAEAEF"
-dataframeBorderColor = "#EAEAEF"
+borderColor = "rgba(23,24,28,0.06)"
+dataframeBorderColor = "rgba(23,24,28,0.06)"
 codeBackgroundColor = "#F3F4F6"
 
 # 输入控件不画外框。用户提过两次（"项目里面还是存在按键的外框这个我之前说过
@@ -38,21 +39,25 @@ codeBackgroundColor = "#F3F4F6"
 # 无框之后靠背景色和留白分隔，这是这套界面本来的做法。
 showWidgetBorder = false
 
-# --fa-radius / --fa-radius-sm
-baseRadius = "10px"
-buttonRadius = "7px"
+# assets/theme.css 里的 --r-base。全站只留两个圆角：这个 2px，和胶囊用的
+# 999px（主题配不了后者，也不需要——Streamlit 自己没有胶囊形控件）。
+# 改造前有 2/4/7/8/10/50% 六种，其中 7px 是 rem 算出来的碎数，不是选出来的。
+# 走"精密仪器"路线：锐利的 2px 贯彻到底。
+baseRadius = "2px"
+buttonRadius = "2px"
 
 font = "Inter, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif"
 
-# st.metric 的数字。app.py 里已经有一条同值的 CSS（带 letter-spacing 和颜色，
-# 主题配不了那两项），这里再配一遍不是重复——是为了首屏别先画一个 2.25rem
-# 的大数字再跳到 1.5rem。两处必须保持同一个值。
-metricValueFontSize = "1.5rem"
+# st.metric 的数字，对应 theme.css 的 --fs-xl。那边已经有一条同值的 CSS
+# （带 letter-spacing 和颜色，主题配不了那两项），这里再配一遍不是重复——
+# 是为了首屏别先画一个 2.25rem 的大数字再跳到 24px。两处必须保持同值。
+metricValueFontSize = "24px"
 metricValueFontWeight = 600
 
-# 标题字阶。Streamlit 默认 h1 是 2.75rem，放在一个信息密度这么高的页面上
-# 过大了——这类界面的层级是靠字重和留白拉开的，不是靠把标题放大一倍。
-headingFontSizes = ["1.6rem", "1.3rem", "1.02rem", "0.95rem", "0.88rem", "0.82rem"]
+# 标题字阶，对应 theme.css 的 --fs-xl / --fs-lg / 16px …。Streamlit 默认 h1 是
+# 2.75rem，放在一个信息密度这么高的页面上过大了——这类界面的层级是靠字重和
+# 留白拉开的，不是靠把标题放大一倍。
+headingFontSizes = ["24px", "18px", "16px", "15px", "13px", "12px"]
 headingFontWeights = [600, 600, 600, 600, 600, 600]
 
 # st.* 原生图表（Altair/Vega-Lite/未显式配色的 Plotly）的色板。

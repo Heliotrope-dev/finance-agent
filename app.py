@@ -131,656 +131,35 @@ st.set_page_config(page_title="Invest Agent", layout="wide", initial_sidebar_sta
 # 这里原来还有一版深色模式，用户实测反馈"按了跟没按一样，很烦"——撤掉了，
 # 只留CSS变量本身（数值固定为浅色，不再有深色分支），移动端适配和涨跌色号
 # 统一这两块跟深色模式无关，继续保留。
-_FA_BASE_CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+# CSS 全部搬到 assets/theme.css（2026-09-13）。在此之前它是这里一个 650 行的
+# 字符串常量，外加散在本文件各处的 15 个 st.markdown("<style>…")，同一件事
+# （比如"卡片链接不要蓝色下划线"）在四个地方各写了一遍——改一条要在十几处找。
+#
+# 读文件而不是继续用字符串常量，还有两个实际好处：编辑器能对 .css 做语法
+# 高亮和括号匹配（650 行 CSS 混在 Python 字符串里，少一个花括号是看不出来的），
+# 以及 git diff 里改动落在 CSS 文件上，跟渲染逻辑的改动分得开。
+_THEME_CSS_PATH = Path(__file__).resolve().parent / "assets" / "theme.css"
 
-:root {
-    /* 画布：只有三层——底、卡面、更浅的填充块 */
-    --fa-bg:        #FAFAFB;
-    --fa-surface:   #FFFFFF;
-    --fa-fill:      #F3F4F6;
-    --fa-border:    #EAEAEF;
-    --fa-border-2:  #DBDCE3;
 
-    /* 文字：四级，够用且不会滥用 */
-    --fa-text:      #17181C;
-    --fa-text-2:    #494C55;
-    --fa-muted:     #82858E;
-    --fa-faint:     #A8ABB3;
+@st.cache_data(show_spinner=False)
+def _load_theme_css(mtime: float) -> str:
+    """读出 theme.css。
 
-    /* 界面强调色刻意用墨色而不是彩色。整个页面唯一允许出现的饱和色是
-       涨跌红绿——这是这类界面显专业的关键，一旦品牌色也是红的，涨跌就
-       不再是页面上最醒目的信息了。 */
-    --fa-ink:       #17181C;
+    mtime 作为入参是故意的——它是这个缓存的键。Streamlit 的 cache_data 只看
+    参数，不看文件内容，如果签名里不带任何会变的东西，改完 CSS 必须重启服务
+    才能看到效果；带上 mtime，文件一存缓存就自然失效，本地调样式不用来回重启。
+    生产上 mtime 固定，等于只读一次。
+    """
+    return _THEME_CSS_PATH.read_text(encoding="utf-8")
 
-    --fa-radius:    10px;
-    --fa-radius-sm: 7px;
-}
 
-/* ── 排版基线 ─────────────────────────────────────────────────────────── */
-html, body, .stApp, [data-testid="stAppViewContainer"] {
-    background: var(--fa-bg) !important;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
-                 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif !important;
-    color: var(--fa-text);
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-}
-/* 等宽数字。财务界面里数字必须能上下对齐，比例数字会让一列价格看着参差
-   不齐——这一条是这类页面"看着专业"最省力也最容易被忽略的一处。 */
-.stApp, .stApp * { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1; }
-
-[data-testid="stMain"], [data-testid="stMainBlockContainer"],
-section.main, .main, .block-container,
-[data-testid="stBottom"], .stBottom, [data-testid="stBottomBlockContainer"], footer {
-    background: var(--fa-bg) !important;
-}
-header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; height: 0 !important; }
-
-/* Streamlit自带的右上角工具区（2026-09-11前端审计）：
-   - stStatusWidget 是"Running… / Stop"那个小人+按钮。行情页每3秒刷新一次
-     fragment，它就跟着闪一次，页面右上角一直在抖。
-   - MainMenu 是那个 ⋮ 菜单，点开是"Made with Streamlit v1.59.2"这类给
-     开发者看的东西，对访问者没有意义，而且展开时会压在内容上面。
-   两个都只做视觉隐藏、不用 display:none——首屏加载遮罩那段JS（见上面
-   _fa_loader）靠读 stStatusWidget 的 textContent 判断"跑完了没有"，
-   把元素从渲染树里摘掉是能读到，但留着更保险，也免得以后谁改了那段
-   探测逻辑又踩一次。 */
-[data-testid="stStatusWidget"] {
-    opacity: 0 !important; pointer-events: none !important;
-    position: absolute !important; width: 1px !important; height: 1px !important;
-    overflow: hidden !important;
-}
-#MainMenu, [data-testid="stMainMenu"], [data-testid="stToolbarActions"] { display: none !important; }
-
-/* 顶部导航吸顶（2026-09-11前端审计）：行情页内容很长，滚到底部想切分区
-   得往回滚很远。让导航那一条钉在顶部，背景用页面底色盖住下面滚过去的
-   内容，不然文字会透上来叠在一起。z-index 取 90——低于右下角AI浮标
-   (9999)，不跟它抢层级。 */
-.st-key-fa_nav {
-    position: sticky !important; top: 0 !important; z-index: 90 !important;
-    background: var(--fa-bg) !important;
-    padding-top: 6px !important;
-}
-
-/* 内容收窄居中。原来是整屏铺满，超宽屏上一行数字能拉到两千多像素，
-   眼睛要横扫过去才读得完；收到1240再给足左右留白，行长回到舒适区间。
-   底部 120px 是给右下角AI浮标让位：浮标 56px 高、距底 26px，实测会盖住
-   最后一行的数字（中信金属的 -9.97%、模拟盘持仓的盈亏金额都被挡过）。 */
-[data-testid="stMainBlockContainer"] {
-    max-width: 1240px !important;
-    padding: 26px 40px 120px !important;
-}
-@media (max-width: 900px) {
-    [data-testid="stMainBlockContainer"] { padding: 18px 18px 108px !important; }
-}
-
-[data-testid="stHorizontalBlock"], [data-testid="stColumn"], [data-testid="stElementContainer"] {
-    background: transparent !important;
-}
-
-/* ── 标题层级 ─────────────────────────────────────────────────────────── */
-[data-testid="stMarkdownContainer"] h1 { font-size: 1.6rem; font-weight: 650; letter-spacing: -0.018em; color: var(--fa-text); margin: 0 0 14px; }
-[data-testid="stMarkdownContainer"] h2 { font-size: 1.22rem; font-weight: 620; letter-spacing: -0.012em; color: var(--fa-text); margin: 30px 0 12px; }
-[data-testid="stMarkdownContainer"] h3 { font-size: 1.02rem; font-weight: 600; letter-spacing: -0.008em; color: var(--fa-text); margin: 24px 0 10px; }
-[data-testid="stMarkdownContainer"] p { color: var(--fa-text-2) !important; line-height: 1.68; }
-/* 项目里所有小节标题都是 st.markdown("**标题**")，也就是一个只含<strong>的
-   <p>。
-   2026-09-12改（前端审计第14条"层级太平"）：上一版把它渲染成 0.825rem 的
-   灰色大写眉标，出发点是"安静"，但实测的结果是标题和正文分不出来——审计
-   原话"板块标题（宏观议题/投研观察排行榜）是14px的灰字，和正文分不开"。
-   安静和没有层次是两回事：一页里十几个板块，如果标题不比正文重，读者就
-   只能一行行读过去，没法先扫结构再决定看哪块。
-   改成 1.1rem / 600 字重 / 正文色，并去掉 uppercase（对中文无效，对夹在
-   中间的英文反而会把"IPO"之外的普通词也拉成全大写）。字距从 +0.05em 收到
-   -0.01em：大字号配正字距会显得松垮，标题本来就该比正文紧。 */
-[data-testid="stMarkdownContainer"] p > strong:only-child {
-    display: block; font-size: 1.1rem; font-weight: 600; letter-spacing: -0.01em;
-    color: var(--fa-text); margin: 34px 0 10px;
-}
-/* 数字统一用等宽数字（前端审计第14条最后一行）。比例字体里 1 比 0 窄一大截，
-   上下两行价格的小数点对不齐，一列数字扫下来是锯齿状的。tabular-nums 只改
-   数字的字形宽度，不影响中英文排版，所以可以全局开。 */
-html, body, [data-testid="stAppViewContainer"] { font-variant-numeric: tabular-nums; }
-/* 只给正文里真正的行内链接加下划线，并明确排除各种整卡可点的<a>。
-   项目里推荐股/指数/板块/持仓卡片都是拿一个<a class="*-card-link">把若干
-   <div>包起来的，而HTML规范不允许<p>里出现块级元素——浏览器解析到<div>
-   时会提前把<p>闭掉，于是留下一个高度1px、内容为空的<a>孤儿节点。给它
-   加border-bottom就会在卡片里凭空多出一条横线（实测在推荐股和指数卡片
-   上各出现过一次）。按class排除掉，比靠结构选择器去猜稳。 */
-/* 链接默认不画下划线，只在悬停时出现。页面上大量的可点内容是新闻标题和
-   卡片，给它们全部常驻下划线会很吵；而且这些标题有的落在<p>里、有的不在，
-   常驻下划线会变成"有的有有的没有"的不一致。默认干净、悬停给反馈更稳。 */
-[data-testid="stMarkdownContainer"] a { text-decoration: none; border-bottom: none; }
-[data-testid="stMarkdownContainer"] p > a:not([class*="card-link"]):hover {
-    border-bottom: 1px solid var(--fa-border-2);
-}
-
-[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * {
-    color: var(--fa-muted) !important; font-size: 0.79rem !important; line-height: 1.6 !important;
-}
-[data-testid="stWidgetLabel"] p { color: var(--fa-text-2) !important; font-size: 0.82rem !important; font-weight: 500 !important; }
-
-/* ── 分隔 ─────────────────────────────────────────────────────────────── */
-/* 分隔线上下留白 30px→46px（2026-09-12，用户反馈首页"栏目之间有点挤"）。
-   这条线是首页各栏目之间唯一的分界，留白比线本身更能说明"这里换了一块"——
-   线细、留白窄的时候，两个栏目在视觉上还是连着的，得靠读文字才分得开。 */
-hr, [data-testid="stDivider"] hr { border: none !important; border-top: 1px solid var(--fa-border) !important; margin: 46px 0 !important; }
-
-/* ── 顶部导航（st.radio 伪装成下划线标签页）────────────────────────────
-   原来是红底白字的胶囊，五个并排像一排按钮，很难不显得像后台管理系统。
-   改成印刷品式的下划线标签：不选中只是灰字，选中是墨色字+一条2px的墨线。 */
-/* 这一组的父级是flex列容器且不拉伸，radio会缩成内容宽度，下划线也就只有
-   一半宽。把这条链上的容器都撑满，那条分隔线才跟内容区左右对齐。 */
-.st-key-fa_nav { align-items: stretch !important; }
-.st-key-fa_nav [data-testid="stElementContainer"],
-.st-key-fa_nav [data-testid="stRadio"],
-.st-key-fa_nav [data-testid="stRadioGroup"] { width: 100% !important; }
-.st-key-fa_nav [role="radiogroup"] {
-    width: 100% !important; gap: 0 !important; align-items: flex-end !important;
-    border-bottom: 1px solid var(--fa-border);
-}
-.st-key-fa_nav [data-testid="stRadioOption"],
-.st-key-fa_nav [data-testid="stRadioOption"]:hover,
-.st-key-fa_nav [data-testid="stRadioOption"]:has(input:checked) {
-    padding: 0 0 12px !important; margin: 0 30px 0 0 !important;
-    /* background 必须在这里显式写成透明：下面通用的行内radio规则会把选中项
-       刷成墨色实底，而那条规则的选择器不带 .st-key-fa_nav，特异性虽然更低
-       却是唯一声明了 background 的一条，不显式覆盖就会漏进来，导航标签变成
-       一个黑方块。踩过一次。 */
-    background: transparent !important; border: none !important;
-    border-bottom: 2px solid transparent !important; border-radius: 0 !important;
-    transition: border-color .16s ease;
-}
-/* 干掉单选圆点。Streamlit的结构是
-   label > span>input + div > div > [圆点div, stMarkdownContainer]，
-   圆点那层没有稳定的testid，只能反选"不是文字容器的那个兄弟"。 */
-.st-key-fa_nav [data-testid="stRadioOption"] > div > div > div:not([data-testid="stMarkdownContainer"]) {
-    display: none !important;
-}
-.st-key-fa_nav [data-testid="stRadioOption"] p {
-    font-size: 0.92rem !important; font-weight: 500 !important; color: var(--fa-muted) !important;
-    letter-spacing: 0.005em; transition: color .16s ease;
-}
-.st-key-fa_nav [data-testid="stRadioOption"]:hover p { color: var(--fa-text-2) !important; }
-.st-key-fa_nav [data-testid="stRadioOption"]:has(input:checked) { border-bottom-color: var(--fa-ink) !important; }
-.st-key-fa_nav [data-testid="stRadioOption"]:has(input:checked) p { color: var(--fa-text) !important; font-weight: 600 !important; }
-
-/* 其余位置的横向 radio（市场切换、K线周期、走势范围）统一成安静的分段控件：
-   去掉原生小圆点，做成下划线标签页，跟顶部导航同一套长相。
-   2026-09-04改：原来选中态是"墨色实底+白字"的胶囊，页面上就是一块突兀的
-   黑方块，跟这套灰白克制的底子撞得厉害。整站"选择一项"这件事本来就只该有
-   一种视觉语言，而导航已经定了下划线这一种，次级选择器（市场、K线周期、
-   区间）没有理由再造第二种更重的样式——分量还压过了导航本身。
-   改成同款下划线：默认灰字无底色，选中只是字变墨色加粗、底下一条线。 */
-[data-testid="stRadio"] [role="radiogroup"] { gap: 2px; align-items: stretch; }
-[data-testid="stRadioOption"] {
-    padding: 5px 2px !important; margin: 0 14px 0 0 !important;
-    background: transparent !important;
-    border: 0 !important; border-bottom: 2px solid transparent !important;
-    border-radius: 0 !important;
-    transition: border-color .14s ease, color .14s ease;
-}
-[data-testid="stRadioOption"] > div > div > div:not([data-testid="stMarkdownContainer"]) { display: none !important; }
-[data-testid="stRadioOption"] p { font-size: 0.84rem !important; font-weight: 500 !important; color: var(--fa-muted) !important; }
-[data-testid="stRadioOption"]:hover { background: transparent !important; }
-[data-testid="stRadioOption"]:hover p { color: var(--fa-text-2) !important; }
-[data-testid="stRadioOption"]:has(input:checked) {
-    background: transparent !important; border-bottom-color: var(--fa-ink) !important;
-}
-[data-testid="stRadioOption"]:has(input:checked) p { color: var(--fa-text) !important; font-weight: 600 !important; }
-div[data-testid="stButtonGroup"] button, div[data-testid="stButtonGroup"] [role="radio"] {
-    background: var(--fa-surface) !important; border: 1px solid var(--fa-border) !important;
-    color: var(--fa-muted) !important; border-radius: var(--fa-radius-sm) !important;
-    font-size: 0.83rem !important; font-weight: 500 !important;
-}
-div[data-testid="stButtonGroup"] button[aria-checked="true"], div[data-testid="stButtonGroup"] [aria-checked="true"] {
-    background: var(--fa-ink) !important; border-color: var(--fa-ink) !important; color: #fff !important;
-}
-div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { color: inherit !important; }
-
-/* ── 卡片与容器 ───────────────────────────────────────────────────────── */
-/* 2026-09-05用户定的全局规则："现在我们项目里不要出现显眼的框框，保持透明统一"。
-   这条改成在源头上生效，而不是逐个调用点去改：Streamlit 的 st.container(border=True)
-   和 st.expander 都会画一个白底加完整边框的盒子，页面上一堆这种盒子摞在一起，
-   跟本项目"透明底加一条发丝线"的基调是两套语言。之前是发现一处改一处（指数行、
-   核心股、板块、内部人交易…），改到第五处就该明白这是个全局问题——在这里统一
-   成透明底加一条底部发丝线，以后新写的代码不用再单独处理。
-   分区之间的层次靠留白和标题字重表达，不靠画框。 */
-[data-testid="stVerticalBlockBorderWrapper"] {
-    background: transparent !important;
-    border: none !important;
-    border-radius: 0 !important;
-}
-/* 真正画边框的是内层的 stVerticalBlock，不是外面这层 BorderWrapper——
-   第一版只改了 BorderWrapper，页面上白框纹丝不动，扒 DOM 才看到
-   `1px solid rgba(23,24,28,.2)` 挂在内层。
-   用 :not([class*="st-key-"]) 把这条限制在"Streamlit 自己画的框"上：
-   项目里那些扁平行是 st.container(key=...) 建的，带 st-key 类、各自
-   已经定义了想要的底部发丝线，不能被这条一并抹掉。 */
-[data-testid="stVerticalBlock"]:not([class*="st-key-"]) {
-    border: none !important;
-    border-radius: 0 !important;
-    background: transparent !important;
-}
-/* 无边框之后靠一条发丝线分隔相邻区块，层次不靠画框靠留白。 */
-[data-testid="stVerticalBlockBorderWrapper"] > [data-testid="stLayoutWrapper"] > [data-testid="stVerticalBlock"]:not([class*="st-key-"]) {
-    border-bottom: 1px solid var(--fa-border) !important;
-    padding: 2px 0 12px !important;
-}
-/* 边框其实挂在内层的<details>上，不是 stExpander 这一层，套外层是没用的。 */
-[data-testid="stExpander"] details {
-    background: transparent !important;
-    border: none !important;
-    border-bottom: 1px solid var(--fa-border) !important;
-    border-radius: 0 !important; box-shadow: none !important;
-}
-[data-testid="stExpander"] summary { padding: 11px 2px !important; font-size: 0.87rem !important; border-radius: var(--fa-radius) !important; }
-[data-testid="stExpander"] summary:hover { background: var(--fa-fill) !important; }
-[data-testid="stExpander"] summary p { font-weight: 500 !important; color: var(--fa-text-2) !important; }
-
-/* ── 数字指标 ─────────────────────────────────────────────────────────── */
-[data-testid="stMetric"] { background: transparent !important; padding: 0 !important; }
-[data-testid="stMetricLabel"] p {
-    font-size: 0.775rem !important; font-weight: 500 !important; color: var(--fa-muted) !important;
-    letter-spacing: 0.035em;
-}
-[data-testid="stMetricValue"] {
-    /* 2026-09-12：从 1.85rem 收到 1.5rem。实机看个股详情页，"最高/最低/今开"
-       这三个次要参考数字几乎跟顶部主价格一样大，主次完全拉不开，而且三行
-       大字把K线推到了首屏之外。1.5rem 仍然是明确的"指标数字"体量，但不再
-       跟页面主角抢戏，各页面的垂直占用也跟着收了一截。 */
-    font-size: 1.5rem !important; font-weight: 600 !important; letter-spacing: -0.028em !important;
-    color: var(--fa-text) !important; line-height: 1.24 !important;
-}
-/* Streamlit 新版给 delta 加了一个带底色的圆角小胶囊，粉底/浅绿底在这套
-   近乎无色的界面里显得很突兀，而且底色本身不传递任何额外信息——箭头和
-   正负号已经说清楚方向了。去掉底色只留文字。 */
-[data-testid="stMetricDelta"] {
-    background: transparent !important; padding: 0 !important; margin-top: 2px !important;
-    font-size: 0.82rem !important; font-weight: 500 !important;
-}
-[data-testid="stMetricDelta"] svg { width: 14px !important; height: 14px !important; }
-
-/* ── 按钮 ─────────────────────────────────────────────────────────────── */
-/* 按钮系统。全站只有三种按钮，各自职责清楚，不再每个页面自己写一套：
-   次要（默认）= 白底发丝边框；主要 = 墨色实底；安静（tertiary）= 无边框弱化，
-   用在图标按钮和返回这类不该抢戏的位置。 */
-/* 次要按钮：透明底 + 发丝描边，不是"白盒子"。
-   页面底色是 #FAFAFB，按钮如果填纯白，就会从底上浮出来一块，再加一圈边框，
-   看着就是一个标准的表单控件方盒——这正是用户说的"大白框"。改成背景透明、
-   直接吃页面底色，只留一条极淡的描边勾出可点范围；悬停时才填一块浅灰给出
-   反馈。同一颗按钮，从"一块白方框"变成"一个轮廓"，页面立刻安静下来。 */
-/* 下面这一组选择器是整套按钮系统的唯一入口。Streamlit 的按钮不止 st.button
-   一种：表单提交键、弹层触发键各自是独立的 testid，只写 .stButton button 会
-   漏掉它们，于是页面上就会出现"大部分按钮是新样式、个别还是旧样式"的割裂。
-   全部并到同一组选择器上，样式只此一份，以后加新按钮也自动继承。 */
-/* 2026-09-12：连那条描边也去掉。用户第二次提这件事——"项目里面还是存在按键
-   的外框，这个我之前说过很丑，做成跟我们现在项目一样透明无框的那种风格"。
-   上一版只把底色改透明、留了 1px 描边，页面上仍然是一个个小方框。
-   现在改成纯文字按钮：常态只有文字，悬停时才浮出一块浅灰底作为可点反馈。
-   为了不让它退化成"看不出能点"，文字用正文墨色 + 500 字重（比周围的说明
-   文字重一档），左右 padding 保留，让悬停时那块底色是个规整的圆角块。 */
-.stButton button,
-[data-testid="stFormSubmitButton"] button,
-[data-testid="stPopover"] button {
-    background: transparent !important; border: none !important;
-    color: var(--fa-text) !important; border-radius: var(--fa-radius-sm) !important;
-    font-size: 0.845rem !important; font-weight: 500 !important; padding: 6px 12px !important;
-    box-shadow: none !important;
-    transition: background .15s ease, color .15s ease;
-}
-.stButton button:hover,
-[data-testid="stFormSubmitButton"] button:hover,
-[data-testid="stPopover"] button:hover {
-    background: var(--fa-fill) !important; color: var(--fa-text) !important;
-}
-.stButton button:active,
-[data-testid="stFormSubmitButton"] button:active { background: #E9EAEE !important; }
-.stButton button:focus, .stButton button:focus-visible,
-[data-testid="stFormSubmitButton"] button:focus,
-[data-testid="stFormSubmitButton"] button:focus-visible,
-[data-testid="stPopover"] button:focus,
-[data-testid="stPopover"] button:focus-visible { box-shadow: none !important; outline: none !important; }
-.stButton button:disabled,
-[data-testid="stFormSubmitButton"] button:disabled {
-    background: transparent !important; border: none !important;
-    color: var(--fa-faint) !important;
-}
-
-/* "展开/更多/收起"这类按钮不是动作，是一个揭示更多内容的入口。它们大多是
-   整行宽度，画成带边框的大方块时会在页面中间横出一道很重的横条。改成没有
-   边框、没有底色的居中弱化文字，上面压一条发丝分割线——跟编辑类网站的
-   "加载更多"是同一种处理，存在感刚好够点，又不会把版面切断。 */
-/* 容器本身也要撑满一行。按钮上的 width:100% 撑的是它的父容器，而
-   Streamlit 给按钮的外层容器默认是收缩宽度的——只给按钮加宽度，撑开的
-   仍然是一个本来就很窄的盒子，文字看着还是贴在左边（"更多板块"就是这样，
-   上面那条发丝线也只有短短一截）。 */
-[class*="st-key-_detail_expand_btn"],
-[class*="st-key-_idx_expand_btn"],
-[class*="st-key-_ai_sim_runs_more"],
-[class*="st-key-_ai_sim_orders_more"],
-[class*="st-key-_more_limit_pool"],
-[class*="st-key-_sectors_more_btn"],
-[class*="st-key-_sectors_collapse_btn"],
-[class*="st-key-_movers_collapse_btn"],
-[class*="st-key-_home_news_more"],
-[class*="st-key-_home_news_collapse"],
-[class*="st-key-_movers_expand_btn"] {
-    width: 100% !important;
-}
-
-[class*="st-key-_detail_expand_btn"] button,
-[class*="st-key-_idx_expand_btn"] button,
-[class*="st-key-_ai_sim_runs_more"] button,
-[class*="st-key-_ai_sim_orders_more"] button,
-[class*="st-key-_more_limit_pool"] button,
-[class*="st-key-_sectors_more_btn"] button,
-[class*="st-key-_sectors_collapse_btn"] button,
-[class*="st-key-_movers_collapse_btn"] button,
-[class*="st-key-_home_news_more"] button,
-[class*="st-key-_home_news_collapse"] button,
-[class*="st-key-_movers_expand_btn"] button {
-    background: transparent !important; border: none !important;
-    border-top: 1px solid var(--fa-border) !important;
-    border-radius: 0 !important; color: var(--fa-muted) !important;
-    font-size: 0.82rem !important; font-weight: 500 !important;
-    padding: 13px 8px 6px !important; letter-spacing: .02em;
-    width: 100% !important;          /* 撑满整行，文字才能真正居中 */
-}
-[class*="st-key-_detail_expand_btn"] button:hover,
-[class*="st-key-_idx_expand_btn"] button:hover,
-[class*="st-key-_ai_sim_runs_more"] button:hover,
-[class*="st-key-_ai_sim_orders_more"] button:hover,
-[class*="st-key-_more_limit_pool"] button:hover,
-[class*="st-key-_sectors_more_btn"] button:hover,
-[class*="st-key-_sectors_collapse_btn"] button:hover,
-[class*="st-key-_movers_collapse_btn"] button:hover,
-[class*="st-key-_home_news_more"] button:hover,
-[class*="st-key-_home_news_collapse"] button:hover,
-[class*="st-key-_movers_expand_btn"] button:hover {
-    background: transparent !important; color: var(--fa-text) !important;
-}
-
-/* 主要动作：唯一填实底的按钮。一屏里只应该有一个，让"这一步该点哪"没有歧义。 */
-/* 2026-09实测修复：按钮文字之前肉眼几乎看不见——登录/注册这类主要按钮
-   墨色实底配白字，但白字只设在了<button>本身，按钮内层文字实际包在
-   [data-testid="stMarkdownContainer"] p里，页面上游有一条
-   `[data-testid="stMarkdownContainer"] p { color: var(--fa-text-2) !important }`
-   全局规则，直接挂在这层<p>上，子元素的直接样式天然盖过父级<button>上
-   继承来的白色，不管父级选择器特异度多高。必须连着内层p/div/span一起
-   显式设成白色，只设按钮本身不够。 */
-.stButton button[kind="primary"],
-.stButton button[data-testid="stBaseButton-primary"],
-[data-testid="stFormSubmitButton"] button[kind="primary"],
-[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] {
-    background: var(--fa-ink) !important; border-color: var(--fa-ink) !important; color: #fff !important;
-}
-.stButton button[kind="primary"] p,
-.stButton button[kind="primary"] div,
-.stButton button[kind="primary"] span,
-.stButton button[data-testid="stBaseButton-primary"] p,
-.stButton button[data-testid="stBaseButton-primary"] div,
-.stButton button[data-testid="stBaseButton-primary"] span,
-[data-testid="stFormSubmitButton"] button[kind="primary"] p,
-[data-testid="stFormSubmitButton"] button[kind="primary"] div,
-[data-testid="stFormSubmitButton"] button[kind="primary"] span,
-[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] p,
-[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] div,
-[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] span { color: #fff !important; }
-.stButton button[kind="primary"]:hover,
-.stButton button[data-testid="stBaseButton-primary"]:hover,
-[data-testid="stFormSubmitButton"] button[kind="primary"]:hover,
-[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"]:hover {
-    background: #000 !important; border-color: #000 !important; color: #fff !important;
-}
-/* 安静按钮：默认几乎看不见，悬停才浮出一块底。项目里的图标按钮（搜索/添加/
-   对比/删除/返回）全部用它，不该在页面上摆一圈边框抢注意力。 */
-/* 安静档：连描边都没有，只在悬停时浮出一块底。图标按钮和返回键走这一档。
-   这一档默认色(--fa-muted)跟上面那条全局p规则(--fa-text-2)刚好都是灰调、
-   肉眼分不出明显差异，实测没有"看不见"的问题，但hover态要变成--fa-text
-   （比--fa-text-2更深），同样会被子级p盖掉，这里一并显式补上，不能只
-   设按钮本身。 */
-.stButton button[kind="tertiary"], .stButton button[data-testid="stBaseButton-tertiary"] {
-    background: transparent !important; border: 1px solid transparent !important;
-    color: var(--fa-muted) !important;
-}
-.stButton button[kind="tertiary"]:hover, .stButton button[data-testid="stBaseButton-tertiary"]:hover {
-    background: var(--fa-fill) !important; border-color: transparent !important; color: var(--fa-text) !important;
-}
-.stButton button[kind="tertiary"]:hover p,
-.stButton button[kind="tertiary"]:hover div,
-.stButton button[kind="tertiary"]:hover span,
-.stButton button[data-testid="stBaseButton-tertiary"]:hover p,
-.stButton button[data-testid="stBaseButton-tertiary"]:hover div,
-.stButton button[data-testid="stBaseButton-tertiary"]:hover span { color: var(--fa-text) !important; }
-
-/* 宏观议题条目。跟站内其它列表同一套：发丝线分隔、折叠框无边框。 */
-[class*="st-key-macro_"] {
-    border: none !important; background: transparent !important;
-    border-bottom: 1px solid var(--fa-border) !important;
-    border-radius: 0 !important; padding: 10px 2px 4px !important;
-}
-[class*="st-key-macro_"] [data-testid="stExpander"] details {
-    border: none !important; background: transparent !important; border-radius: 0 !important;
-}
-[class*="st-key-macro_"] [data-testid="stExpander"] summary {
-    padding: 2px 0 !important; background: transparent !important;
-}
-[class*="st-key-macro_"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
-[class*="st-key-macro_"] [data-testid="stExpander"] summary p {
-    font-size: 0.76rem !important; color: var(--fa-faint) !important; font-weight: 400 !important;
-}
-[class*="st-key-macro_"] [data-testid="stExpander"] summary:hover p { color: var(--fa-muted) !important; }
-[class*="st-key-macro_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
-
-/* AI每次决策记录。一屏五到三十条，每条都是一个带边框的白盒子时，方框本身
-   就成了这一段最主要的视觉噪声。压成跟全站其它列表一样的发丝线分隔行。 */
-[class*="st-key-sim_run_"] [data-testid="stExpander"] details {
-    border: none !important; background: transparent !important; border-radius: 0 !important;
-    border-bottom: 1px solid var(--fa-border) !important;
-}
-[class*="st-key-sim_run_"] [data-testid="stExpander"] summary {
-    padding: 10px 0 !important; background: transparent !important; border-radius: 0 !important;
-}
-[class*="st-key-sim_run_"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
-[class*="st-key-sim_run_"] [data-testid="stExpander"] summary p {
-    font-size: 0.84rem !important; color: var(--fa-text-2) !important; font-weight: 400 !important;
-}
-[class*="st-key-sim_run_"] [data-testid="stExpander"] summary:hover p { color: var(--fa-text) !important; }
-[class*="st-key-sim_run_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
-
-/* "我的"页底部"关于"里的两个折叠面板。默认是白底圆角带框的盒子，跟同一页
-   上面那些发丝线分隔的行（最近搜索那几行）完全不是一套，在页尾突兀地冒出
-   两个白盒子。这里把它们压成跟上面一模一样的行：无边框无底色、下面一条
-   发丝线、标签字号字色跟"最近搜索"那几行对齐，点开才展开正文。 */
-[class*="st-key-my_about_"] [data-testid="stExpander"] details {
-    border: none !important; background: transparent !important; border-radius: 0 !important;
-    border-bottom: 1px solid var(--fa-border) !important;
-}
-[class*="st-key-my_about_"] [data-testid="stExpander"] summary {
-    padding: 9px 0 !important; background: transparent !important; border-radius: 0 !important;
-}
-[class*="st-key-my_about_"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
-[class*="st-key-my_about_"] [data-testid="stExpander"] summary p {
-    font-size: 0.88rem !important; color: var(--fa-text-2) !important; font-weight: 400 !important;
-}
-[class*="st-key-my_about_"] [data-testid="stExpander"] summary:hover p { color: var(--fa-text) !important; }
-[class*="st-key-my_about_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
-
-/* 首页推荐股排行榜的条目。跟持仓/自选列表同一套：去掉卡片边框、发丝线分隔，
-   行内那个"基本面/技术面/价格位置"折叠框也去掉边框和底色。 */
-[class*="st-key-lb_row_"] {
-    border: none !important; background: transparent !important;
-    border-bottom: 1px solid var(--fa-border) !important;
-    border-radius: 0 !important; padding: 16px 2px 10px !important;
-}
-[class*="st-key-lb_row_"] [data-testid="stExpander"] details {
-    border: none !important; background: transparent !important; border-radius: 0 !important;
-}
-[class*="st-key-lb_row_"] [data-testid="stExpander"] summary {
-    padding: 4px 0 0 !important; background: transparent !important;
-}
-[class*="st-key-lb_row_"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
-[class*="st-key-lb_row_"] [data-testid="stExpander"] summary p {
-    font-size: 0.78rem !important; color: var(--fa-faint) !important; font-weight: 400 !important;
-}
-[class*="st-key-lb_row_"] [data-testid="stExpander"] summary:hover p { color: var(--fa-muted) !important; }
-
-/* 持仓/自选列表的行。去掉卡片边框、改成发丝分隔的平铺行；行内那个
-   "AI持仓判断"折叠框也一并去掉边框和底色，变成一行安静的可展开文字。
-   目标是把"卡片里套卡片"压成一张干净的行情列表。 */
-/* 行情页的指数行。跟 pos_row_ 完全同一套扁平样式：透明底、只留一条底部
-   发丝线。单独写一条而不是并进上面那个选择器组，是因为指数行没有展开区，
-   下面那些针对 stExpander 的规则对它没有意义，混在一起反而看不出哪条是
-   给谁的。 */
-/* 涨跌停池 / 港美股核心股 / 指数成分股的行，跟 pos_row_、idx_row_ 同一套扁平样式。 */
-[class*="st-key-mv_row_"] {
-    border: none !important; background: transparent !important;
-    border-bottom: 1px solid var(--fa-border) !important;
-    border-radius: 0 !important; padding: 10px 2px !important;
-    gap: 0 !important;
-}
-[class*="st-key-mv_row_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
-[class*="st-key-mv_row_"]:hover { background: rgba(23,24,28,0.015) !important; }
-
-/* 热门板块行，跟本页其余列表同一套扁平样式。 */
-[class*="st-key-sector_row_"] {
-    border: none !important; background: transparent !important;
-    border-bottom: 1px solid var(--fa-border) !important;
-    border-radius: 0 !important; padding: 10px 2px !important;
-    gap: 0 !important;
-}
-[class*="st-key-sector_row_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
-[class*="st-key-sector_row_"]:hover { background: rgba(23,24,28,0.015) !important; }
-
-[class*="st-key-idx_row_"] {
-    border: none !important; background: transparent !important;
-    border-bottom: 1px solid var(--fa-border) !important;
-    border-radius: 0 !important; padding: 10px 2px !important;
-    gap: 0 !important;
-}
-[class*="st-key-idx_row_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
-[class*="st-key-idx_row_"]:hover { background: rgba(23,24,28,0.015) !important; }
-
-[class*="st-key-pos_row_"] {
-    border: none !important; background: transparent !important;
-    border-bottom: 1px solid var(--fa-border) !important;
-    border-radius: 0 !important; padding: 4px 2px 2px !important;
-    gap: 0 !important;
-}
-/* 行内那条"观望 · 09-03"紧贴主行，不要另起一大段。Streamlit 默认给每个
-   元素容器留了不小的竖向间距，一行里有两个块就会撑出很高的行高，二十来行
-   叠起来整页就散了。 */
-[class*="st-key-pos_row_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
-[class*="st-key-pos_row_"] [data-testid="stExpander"] { margin-top: -6px !important; }
-[class*="st-key-pos_row_"]:hover { background: rgba(23,24,28,0.015) !important; }
-[class*="st-key-pos_row_"] [data-testid="stExpander"] details {
-    border: none !important; background: transparent !important; border-radius: 0 !important;
-}
-[class*="st-key-pos_row_"] [data-testid="stExpander"] summary {
-    padding: 2px 0 0 !important; background: transparent !important;
-}
-[class*="st-key-pos_row_"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
-[class*="st-key-pos_row_"] [data-testid="stExpander"] summary p {
-    font-size: 0.76rem !important; color: var(--fa-faint) !important; font-weight: 400 !important;
-}
-[class*="st-key-pos_row_"] [data-testid="stExpander"] summary:hover p { color: var(--fa-muted) !important; }
-/* 删除键平时隐去，指到这一行才浮出来——它是破坏性操作，不需要二十个红叉
-   常驻在列表右侧。 */
-[class*="st-key-pos_row_"] [class*="st-key-pos_del_"] button { opacity: 0; transition: opacity .15s ease; }
-[class*="st-key-pos_row_"]:hover [class*="st-key-pos_del_"] button { opacity: 1; }
-
-/* 图标按钮统一规格：36px 正圆、图标 1.12rem。原来各处自己写死 44px + 1.6rem，
-   在这套克制的版式里显得又大又重，而且持仓页 44px、删除键 36px，同一个页面
-   两种尺寸。这里收口成一份，各处不再重复定义。 */
-[class*="st-key-pos_search_icon"] button, [class*="st-key-pos_compare_icon"] button,
-[class*="st-key-pos_add_icon"] button, [class*="st-key-watch_search_icon"] button,
-[class*="st-key-watch_add_icon"] button, [class*="st-key-pos_del_"] button,
-[class*="st-key-detail_back_"] button, [class*="st-key-idx_back_"] button,
-[class*="st-key-sector_back_"] button {
-    height: 36px !important; min-height: 36px !important;
-    width: 36px !important; min-width: 36px !important;
-    padding: 0 !important; border-radius: 50% !important;
-    display: flex !important; align-items: center !important; justify-content: center !important;
-}
-[class*="st-key-pos_search_icon"] span[data-testid="stIconMaterial"],
-[class*="st-key-pos_compare_icon"] span[data-testid="stIconMaterial"],
-[class*="st-key-pos_add_icon"] span[data-testid="stIconMaterial"],
-[class*="st-key-watch_search_icon"] span[data-testid="stIconMaterial"],
-[class*="st-key-watch_add_icon"] span[data-testid="stIconMaterial"],
-[class*="st-key-pos_del_"] span[data-testid="stIconMaterial"],
-[class*="st-key-detail_back_"] span[data-testid="stIconMaterial"],
-[class*="st-key-idx_back_"] span[data-testid="stIconMaterial"],
-[class*="st-key-sector_back_"] span[data-testid="stIconMaterial"] {
-    font-size: 1.12rem !important;
-}
-/* 删除/取消关注是破坏性操作，平时保持中性，悬停才透出跌色作为警示——
-   一上来就画成红色会让整个列表看着像满屏警告。 */
-[class*="st-key-pos_del_"] button:hover span[data-testid="stIconMaterial"] { color: #D0342C !important; }
-
-/* ── 输入 ─────────────────────────────────────────────────────────────── */
-[data-testid="stTextInput"] input, [data-testid="stNumberInput"] input, [data-testid="stTextArea"] textarea {
-    background: var(--fa-surface) !important; border-radius: var(--fa-radius-sm) !important;
-    border-color: var(--fa-border-2) !important; color: var(--fa-text) !important; font-size: 0.88rem !important;
-}
-[data-testid="stTextInput"] input:focus, [data-testid="stNumberInput"] input:focus {
-    border-color: var(--fa-ink) !important; box-shadow: none !important;
-}
-[data-baseweb="input"], [data-baseweb="base-input"] { background: var(--fa-surface) !important; border-radius: var(--fa-radius-sm) !important; }
-
-/* ── 侧栏：已废弃，彻底隐藏 ───────────────────────────────────────────
-   2026-09-04把侧边栏撤掉，内容全部挪进"我的"分区。这里连侧栏本体和它那个
-   展开箭头一起隐掉——留一个点开是空白的箭头，比没有更糟。 */
-[data-testid="stSidebar"],
-[data-testid="stSidebarCollapsedControl"],
-[data-testid="collapsedControl"] { display: none !important; }
-
-[data-testid="stSidebar"] { background: var(--fa-surface) !important; border-right: 1px solid var(--fa-border) !important; }
-[data-testid="stSidebarContent"] { padding-top: 22px !important; }
-/* 侧栏里三个折叠面板原来是三个带边框的圆角大盒子，竖着堆起来很笨重。
-   去掉边框和圆角，只留一条极淡的分隔线，让它读起来像一列目录而不是三个控件。 */
-[data-testid="stSidebar"] [data-testid="stExpander"] details {
-    border: none !important; border-top: 1px solid var(--fa-border) !important;
-    border-radius: 0 !important; background: transparent !important;
-}
-[data-testid="stSidebar"] [data-testid="stExpander"] summary { padding: 11px 2px !important; }
-[data-testid="stSidebar"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
-[data-testid="stSidebar"] [data-testid="stExpander"] summary p { color: var(--fa-text-2) !important; }
-[data-testid="stSidebar"] [data-testid="stExpander"] summary:hover p { color: var(--fa-text) !important; }
-
-/* ── 表格 ─────────────────────────────────────────────────────────────── */
-[data-testid="stTable"] td, [data-testid="stTable"] th { border-color: var(--fa-border) !important; font-size: 0.85rem !important; }
-[data-testid="stTable"] th { color: var(--fa-muted) !important; font-weight: 500 !important; }
-
-/* ── 自定义类：给手写的卡片/行用 ──────────────────────────────────────── */
-.fa-card {
-    background: var(--fa-surface); border: 1px solid var(--fa-border);
-    border-radius: var(--fa-radius); padding: 18px 20px;
-}
-.fa-eyebrow {
-    font-size: 0.775rem; font-weight: 600; letter-spacing: 0.055em; text-transform: uppercase;
-    color: var(--fa-muted); margin: 0 0 12px;
-}
-.fa-num { font-weight: 600; letter-spacing: -0.02em; }
-
-/* ── 窄屏 ─────────────────────────────────────────────────────────────── */
-@media (max-width: 768px) {
-    .fa-flex-row { flex-wrap: wrap !important; }
-    .fa-flex-row > div { flex: 1 1 auto !important; }
-    [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
-    [data-testid="stMetricValue"] { font-size: 1.5rem !important; }
-    .st-key-fa_nav [data-testid="stRadio"] > div { overflow-x: auto; flex-wrap: nowrap !important; }
-    .st-key-fa_nav [data-testid="stRadio"] label { margin-right: 18px !important; white-space: nowrap; }
-    .stButton button { font-size: 0.8rem !important; padding: 6px 11px !important; }
-    /* 右下角那个 AI 悬浮按钮是 position:fixed，不占文档流，窄屏上会直接压在
-       正文最后几行上（2026-09-11前端审计："右下角的 AI 悬浮按钮会盖住正文"）。
-       给主内容区留出一段底部安全区，滚到底时最后一行也不会被它挡住。 */
-    section.main .block-container { padding-bottom: 96px !important; }
-}
-</style>
-"""
+try:
+    _FA_BASE_CSS = "<style>" + _load_theme_css(_THEME_CSS_PATH.stat().st_mtime) + "</style>"
+except OSError as _e:
+    # 样式文件读不到时不能让整站白屏——没有 CSS 的页面很丑但仍然可用，
+    # 而抛异常会让 Streamlit 显示一个空白报错页，连数据都看不到。
+    print(f"[theme] 读不到 {_THEME_CSS_PATH}：{_e}；本次以无样式渲染")
+    _FA_BASE_CSS = ""
 
 # 2026-09-04前端重做之后，这段CSS里已经不含任何品牌红字面量了——界面色
 # 统一成墨色，页面上唯一允许出现的饱和色是涨跌红绿（那些是各处inline写的，
@@ -1574,7 +953,7 @@ def _chat_bubble(role: str, text: str) -> str:
     body = _esc(text) if is_user else text
     return (
         f"<div style='display:flex;justify-content:{align};margin:6px 2px'>"
-        f"<div style='max-width:82%;padding:8px 13px;border-radius:16px;background:{bg};"
+        f"<div style='max-width:82%;padding:8px 13px;border-radius:2px;background:{bg};"
         f"color:{color};font-size:0.88rem;line-height:1.5;white-space:pre-wrap;word-break:break-word'>"
         f"{body}</div></div>"
     )
@@ -1596,10 +975,8 @@ def _typing_indicator_html() -> str:
         for i in range(3)
     )
     return (
-        "<style>@keyframes _fa_typing{0%,60%,100%{opacity:0.25;transform:translateY(0)}"
-        "30%{opacity:1;transform:translateY(-3px)}}</style>"
         "<div style='display:flex;justify-content:flex-start;margin:6px 2px'>"
-        "<div style='padding:11px 15px;border-radius:16px;background:#f0f1f3'>"
+        "<div style='padding:11px 15px;border-radius:2px;background:#f0f1f3'>"
         f"{dots}</div></div>"
     )
 
@@ -1652,7 +1029,7 @@ def _render_overall_summary(raw_text: str):
             + f"<span style='font-size:0.85rem;color:var(--fa-muted)'>/ 100 "
             + f"<span style='color:{color};font-weight:600'>{zone}</span></span>"
             + "</div>"
-            + f"<div style='position:relative;height:6px;border-radius:3px;background:linear-gradient(to right,{DOWN_COLOR},#d8d8d8,{UP_COLOR})'>"
+            + f"<div style='position:relative;height:6px;border-radius:999px;background:linear-gradient(to right,{DOWN_COLOR},#d8d8d8,{UP_COLOR})'>"
             + f"<div style='position:absolute;left:{score}%;top:-4px;width:14px;height:14px;"
             + f"border-radius:50%;background:#fff;border:3px solid {color};transform:translateX(-50%)'></div>"
             + "</div>"
@@ -2035,46 +1412,6 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
             st.markdown(st.session_state[mod_key]["ai_text"])
 
 
-# 价格跳动时的一闪。三处改动：
-# 1. 颜色原来硬编码成 rgba(224,32,32) / rgba(34,160,107)，是2026-09-04换色板
-#    之前的旧红旧绿，跟现在页面上其它地方的涨跌色已经不是同一个色号了。改成
-#    从 theme.py 的 UP_COLOR/DOWN_COLOR 换算，以后改色板这里自动跟着走。
-# 2. 透明度 0.28 -> 0.13。0.28 在这套近乎无色的界面里是一整块明显的色斑，
-#    "有变化"这个信息不需要这么大的动静；淡一半仍然一眼看得到，但不再是
-#    页面上最抢眼的东西。
-# 3. 从纯背景色改成从左往右的渐隐，并加上圆角——整块方形色块亮起来很生硬，
-#    带一点方向感的渐隐更像"数字刚跳过一下"而不是"这一格被选中了"。
-def _flash_css() -> str:
-    up = _hex_to_rgba_css(UP_COLOR, 0.13)
-    down = _hex_to_rgba_css(DOWN_COLOR, 0.13)
-    return (
-        "<style>"
-        f"@keyframes priceFlashUp {{ 0% {{ background: linear-gradient(90deg, {up}, transparent); }}"
-        " 100% { background: transparent; } }"
-        f"@keyframes priceFlashDown {{ 0% {{ background: linear-gradient(90deg, {down}, transparent); }}"
-        " 100% { background: transparent; } }"
-        ".price-flash-up { animation: priceFlashUp 1.1s ease-out; border-radius: 6px; }"
-        ".price-flash-down { animation: priceFlashDown 1.1s ease-out; border-radius: 6px; }"
-        "</style>"
-    )
-
-
-def _hex_to_rgba_css(hex_color: str, alpha: float) -> str:
-    h = hex_color.lstrip("#")
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    return f"rgba({r},{g},{b},{alpha})"
-
-
-_PRICE_FLASH_CSS = None  # 延迟到第一次用的时候再生成，见下面的 _price_flash_css()
-
-
-def _price_flash_css() -> str:
-    global _PRICE_FLASH_CSS
-    if _PRICE_FLASH_CSS is None:
-        _PRICE_FLASH_CSS = _flash_css()
-    return _PRICE_FLASH_CSS
-
-
 def _fragment_alive(kind: str) -> bool:
     """自动刷新的 fragment 每次重跑前先问一句：我这块还在当前页面上吗？
 
@@ -2161,9 +1498,6 @@ def _render_key_metrics(spot: dict, market: str):
     )
     if cells:
         st.markdown(
-            "<style>.fa-keymetrics{display:grid;grid-template-columns:repeat(5,1fr);"
-            "gap:12px 14px;margin:6px 0 4px}"
-            "@media (max-width:640px){.fa-keymetrics{grid-template-columns:repeat(3,1fr)}}</style>"
             f"<div class='fa-keymetrics'>{cells}</div>",
             unsafe_allow_html=True,
         )
@@ -2181,7 +1515,7 @@ def _render_key_metrics(spot: dict, market: str):
             f"<span>52周最低 {lo:.2f}</span>"
             f"<span>处于 {pos:.0%} 分位</span>"
             f"<span>52周最高 {hi:.2f}</span></div>"
-            f"<div style='position:relative;height:4px;border-radius:2px;"
+            f"<div style='position:relative;height:4px;border-radius:999px;"
             f"background:linear-gradient(to right,var(--fa-border),#C6C9CD)'>"
             f"<div style='position:absolute;left:{pos * 100:.1f}%;top:-3px;"
             f"width:2px;height:10px;background:var(--fa-text);"
@@ -2219,8 +1553,7 @@ def _render_price_header(symbol: str, market: str):
         flash_class = "price-flash-up" if spot["最新价"] > prev else "price-flash-down"
 
     st.markdown(
-        _price_flash_css()
-        + f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:6px'>"
+        f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:2px'>"
         + f"<span style='font-size:2rem;font-weight:700;color:{color}'>{spot['最新价']:.2f}</span>&nbsp;&nbsp;"
         + f"<span style='font-size:1.1rem;color:{color}'>{change:+.2f} ({change_pct:+.2f}%)</span>"
         + "</div>",
@@ -2267,29 +1600,10 @@ def _render_index_price_header(name: str, market: str):
         flash_class = "price-flash-up" if idx_snap["最新"] > prev else "price-flash-down"
 
     st.markdown(
-        _price_flash_css()
-        + f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:6px'>"
+        f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:2px'>"
         + f"<span style='font-size:2rem;font-weight:700;color:{color}'>{idx_snap['最新']:,.2f}</span>&nbsp;&nbsp;"
         + f"<span style='font-size:1.1rem;color:{color}'>{idx_snap['涨跌']:+.2f} ({idx_snap['涨跌幅']:+.2f}%)</span>"
         + "</div>",
-        unsafe_allow_html=True,
-    )
-
-
-def _inject_pos_card_css():
-    """pos-card-link 这个class的样式——多个板块（持仓/成分股/涨跌停池/核心股
-    榜）共用同一个class做卡片点击跳转，样式只需要注入一次，但每个板块渲染时
-    不一定确定其它板块的注入代码有没有跑过，重复调用这个函数是幂等的，
-    不会有副作用。
-    """
-    st.markdown(
-        "<style>"
-        "a.pos-card-link, a.pos-card-link:link, a.pos-card-link:visited {"
-        "  text-decoration: none !important; color: inherit !important;"
-        "  display: block; cursor: pointer;"
-        "}"
-        "a.pos-card-link:hover { opacity: 0.85; }"
-        "</style>",
         unsafe_allow_html=True,
     )
 
@@ -2305,8 +1619,6 @@ def _render_stock_movers_cards(df, market: str):
     里的股票也要有这个效果"——调用方（涨跌停池/港股核心股/美股核心股这几个
     fragment）都已经是run_every=3自动刷新，数据变了这里自然就能跟着闪。
     """
-    _inject_pos_card_css()
-    st.markdown(_price_flash_css(), unsafe_allow_html=True)
     for _, row in df.iterrows():
         mv_symbol = str(row["代码"])
         mv_color = UP_COLOR if row["涨跌幅"] >= 0 else DOWN_COLOR
@@ -2329,7 +1641,7 @@ def _render_stock_movers_cards(df, market: str):
         with st.container(key=f"mv_row_{market}_{mv_symbol}"):
             st.markdown(
                 f"<a class='pos-card-link' href='{href}' target='_self'>"
-                f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:4px'>"
+                f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:2px'>"
                 f"<div style='flex:2;font-weight:600;color:var(--fa-text);text-decoration:none'>"
                 f"{_esc(_clean_name(row['名称']))}（{_esc(mv_symbol)}）</div>"
                 f"<div style='flex:1;text-align:right;font-weight:600;color:{mv_color}'>{_fmt_price(row['最新价'])}</div>"
@@ -2451,14 +1763,6 @@ def _render_index_snapshot(mkt_code: str):
         return
 
     st.markdown(
-        _price_flash_css()
-        + "<style>"
-        "a.idx-card-link, a.idx-card-link:link, a.idx-card-link:visited {"
-        "  text-decoration: none !important; color: inherit !important;"
-        "  display: block; cursor: pointer;"
-        "}"
-        "a.idx-card-link:hover { opacity: 0.85; }"
-        "</style>"
         "<div class='fa-flex-row' style='display:flex;padding:4px 8px;font-size:0.78rem;color:var(--fa-muted)'>"
         "<div style='flex:2.4'>指数</div>"
         "<div style='flex:1;text-align:right'>最新</div>"
@@ -2491,7 +1795,7 @@ def _render_index_snapshot(mkt_code: str):
         with st.container(key=f"idx_row_{mkt_code}_{idx['名称']}"):
             st.markdown(
                 f"<a class='idx-card-link' href='{href}' target='_self'>"
-                f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:4px'>"
+                f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:2px'>"
                 f"<div style='flex:2.4;font-weight:600;color:var(--fa-text);text-decoration:none'>{_esc(idx['名称'])}</div>"
                 f"<div style='flex:1;text-align:right;font-weight:600;color:{color}'>{idx['最新']:,.2f}</div>"
                 f"<div style='flex:1;text-align:right;color:{color}'>{idx['涨跌幅']:+.2f}%</div>"
@@ -2883,16 +2187,6 @@ def _render_macro_strip():
         return
     # 等分网格铺满整行（用户2026-09-12反馈"一行塞满间隔一致"）。
     st.markdown(
-        "<style>.fa-macro-strip{display:grid;grid-template-columns:repeat(6,1fr);"
-        "gap:10px 12px;padding-bottom:12px;border-bottom:1px solid var(--fa-border);"
-        "margin-bottom:20px}"
-        "@media (max-width:640px){.fa-macro-strip{grid-template-columns:repeat(3,1fr)}}"
-        # 卡片链接不要继承正文链接的颜色和下划线，它就是一块可点的区域。
-        "a.macro-card-link,a.macro-card-link:link,a.macro-card-link:visited{"
-        "display:block;text-decoration:none;border-bottom:none;color:inherit;"
-        "padding:4px 6px;margin:-4px -6px;border-radius:7px;"
-        "transition:background .12s ease}"
-        "a.macro-card-link:hover{background:rgba(23,24,28,0.045)}</style>"
         "<div class='fa-macro-strip'>" + "".join(cards) + "</div>",
         unsafe_allow_html=True,
     )
@@ -3122,9 +2416,6 @@ def _render_hot_sectors(market: str):
                 f"{_auth_qs()}"
             )
             st.markdown(
-                "<style>a.sector-card-link, a.sector-card-link:link, a.sector-card-link:visited {"
-                "text-decoration:none !important; color:inherit !important; display:block; cursor:pointer;"
-                "}</style>"
                 f"<a class='sector-card-link' href='{href}' target='_self'>{inner}</a>",
                 unsafe_allow_html=True,
             )
@@ -3452,10 +2743,10 @@ def _render_home_map():
       #home-map .leaflet-control-attribution {{
           background: rgba(255,255,255,.6) !important; font-size: 9px !important;
       }}
-      #home-map .leaflet-control-attribution a {{ color: #A8ABB3 !important; }}
-      #home-map .leaflet-control-attribution {{ color: #A8ABB3 !important; }}
+      #home-map .leaflet-control-attribution a {{ color: #7E828D !important; }}
+      #home-map .leaflet-control-attribution {{ color: #7E828D !important; }}
     </style>
-    <div id="home-map" style="height:420px;border-radius:8px;overflow:hidden"></div>
+    <div id="home-map" style="height:420px;border-radius:2px;overflow:hidden"></div>
     <script>
     // 这张图是"一张会自己刷新数字的静态图"，不是可操作的地图——所有交互
     // 全部关掉。用户2026-09-12原话："那个图片我们就定死不要放大缩小移动，
@@ -3865,7 +3156,7 @@ def _score_breakdown_bars_html(verdict_text: str) -> str:
             "<div style='margin-top:3px;line-height:1.5'>"
             f"<span style='display:inline-block;width:60px;font-size:0.7rem;"
             f"color:var(--fa-faint)'>{_esc(label)}</span>"
-            f"<span style='display:inline-block;width:120px;height:4px;border-radius:2px;"
+            f"<span style='display:inline-block;width:120px;height:4px;border-radius:999px;"
             f"vertical-align:middle;background:linear-gradient(to right,"
             f"var(--fa-text-2) 0 {pct:.0f}%,var(--fa-border) {pct:.0f}% 100%)'></span>"
             f"<span style='font-size:0.7rem;color:var(--fa-faint);margin-left:8px;"
@@ -4071,16 +3362,6 @@ def _render_advice_section():
     # _render_position_rows 的踩坑记录：JS/CSS猜DOM结构点不动，最后用最朴素
     # 的<a href="?open_symbol=...">整页导航才可靠）。那段CSS只在持仓tab渲染
     # 时才注入，首页不一定会经过那个函数，这里独立注入一份，不依赖执行顺序。
-    st.markdown(
-        "<style>"
-        "a.pos-card-link, a.pos-card-link:link, a.pos-card-link:visited {"
-        "  text-decoration: none !important; color: inherit !important;"
-        "  display: block; cursor: pointer;"
-        "}"
-        "a.pos-card-link:hover { opacity: 0.85; }"
-        "</style>",
-        unsafe_allow_html=True,
-    )
     # 2026-09-08：港股/美股分开出榜，不再混排——跟微信那边09:00/21:00分市场
     # Top3推荐是同一次改造，网页首页也要跟着改，不能一边港美股分开一边
     # 网页还是大杂烩。source改成watchlist_hk/watchlist_us（advisor.py的
@@ -4561,7 +3842,7 @@ def _render_my_page():
                     f"<span style='color:var(--fa-faint);font-size:0.82rem'>{n} · {pct:.0f}%</span></span>"
                 )
             st.markdown(
-                "<div style='display:flex;height:8px;border-radius:4px;overflow:hidden;gap:2px'>"
+                "<div style='display:flex;height:8px;border-radius:999px;overflow:hidden;gap:2px'>"
                 + "".join(segs) + "</div>"
                 + "<div style='margin-top:10px'>" + "".join(legend) + "</div>",
                 unsafe_allow_html=True,
@@ -4761,14 +4042,6 @@ def _render_my_page():
             # 提前把 <p> 闭掉，<a> 和它包着的 <div> 的父子关系当场被打散，
             # 内层的 flex 布局跟着失效。项目里别处的 *-card-link 是同一个坑
             # （文件顶部那段CSS注释记过），这里直接不嵌块级元素来规避。
-            st.markdown(
-                "<style>a.my-search-link, a.my-search-link:link, a.my-search-link:visited {"
-                "text-decoration:none !important; color:inherit !important; cursor:pointer;"
-                "display:flex !important; justify-content:space-between; align-items:baseline;"
-                "padding:9px 0; border-bottom:1px solid var(--fa-border);"
-                "} a.my-search-link:hover { background: rgba(23,24,28,0.02); }</style>",
-                unsafe_allow_html=True,
-            )
             for h in _searches:
                 _t = _to_cn_dt(h.get("searched_at", ""))
                 _when = _t.strftime("%m-%d") if _t else ""
@@ -4826,68 +4099,6 @@ def _render_ai_assistant():
     snapshot那次踩过的坑不是同一类——那次问题是run_every自动定时器
     切页后残留，这里只是交互触发重跑，不加run_every，不会有同类风险。
     """
-    st.markdown(
-        "<style>"
-        # 这颗按钮原来是68px的品牌红大圆+800字重+很重的投影，是整页视觉上
-        # 最吵的一个元素，而且正好压在首页地图的右下角。缩到48px、换成墨色、
-        # 投影收到几乎看不见，往里再收一点避开地图边缘的指数标签。
-        ".st-key-ai_assistant_popover{position:fixed;bottom:26px;right:26px;z-index:9999;}"
-        # 浮标从"墨色实心圆"改成白底发丝描边。一个纯黑圆点浮在这套近乎无色的
-        # 界面上，是页面里唯一一块高对比实色，视觉上比它承担的功能重得多
-        # （用户原话是"看着怪怪的"）。改成跟次要按钮同一套语言：平时只是一个
-        # 带细边的白圆，悬停才填墨色——存在感够找得到，但不抢戏。
-        ".st-key-ai_assistant_popover button{"
-        "border-radius:50%!important;width:50px;height:50px;padding:0!important;"
-        "background:#FFFFFF!important;border:1px solid #DBDCE3!important;"
-        "box-shadow:0 2px 14px rgba(23,24,28,.10)!important;"
-        "transition:background .16s ease,border-color .16s ease!important;"
-        "}"
-        ".st-key-ai_assistant_popover button:hover{background:#17181C!important;border-color:#17181C!important;}"
-        # 文字居中：Streamlit 按钮里的<p>自带上下 margin，加上 letter-spacing
-        # 会在右侧多出一个字距的空白，两者叠加就是"看着没居中"。这里把
-        # margin 清零、行高压到1，并用 padding-left 抵掉尾部那个字距。
-        ".st-key-ai_assistant_popover button p{color:#17181C!important;font-size:.76rem!important;"
-        "font-weight:600!important;letter-spacing:.08em;line-height:1!important;"
-        "margin:0!important;padding-left:.08em;transition:color .16s ease;}"
-        ".st-key-ai_assistant_popover button>div,"
-        ".st-key-ai_assistant_popover button [data-testid='stMarkdownContainer']{"
-        "display:flex!important;align-items:center!important;justify-content:center!important;"
-        "width:100%!important;height:100%!important;}"
-        ".st-key-ai_assistant_popover button:hover p{color:#fff!important;}"
-        # 浮层本体：收掉Streamlit默认的厚投影和圆角，跟站内卡片同一套。
-        "[data-testid='stPopoverBody']{border-radius:12px!important;"
-        "border:1px solid #EAEAEF!important;box-shadow:0 8px 32px rgba(23,24,28,.10)!important;"
-        # 2026-09-11修：浮层原来是"整块固定高度+整块滚动"，窗口矮一点
-        # （实测609px高）输入框就被挤到滚动区外面去了，要在面板里往下滚
-        # 才能找到输入框——等于这个功能在小窗口下是坏的。改成纵向flex：
-        # 高度跟着视口走（封顶560px），消息区自己滚，输入框固定在底部
-        # 永远可见。
-        "display:flex!important;flex-direction:column!important;"
-        # 2026-09-12再修（前端审计第10条）：
-        # 一、宽度写死。原来没设宽度，popover 跟着内容自适应——空对话时窄、
-        #    AI 回一段长文之后突然变宽，审计原话"发送消息后面板宽度会跳变"。
-        #    聊天面板的宽度不该由某一条回答的长短决定。
-        # 二、高度从 min(70vh,560px) 放宽到 min(78vh,620px)。上一版这个上限
-        #    叠上内部消息容器自己的固定高度，在矮窗口下把可见消息区挤到只剩
-        #    一百多像素（审计实测约130px），一条回答要在里面滚很久。
-        "width:420px!important;max-width:92vw!important;"
-        "max-height:min(78vh,620px)!important;overflow:hidden!important;}"
-        "@media (max-width:640px){[data-testid='stPopoverBody']{width:92vw!important;}}"
-        # 消息区：吃掉剩余高度并单独滚动。选的是浮层里第一层竖向容器，
-        # 命中不了也只是退回原来的行为，不会把布局搞坏。
-        "[data-testid='stPopoverBody']>[data-testid='stVerticalBlock']{"
-        "flex:1 1 auto!important;min-height:0!important;overflow-y:auto!important;}"
-        # 输入框：不参与伸缩，钉在底部，上面压一条发丝线跟消息区分开。
-        "[data-testid='stPopoverBody'] [data-testid='stChatInput']{"
-        "flex:0 0 auto!important;margin-top:8px!important;"
-        "border-top:1px solid #EAEAEF!important;padding-top:8px!important;}"
-        # popover 触发键默认会在文字右边带一个下拉小箭头。这颗按钮是个圆形
-        # 浮标，里面只放两个字母，多一个箭头会挤成"AI⌄"，既不居中也不好看。
-        ".st-key-ai_assistant_popover button svg,"
-        ".st-key-ai_assistant_popover button [data-testid='stIconMaterial']{display:none!important;}"
-        "</style>",
-        unsafe_allow_html=True,
-    )
     with st.popover("AI", key="ai_assistant_popover"):
         st.markdown("**AI 咨询**")
 
@@ -5371,8 +4582,6 @@ def _render_ipo_perf_block(perf: dict, show_calculator: bool = True, key_suffix:
             ("区间", f"{_st['min']:+.0f}% ~ {_st['max']:+.0f}%", "var(--fa-text)", "1.05rem"),
         ]
         st.markdown(
-            "<style>.fa-ipo-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}"
-            "@media (max-width:640px){.fa-ipo-stats{grid-template-columns:repeat(2,1fr)}}</style>"
             "<div class='fa-ipo-stats'>"
             + "".join(
                 f"<div><div style='font-size:0.76rem;color:var(--fa-faint)'>{_esc(_label)}</div>"
@@ -7853,24 +7062,6 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
         return
 
 
-    st.markdown(
-        _price_flash_css()
-        + "<style>"
-        # 浏览器默认的 a:link/a:visited 样式（蓝色+下划线）选择器带伪类，
-        # 优先级比单纯的class选择器高，必须用!important才能真正覆盖掉。
-        + "a.pos-card-link, a.pos-card-link:link, a.pos-card-link:visited {"
-        + "  text-decoration: none !important; color: inherit !important;"
-        + "  display: block; cursor: pointer;"
-        + "}"
-        + "a.pos-card-link:hover { opacity: 0.85; }"
-        # 删除键用type="tertiary"，图标本身默认偏小，用户反馈要大一点、位置要
-        # 跟卡片内容对齐。垂直对齐交给st.columns自己的vertical_alignment="center"
-        # 处理（原生机制，比猜CSS高度靠谱）。默认按钮是圆角矩形/胶囊形，用户
-        # 反馈这个和"对比/搜索"图标按钮一样改成正圆——固定等宽高+50%圆角。
-        + "</style>",
-        unsafe_allow_html=True,
-    )
-
     # 表头跟下面每行的列宽必须是同一套 st.columns 比例分出来的，不能自己
     # 另外拿flex div模仿列宽——之前拿固定36px去凑删除键那一列的宽度，
     # 在不同屏幕宽度下跟实际的 st.columns([9,1]) 比例对不上，表头和数据
@@ -8077,7 +7268,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
 
             stale_tag = " <span style='font-size:0.65rem;color:var(--fa-muted)'>T-1</span>" if is_stale else ""
             price_html = (
-                f"<div class='{flash_class}' style='text-align:right;border-radius:4px'>"
+                f"<div class='{flash_class}' style='text-align:right;border-radius:2px'>"
                 f"<div style='font-weight:600;color:{color}'>{wspot['最新价']:.2f}{stale_tag}</div>"
                 f"<div style='font-size:0.72rem;color:var(--fa-muted)'>{_fmt_turnover(wspot.get('成交额'))}</div>"
                 f"</div>"
@@ -8091,7 +7282,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                 f"<div style='text-align:right'>"
                 f"<span style='background:color-mix(in srgb, {color} 11%, transparent);"
                 f"color:{color};font-size:0.78rem;font-weight:600;letter-spacing:.01em;"
-                f"padding:3px 8px;border-radius:5px;display:inline-block;min-width:60px;text-align:center'>"
+                f"padding:3px 8px;border-radius:2px;display:inline-block;min-width:60px;text-align:center'>"
                 f"{wchange_pct:+.2f}%</span></div>"
             )
 
@@ -8204,7 +7395,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                     _label += " · 已过期"
                 with st.expander(_label):
                     st.markdown(
-                        f"<span style='background:{adv_color};color:#fff;border-radius:4px;padding:1px 8px;"
+                        f"<span style='background:{adv_color};color:#fff;border-radius:2px;padding:1px 8px;"
                         f"font-size:0.8rem;font-weight:700'>{_esc(adv_action)}</span> "
                         f"<span style='font-size:0.75rem;color:var(--fa-muted)'>置信度：{_esc(adv_parts.get('置信度','—'))}</span>",
                         unsafe_allow_html=True,

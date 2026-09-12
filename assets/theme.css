@@ -1,0 +1,841 @@
+/* ============================================================================
+   Invest Agent 视觉系统 —— 全站唯一的样式来源
+   ============================================================================
+
+   2026-09-13 从 app.py 里搬出来。在此之前这些 CSS 是 app.py 顶部一个 650 行的
+   _FA_BASE_CSS 字符串，外加散在文件各处的 15 个 st.markdown("<style>…") ——
+   同一件事（比如"卡片链接不要蓝色下划线"）在四个地方各写了一遍。改一条要在
+   十几处找，这正是"同一件事有六七种写法"的成因。
+
+   ── 关于这份文件里的两套变量名 ──────────────────────────────────────────
+
+   下面 :root 里有两组名字，不是历史遗留，是有意的：
+
+     --sp-* / --fs-* / --text-* / --r-*    设计 token，**这一层才是真相**
+     --fa-*                                 指向 token 的别名
+
+   app.py 里有两百多处内联 style 写着 var(--fa-border)、var(--fa-faint) 这种。
+   一次性改名等于在一个 9000 行的文件里做两百处替换，每一处都可能手滑，而且
+   收益是零——真正要解决的是"同一个语义有六七个值"，不是"名字不好听"。
+   所以 token 定死语义和数值，--fa-* 只做转发。以后新写的代码直接用 token；
+   老代码跟着别名走，两边永远是同一个值，不会再出现"改了一处没改另一处"。
+
+   token 这一层还有一个好处：它是可移植的。哪天真换掉 Streamlit，这套数值
+   原样能用，而所有绕开 Streamlit DOM 的 !important 都留不下。
+   ============================================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+    /* ── 间距阶 ───────────────────────────────────────────────────────────
+       改造前全站 47 个块的 gap **全是 16px**：卡片内的行距 = 卡片之间 =
+       板块之间。间距是排版里表达"这两样东西是不是一伙的"的唯一手段，全都
+       相等就等于什么都没说，读者只能靠读文字来判断结构。 */
+    --sp-1:  4px;    /* 图标 ↔ 文字 */
+    --sp-2:  8px;    /* 数值 ↔ 它的标签 */
+    --sp-3:  12px;   /* 卡片内的行间距 */
+    --sp-4:  16px;   /* 卡片与卡片之间 */
+    --sp-6:  40px;   /* 板块之间（带标题那种） */
+    --sp-8:  64px;   /* 大分区之间 */
+
+    /* ── 字号 ─────────────────────────────────────────────────────────────
+       改造前是 11.52 / 11.84 / 12.48 / 14.72 / 15.68 / 16 / 16.32 / 17.6 px
+       这样的碎数——全都是 rem 相乘出来的，不是选出来的。其中三个小号字肉眼
+       根本分不出差别，等于占着三档却只起一档的作用。
+       全部改成整数，只留六档。 */
+    --fs-xs:  12px;  /* 标签、单位、时间戳 */
+    --fs-sm:  13px;  /* 次要说明 */
+    --fs-md:  15px;  /* 正文 */
+    --fs-lg:  18px;  /* 卡片标题 */
+    --fs-xl:  24px;  /* 区块标题 */
+    --fs-2xl: 34px;  /* 核心数值：净值、价格 */
+
+    /* ── 字重：只留三档（改造前有 400/500/600/650，650 是手滑打出来的） ── */
+    --fw-normal: 400;
+    --fw-medium: 500;
+    --fw-bold:   600;
+
+    /* ── 文字色 ───────────────────────────────────────────────────────────
+       这是这次改造里最硬的一处修复。改造前用得最多的文字色是 #A8ABB3（55 处），
+       在 #FAFAFB 底上对比度只有 **2.19:1**，WCAG AA 的下限是 4.5:1 ——
+       不是"有点淡"，是实测读不清。
+
+       四档从深到浅，语义固定：
+         primary    正文、数字本身
+         strong     次要正文（说明段落）
+         secondary  标签、caption           4.9:1  ← 顶掉原来的 #82858E
+         tertiary   时间戳、股票代码这类附注 3.7:1  ← 顶掉原来的 #A8ABB3
+
+       为什么 tertiary 用 3.7:1 而不是规范里写的"统一换成 secondary"：
+       这一档在本项目里承载的全是 12px 的附注（"09-11 22:18取价"、"06181"、
+       "非AI持仓·不计入净值"），正是规范自己给 tertiary 划定的用途
+       （"只给 12px+ 的辅助说明，不给正文"）。如果连它也提到 4.9:1，就跟
+       secondary 挤在同一个明度上，四档塌成三档，附注和标签再也分不开。
+       真正要消灭的是 2.19:1 那一档，这一点做到了：全站不再有 #A8ABB3。 */
+    --text-primary:   #17181C;
+    --text-strong:    #494C55;
+    --text-secondary: #6B6F7A;
+    --text-tertiary:  #7E828D;
+
+    /* ── 涨跌。整个页面唯一允许出现的饱和色 ───────────────────────────────
+       这是这类界面显专业的关键：品牌色一旦也很红，涨跌红就不再是页面上最
+       醒目的信息了。所以主色走墨色，见 --ink。 */
+    --up:   #D0342C;
+    --down: #12855F;
+    /* 色闪用的淡版（alpha 0.13）。整块实色亮起来很生硬，13% 才是"刚跳过一下"。
+       这两个值必须跟 theme.py 的 UP_COLOR / DOWN_COLOR 是同一个色相——那边是
+       Python 侧给 Plotly 和内联 style 用的，改一边要改另一边。 */
+    --up-flash:   rgba(208, 52, 44, 0.13);
+    --down-flash: rgba(18, 133, 95, 0.13);
+
+    /* ── 面与线 ───────────────────────────────────────────────────────────
+       改造前唯一的边框色是 rgba(23,24,28,0.2)，等效 #D3D4D8——太重，
+       页面看着像被切成了网格。降到 0.08，并把"分隔线"和"描边"分成两档。 */
+    --bg-page:      #FAFAFB;
+    --bg-card:      #FFFFFF;
+    --bg-fill:      #F3F4F6;
+    --line-divider: rgba(23, 24, 28, 0.06);
+    --line-border:  rgba(23, 24, 28, 0.08);
+    --ink:          #17181C;
+
+    /* ── 圆角：只留两个 ───────────────────────────────────────────────────
+       改造前有 2 / 4 / 7 / 8 / 10 / 50% 六种，其中 7px 是 rem 算出来的碎数。
+       走"精密仪器"路线：锐利的 2px 贯彻到底，只有需要读成标签/头像的地方
+       才用全圆。 */
+    --r-base: 2px;
+    --r-pill: 999px;
+
+    /* ── 别名层。上面是真相，这里只是转发，见文件头那段说明。 ───────────── */
+    --fa-bg:        var(--bg-page);
+    --fa-surface:   var(--bg-card);
+    --fa-fill:      var(--bg-fill);
+    --fa-border:    var(--line-divider);
+    --fa-border-2:  var(--line-border);
+    --fa-text:      var(--text-primary);
+    --fa-text-2:    var(--text-strong);
+    --fa-muted:     var(--text-secondary);
+    --fa-faint:     var(--text-tertiary);
+    --fa-ink:       var(--ink);
+    --fa-radius:    var(--r-base);
+    --fa-radius-sm: var(--r-base);
+}
+
+/* ── 排版基线 ─────────────────────────────────────────────────────────── */
+html, body, .stApp, [data-testid="stAppViewContainer"] {
+    background: var(--bg-page) !important;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+                 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif !important;
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+/* 等宽数字。比例字体里 1 比 8 窄一截，一列价格的小数点上下对不齐，扫下来是
+   锯齿状的。tabular-nums 只改数字的字形宽度，不影响中英文排版，所以全局开。
+   这是这类页面"看着专业"里最省力的一条。 */
+.stApp, .stApp *,
+html, body, [data-testid="stAppViewContainer"],
+[data-testid="stMetricValue"], [data-testid="stTable"] td {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+}
+
+[data-testid="stMain"], [data-testid="stMainBlockContainer"],
+section.main, .main, .block-container,
+[data-testid="stBottom"], .stBottom, [data-testid="stBottomBlockContainer"], footer {
+    background: var(--bg-page) !important;
+}
+header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; height: 0 !important; }
+
+/* Streamlit自带的右上角工具区（2026-09-11前端审计）：
+   - stStatusWidget 是"Running… / Stop"那个小人+按钮。行情页每3秒刷新一次
+     fragment，它就跟着闪一次，页面右上角一直在抖。
+   - MainMenu 是那个 ⋮ 菜单，点开是"Made with Streamlit v1.59.2"这类给
+     开发者看的东西，对访问者没有意义，而且展开时会压在内容上面。
+   两个都只做视觉隐藏、不用 display:none——首屏加载遮罩那段JS（_fa_loader）
+   靠读 stStatusWidget 的 textContent 判断"跑完了没有"，把元素从渲染树里
+   摘掉是能读到，但留着更保险，也免得以后谁改了那段探测逻辑又踩一次。
+   Phase 4 的"rerun 期间压暗正文"也靠它在 DOM 里存在。 */
+[data-testid="stStatusWidget"] {
+    opacity: 0 !important; pointer-events: none !important;
+    position: absolute !important; width: 1px !important; height: 1px !important;
+    overflow: hidden !important;
+}
+#MainMenu, [data-testid="stMainMenu"], [data-testid="stToolbarActions"] { display: none !important; }
+
+/* 顶部导航吸顶（2026-09-11前端审计）：行情页内容很长，滚到底部想切分区
+   得往回滚很远。让导航那一条钉在顶部，背景用页面底色盖住下面滚过去的
+   内容，不然文字会透上来叠在一起。z-index 取 90——低于右下角AI浮标
+   (9999)，不跟它抢层级。 */
+.st-key-fa_nav {
+    position: sticky !important; top: 0 !important; z-index: 90 !important;
+    background: var(--bg-page) !important;
+    padding-top: 6px !important;
+}
+
+/* 内容收窄居中。原来是整屏铺满，超宽屏上一行数字能拉到两千多像素，
+   眼睛要横扫过去才读得完。
+   1240 → 1180：这些页面绝大多数是"标签 + 数字"的两端对齐列表，行越长，
+   眼睛从左边的名字扫到右边的涨跌幅要走的距离就越远，中间那段空白反而让
+   人对不上行。1180 更贴近数据列表的舒适行长。
+   底部 120px 是给右下角AI浮标让位：浮标 56px 高、距底 26px，实测会盖住
+   最后一行的数字（中信金属的 -9.97%、模拟盘持仓的盈亏金额都被挡过）。 */
+[data-testid="stMainBlockContainer"] {
+    max-width: 1180px !important;
+    padding: 26px 40px 120px !important;
+}
+@media (max-width: 900px) {
+    [data-testid="stMainBlockContainer"] { padding: 18px var(--sp-4) 108px !important; }
+}
+
+[data-testid="stHorizontalBlock"], [data-testid="stColumn"], [data-testid="stElementContainer"] {
+    background: transparent !important;
+}
+
+/* ── 间距层级 ─────────────────────────────────────────────────────────────
+   Streamlit 默认给每个垂直块 16px 的 gap，横向列同理，于是全站 47 个块一律
+   16px。竖向收到 --sp-3(12px)、横向留 --sp-4(16px)：竖直方向的邻近元素几乎
+   都是"同一条信息的几行"（标签 + 数值 + 备注），本来就该比横向的"几列不同
+   信息"贴得更紧。真正的分区留白交给板块标题上方的 --sp-6 和分隔线的 --sp-8。*/
+[data-testid="stVerticalBlock"]   { gap: var(--sp-3); }
+[data-testid="stHorizontalBlock"] { gap: var(--sp-4); }
+
+/* ── 标题层级 ─────────────────────────────────────────────────────────── */
+[data-testid="stMarkdownContainer"] h1 {
+    font-size: var(--fs-xl); font-weight: var(--fw-bold);
+    letter-spacing: -0.018em; color: var(--text-primary); margin: 0 0 14px;
+}
+[data-testid="stMarkdownContainer"] h2 {
+    font-size: var(--fs-lg); font-weight: var(--fw-bold);
+    letter-spacing: -0.012em; color: var(--text-primary); margin: var(--sp-6) 0 var(--sp-3);
+}
+[data-testid="stMarkdownContainer"] h3 {
+    font-size: 16px; font-weight: var(--fw-bold);
+    letter-spacing: -0.008em; color: var(--text-primary); margin: 26px 0 10px;
+}
+[data-testid="stMarkdownContainer"] p { color: var(--text-strong) !important; line-height: 1.68; }
+/* 项目里所有小节标题都是 st.markdown("**标题**")，也就是一个只含<strong>的<p>。
+   2026-09-12改（前端审计第14条"层级太平"）：上一版把它渲染成 0.825rem 的
+   灰色大写眉标，出发点是"安静"，但实测的结果是标题和正文分不出来。安静和
+   没有层次是两回事：一页里十几个板块，如果标题不比正文重，读者就只能一行行
+   读过去，没法先扫结构再决定看哪块。
+   2026-09-13：上方留白 34px → var(--sp-6) 40px，跟 h2 对齐——这是全站
+   "板块之间"的统一值，而板块标题上方的留白是读者判断"这里换了一块"的
+   主要依据，必须明显大于卡片内的 --sp-3。 */
+[data-testid="stMarkdownContainer"] p > strong:only-child {
+    display: block; font-size: var(--fs-lg); font-weight: var(--fw-bold);
+    letter-spacing: -0.01em; color: var(--text-primary);
+    margin: var(--sp-6) 0 var(--sp-3);
+}
+/* 只给正文里真正的行内链接加下划线，并明确排除各种整卡可点的<a>。
+   项目里推荐股/指数/板块/持仓卡片都是拿一个<a class="*-card-link">把若干
+   <div>包起来的，而HTML规范不允许<p>里出现块级元素——浏览器解析到<div>
+   时会提前把<p>闭掉，于是留下一个高度1px、内容为空的<a>孤儿节点。给它
+   加border-bottom就会在卡片里凭空多出一条横线（实测在推荐股和指数卡片
+   上各出现过一次）。按class排除掉，比靠结构选择器去猜稳。
+   链接默认不画下划线，只在悬停时出现：页面上大量的可点内容是新闻标题和
+   卡片，给它们全部常驻下划线会很吵。 */
+[data-testid="stMarkdownContainer"] a { text-decoration: none; border-bottom: none; }
+[data-testid="stMarkdownContainer"] p > a:not([class*="card-link"]):hover {
+    border-bottom: 1px solid var(--line-border);
+}
+
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * {
+    color: var(--text-secondary) !important; font-size: var(--fs-sm) !important; line-height: 1.6 !important;
+}
+[data-testid="stWidgetLabel"] p {
+    color: var(--text-strong) !important; font-size: var(--fs-sm) !important; font-weight: var(--fw-medium) !important;
+}
+
+/* ── 分隔 ─────────────────────────────────────────────────────────────── */
+/* 这条线是首页各栏目之间唯一的分界，留白比线本身更能说明"这里换了一块"——
+   线细、留白窄的时候，两个栏目在视觉上还是连着的，得靠读文字才分得开。
+   46px → --sp-8(64px)：这是全站最大的一档间距，用在真正的大分区之间。 */
+hr, [data-testid="stDivider"] hr {
+    border: none !important;
+    border-top: 1px solid var(--line-divider) !important;
+    margin: var(--sp-8) 0 !important;
+}
+
+/* ── 顶部导航（st.radio 伪装成下划线标签页）────────────────────────────
+   原来是红底白字的胶囊，五个并排像一排按钮，很难不显得像后台管理系统。
+   改成印刷品式的下划线标签：不选中只是灰字，选中是墨色字+一条2px的墨线。 */
+/* 这一组的父级是flex列容器且不拉伸，radio会缩成内容宽度，下划线也就只有
+   一半宽。把这条链上的容器都撑满，那条分隔线才跟内容区左右对齐。 */
+.st-key-fa_nav { align-items: stretch !important; }
+.st-key-fa_nav [data-testid="stElementContainer"],
+.st-key-fa_nav [data-testid="stRadio"],
+.st-key-fa_nav [data-testid="stRadioGroup"] { width: 100% !important; }
+.st-key-fa_nav [role="radiogroup"] {
+    width: 100% !important; gap: 0 !important; align-items: flex-end !important;
+    border-bottom: 1px solid var(--line-divider);
+}
+.st-key-fa_nav [data-testid="stRadioOption"],
+.st-key-fa_nav [data-testid="stRadioOption"]:hover,
+.st-key-fa_nav [data-testid="stRadioOption"]:has(input:checked) {
+    padding: 0 0 var(--sp-3) !important; margin: 0 30px 0 0 !important;
+    /* background 必须在这里显式写成透明：下面通用的行内radio规则会把选中项
+       刷成墨色实底，而那条规则的选择器不带 .st-key-fa_nav，特异性虽然更低
+       却是唯一声明了 background 的一条，不显式覆盖就会漏进来，导航标签变成
+       一个黑方块。踩过一次。 */
+    background: transparent !important; border: none !important;
+    border-bottom: 2px solid transparent !important; border-radius: 0 !important;
+    transition: border-color .16s ease;
+}
+/* 干掉单选圆点。Streamlit的结构是
+   label > span>input + div > div > [圆点div, stMarkdownContainer]，
+   圆点那层没有稳定的testid，只能反选"不是文字容器的那个兄弟"。 */
+.st-key-fa_nav [data-testid="stRadioOption"] > div > div > div:not([data-testid="stMarkdownContainer"]) {
+    display: none !important;
+}
+.st-key-fa_nav [data-testid="stRadioOption"] p {
+    font-size: var(--fs-md) !important; font-weight: var(--fw-medium) !important;
+    color: var(--text-secondary) !important;
+    letter-spacing: 0.005em; transition: color .16s ease;
+}
+.st-key-fa_nav [data-testid="stRadioOption"]:hover p { color: var(--text-strong) !important; }
+.st-key-fa_nav [data-testid="stRadioOption"]:has(input:checked) { border-bottom-color: var(--ink) !important; }
+.st-key-fa_nav [data-testid="stRadioOption"]:has(input:checked) p {
+    color: var(--text-primary) !important; font-weight: var(--fw-bold) !important;
+}
+
+/* 其余位置的横向 radio（市场切换、K线周期、走势范围）统一成安静的分段控件：
+   去掉原生小圆点，做成下划线标签页，跟顶部导航同一套长相。
+   2026-09-04改：原来选中态是"墨色实底+白字"的胶囊，页面上就是一块突兀的
+   黑方块，跟这套灰白克制的底子撞得厉害。整站"选择一项"这件事本来就只该有
+   一种视觉语言，而导航已经定了下划线这一种，次级选择器（市场、K线周期、
+   区间）没有理由再造第二种更重的样式——分量还压过了导航本身。 */
+[data-testid="stRadio"] [role="radiogroup"] { gap: 2px; align-items: stretch; }
+[data-testid="stRadioOption"] {
+    padding: 5px 2px !important; margin: 0 14px 0 0 !important;
+    background: transparent !important;
+    border: 0 !important; border-bottom: 2px solid transparent !important;
+    border-radius: 0 !important;
+    transition: border-color .14s ease, color .14s ease;
+}
+[data-testid="stRadioOption"] > div > div > div:not([data-testid="stMarkdownContainer"]) { display: none !important; }
+[data-testid="stRadioOption"] p {
+    font-size: var(--fs-sm) !important; font-weight: var(--fw-medium) !important; color: var(--text-secondary) !important;
+}
+[data-testid="stRadioOption"]:hover { background: transparent !important; }
+[data-testid="stRadioOption"]:hover p { color: var(--text-strong) !important; }
+[data-testid="stRadioOption"]:has(input:checked) {
+    background: transparent !important; border-bottom-color: var(--ink) !important;
+}
+[data-testid="stRadioOption"]:has(input:checked) p {
+    color: var(--text-primary) !important; font-weight: var(--fw-bold) !important;
+}
+div[data-testid="stButtonGroup"] button, div[data-testid="stButtonGroup"] [role="radio"] {
+    background: var(--bg-card) !important; border: 1px solid var(--line-border) !important;
+    color: var(--text-secondary) !important; border-radius: var(--r-base) !important;
+    font-size: var(--fs-sm) !important; font-weight: var(--fw-medium) !important;
+}
+div[data-testid="stButtonGroup"] button[aria-checked="true"], div[data-testid="stButtonGroup"] [aria-checked="true"] {
+    background: var(--ink) !important; border-color: var(--ink) !important; color: #fff !important;
+}
+div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { color: inherit !important; }
+
+/* ── 卡片与容器 ───────────────────────────────────────────────────────── */
+/* 2026-09-05用户定的全局规则："现在我们项目里不要出现显眼的框框，保持透明统一"。
+   这条改成在源头上生效，而不是逐个调用点去改：Streamlit 的 st.container(border=True)
+   和 st.expander 都会画一个白底加完整边框的盒子，页面上一堆这种盒子摞在一起，
+   跟本项目"透明底加一条发丝线"的基调是两套语言。
+   分区之间的层次靠留白和标题字重表达，不靠画框。 */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+}
+/* 真正画边框的是内层的 stVerticalBlock，不是外面这层 BorderWrapper——
+   第一版只改了 BorderWrapper，页面上白框纹丝不动，扒 DOM 才看到
+   `1px solid rgba(23,24,28,.2)` 挂在内层。
+   用 :not([class*="st-key-"]) 把这条限制在"Streamlit 自己画的框"上：
+   项目里那些扁平行是 st.container(key=...) 建的，带 st-key 类、各自
+   已经定义了想要的底部发丝线，不能被这条一并抹掉。 */
+[data-testid="stVerticalBlock"]:not([class*="st-key-"]) {
+    border: none !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+}
+/* 无边框之后靠一条发丝线分隔相邻区块，层次不靠画框靠留白。 */
+[data-testid="stVerticalBlockBorderWrapper"] > [data-testid="stLayoutWrapper"] > [data-testid="stVerticalBlock"]:not([class*="st-key-"]) {
+    border-bottom: 1px solid var(--line-divider) !important;
+    padding: 2px 0 var(--sp-3) !important;
+}
+/* 边框其实挂在内层的<details>上，不是 stExpander 这一层，套外层是没用的。 */
+[data-testid="stExpander"] details {
+    background: transparent !important;
+    border: none !important;
+    border-bottom: 1px solid var(--line-divider) !important;
+    border-radius: 0 !important; box-shadow: none !important;
+}
+[data-testid="stExpander"] summary {
+    padding: 11px 2px !important; font-size: var(--fs-sm) !important; border-radius: var(--r-base) !important;
+}
+[data-testid="stExpander"] summary:hover { background: var(--bg-fill) !important; }
+[data-testid="stExpander"] summary p { font-weight: var(--fw-medium) !important; color: var(--text-strong) !important; }
+
+/* ── 数字指标 ─────────────────────────────────────────────────────────── */
+[data-testid="stMetric"] { background: transparent !important; padding: 0 !important; }
+[data-testid="stMetricLabel"] p {
+    font-size: var(--fs-xs) !important; font-weight: var(--fw-medium) !important;
+    color: var(--text-secondary) !important; letter-spacing: 0.035em;
+}
+[data-testid="stMetricValue"] {
+    /* 2026-09-12：从 1.85rem 收到 1.5rem。实机看个股详情页，"最高/最低/今开"
+       这三个次要参考数字几乎跟顶部主价格一样大，主次完全拉不开，而且三行
+       大字把K线推到了首屏之外。24px 仍然是明确的"指标数字"体量，但不再
+       跟页面主角抢戏。真正的主角（模拟盘净值那种）用 --fs-2xl。
+       这个值跟 .streamlit/config.toml 的 metricValueFontSize 必须一致，
+       那边是为了首屏不闪一下：主题配置在首次绘制前就生效，CSS 要等渲染到
+       这一步，不同步的话数字会先大后小跳一下。 */
+    font-size: var(--fs-xl) !important; font-weight: var(--fw-bold) !important;
+    letter-spacing: -0.028em !important;
+    color: var(--text-primary) !important; line-height: 1.24 !important;
+}
+/* Streamlit 新版给 delta 加了一个带底色的圆角小胶囊，粉底/浅绿底在这套
+   近乎无色的界面里显得很突兀，而且底色本身不传递任何额外信息——箭头和
+   正负号已经说清楚方向了。去掉底色只留文字。 */
+[data-testid="stMetricDelta"] {
+    background: transparent !important; padding: 0 !important; margin-top: 2px !important;
+    font-size: var(--fs-sm) !important; font-weight: var(--fw-medium) !important;
+}
+[data-testid="stMetricDelta"] svg { width: 14px !important; height: 14px !important; }
+
+/* ── 按钮 ─────────────────────────────────────────────────────────────── */
+/* 全站只有三种按钮，各自职责清楚：
+     次要（默认）  纯文字，悬停浮出一块浅灰底
+     主要          墨色实底，一屏只该有一个
+     安静(tertiary) 图标按钮和返回键，默认几乎看不见
+   下面这一组选择器是整套按钮系统的唯一入口。Streamlit 的按钮不止 st.button
+   一种：表单提交键、弹层触发键各自是独立的 testid，只写 .stButton button 会
+   漏掉它们，于是页面上就会出现"大部分按钮是新样式、个别还是旧样式"的割裂。
+   2026-09-12：连描边也去掉了。用户第二次提这件事——"项目里面还是存在按键
+   的外框，这个我之前说过很丑"。上一版只把底色改透明、留了 1px 描边，页面上
+   仍然是一个个小方框。 */
+.stButton button,
+[data-testid="stFormSubmitButton"] button,
+[data-testid="stPopover"] button {
+    background: transparent !important; border: none !important;
+    color: var(--text-primary) !important; border-radius: var(--r-base) !important;
+    font-size: var(--fs-sm) !important; font-weight: var(--fw-medium) !important;
+    padding: 6px var(--sp-3) !important;
+    box-shadow: none !important;
+    transition: background .15s ease, color .15s ease;
+}
+.stButton button:hover,
+[data-testid="stFormSubmitButton"] button:hover,
+[data-testid="stPopover"] button:hover {
+    background: var(--bg-fill) !important; color: var(--text-primary) !important;
+}
+.stButton button:active,
+[data-testid="stFormSubmitButton"] button:active { background: #E9EAEE !important; }
+.stButton button:focus, .stButton button:focus-visible,
+[data-testid="stFormSubmitButton"] button:focus,
+[data-testid="stFormSubmitButton"] button:focus-visible,
+[data-testid="stPopover"] button:focus,
+[data-testid="stPopover"] button:focus-visible { box-shadow: none !important; outline: none !important; }
+.stButton button:disabled,
+[data-testid="stFormSubmitButton"] button:disabled {
+    background: transparent !important; border: none !important;
+    color: var(--text-tertiary) !important;
+}
+
+/* "展开/更多/收起"这类按钮不是动作，是一个揭示更多内容的入口。它们大多是
+   整行宽度，画成带边框的大方块时会在页面中间横出一道很重的横条。改成没有
+   边框、没有底色的居中弱化文字，上面压一条发丝分割线。
+   容器本身也要撑满一行：按钮上的 width:100% 撑的是它的父容器，而
+   Streamlit 给按钮的外层容器默认是收缩宽度的——只给按钮加宽度，撑开的
+   仍然是一个本来就很窄的盒子，文字看着还是贴在左边。 */
+[class*="st-key-_detail_expand_btn"],
+[class*="st-key-_idx_expand_btn"],
+[class*="st-key-_ai_sim_runs_more"],
+[class*="st-key-_ai_sim_orders_more"],
+[class*="st-key-_more_limit_pool"],
+[class*="st-key-_sectors_more_btn"],
+[class*="st-key-_sectors_collapse_btn"],
+[class*="st-key-_movers_collapse_btn"],
+[class*="st-key-_home_news_more"],
+[class*="st-key-_home_news_collapse"],
+[class*="st-key-_movers_expand_btn"] {
+    width: 100% !important;
+}
+
+[class*="st-key-_detail_expand_btn"] button,
+[class*="st-key-_idx_expand_btn"] button,
+[class*="st-key-_ai_sim_runs_more"] button,
+[class*="st-key-_ai_sim_orders_more"] button,
+[class*="st-key-_more_limit_pool"] button,
+[class*="st-key-_sectors_more_btn"] button,
+[class*="st-key-_sectors_collapse_btn"] button,
+[class*="st-key-_movers_collapse_btn"] button,
+[class*="st-key-_home_news_more"] button,
+[class*="st-key-_home_news_collapse"] button,
+[class*="st-key-_movers_expand_btn"] button {
+    background: transparent !important; border: none !important;
+    border-top: 1px solid var(--line-divider) !important;
+    border-radius: 0 !important; color: var(--text-secondary) !important;
+    font-size: var(--fs-sm) !important; font-weight: var(--fw-medium) !important;
+    padding: 13px var(--sp-2) 6px !important; letter-spacing: .02em;
+    width: 100% !important;          /* 撑满整行，文字才能真正居中 */
+}
+[class*="st-key-_detail_expand_btn"] button:hover,
+[class*="st-key-_idx_expand_btn"] button:hover,
+[class*="st-key-_ai_sim_runs_more"] button:hover,
+[class*="st-key-_ai_sim_orders_more"] button:hover,
+[class*="st-key-_more_limit_pool"] button:hover,
+[class*="st-key-_sectors_more_btn"] button:hover,
+[class*="st-key-_sectors_collapse_btn"] button:hover,
+[class*="st-key-_movers_collapse_btn"] button:hover,
+[class*="st-key-_home_news_more"] button:hover,
+[class*="st-key-_home_news_collapse"] button:hover,
+[class*="st-key-_movers_expand_btn"] button:hover {
+    background: transparent !important; color: var(--text-primary) !important;
+}
+
+/* 主要动作：唯一填实底的按钮。一屏里只应该有一个，让"这一步该点哪"没有歧义。
+   2026-09实测修复：按钮文字之前肉眼几乎看不见——墨色实底配白字，但白字只
+   设在了<button>本身，按钮内层文字实际包在 stMarkdownContainer 的 p 里，
+   上游那条全局 p 规则直接挂在这层<p>上，子元素的直接样式天然盖过父级继承
+   来的白色，不管父级选择器特异度多高。必须连着内层 p/div/span 一起显式设白。*/
+.stButton button[kind="primary"],
+.stButton button[data-testid="stBaseButton-primary"],
+[data-testid="stFormSubmitButton"] button[kind="primary"],
+[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] {
+    background: var(--ink) !important; border-color: var(--ink) !important; color: #fff !important;
+}
+.stButton button[kind="primary"] p,
+.stButton button[kind="primary"] div,
+.stButton button[kind="primary"] span,
+.stButton button[data-testid="stBaseButton-primary"] p,
+.stButton button[data-testid="stBaseButton-primary"] div,
+.stButton button[data-testid="stBaseButton-primary"] span,
+[data-testid="stFormSubmitButton"] button[kind="primary"] p,
+[data-testid="stFormSubmitButton"] button[kind="primary"] div,
+[data-testid="stFormSubmitButton"] button[kind="primary"] span,
+[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] p,
+[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] div,
+[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] span { color: #fff !important; }
+.stButton button[kind="primary"]:hover,
+.stButton button[data-testid="stBaseButton-primary"]:hover,
+[data-testid="stFormSubmitButton"] button[kind="primary"]:hover,
+[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"]:hover {
+    background: #000 !important; border-color: #000 !important; color: #fff !important;
+}
+/* 安静档：连描边都没有，只在悬停时浮出一块底。图标按钮和返回键走这一档。
+   hover 态要变成 --text-primary，同样会被子级 p 盖掉，一并显式补上。 */
+.stButton button[kind="tertiary"], .stButton button[data-testid="stBaseButton-tertiary"] {
+    background: transparent !important; border: 1px solid transparent !important;
+    color: var(--text-secondary) !important;
+}
+.stButton button[kind="tertiary"]:hover, .stButton button[data-testid="stBaseButton-tertiary"]:hover {
+    background: var(--bg-fill) !important; border-color: transparent !important; color: var(--text-primary) !important;
+}
+.stButton button[kind="tertiary"]:hover p,
+.stButton button[kind="tertiary"]:hover div,
+.stButton button[kind="tertiary"]:hover span,
+.stButton button[data-testid="stBaseButton-tertiary"]:hover p,
+.stButton button[data-testid="stBaseButton-tertiary"]:hover div,
+.stButton button[data-testid="stBaseButton-tertiary"]:hover span { color: var(--text-primary) !important; }
+
+/* ── 列表行 ───────────────────────────────────────────────────────────────
+   持仓 / 自选 / 指数 / 涨跌停池 / 热门板块 / 推荐股，全是同一种东西：
+   一行数据，左边名字右边数字，靠一条发丝线分隔。改造前它们各自写了一份
+   几乎相同的规则，只有 padding 不同。合并成一条基础规则 + 各自的 padding，
+   以后加新列表直接挂上去。 */
+[class*="st-key-mv_row_"],
+[class*="st-key-sector_row_"],
+[class*="st-key-idx_row_"],
+[class*="st-key-pos_row_"],
+[class*="st-key-lb_row_"],
+[class*="st-key-macro_"] {
+    border: none !important; background: transparent !important;
+    border-bottom: 1px solid var(--line-divider) !important;
+    border-radius: 0 !important;
+    gap: 0 !important;
+    transition: background .12s ease;
+}
+[class*="st-key-mv_row_"] [data-testid="stElementContainer"],
+[class*="st-key-sector_row_"] [data-testid="stElementContainer"],
+[class*="st-key-idx_row_"] [data-testid="stElementContainer"],
+[class*="st-key-pos_row_"] [data-testid="stElementContainer"],
+[class*="st-key-macro_"] [data-testid="stElementContainer"],
+[class*="st-key-sim_run_"] [data-testid="stElementContainer"],
+[class*="st-key-my_about_"] [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
+
+[class*="st-key-mv_row_"]:hover,
+[class*="st-key-sector_row_"]:hover,
+[class*="st-key-idx_row_"]:hover,
+[class*="st-key-pos_row_"]:hover { background: rgba(23, 24, 28, 0.015) !important; }
+
+/* 各自的行高。改造前指数行 79px、自选行 83px——一屏只看得到七八行，52 支
+   自选要滚八屏。压到接近 44/48px 的目标行高，主要是靠这里的 padding。 */
+[class*="st-key-mv_row_"],
+[class*="st-key-sector_row_"],
+[class*="st-key-idx_row_"] { padding: var(--sp-2) 2px !important; }
+[class*="st-key-pos_row_"] { padding: var(--sp-1) 2px 2px !important; }
+[class*="st-key-lb_row_"]  { padding: var(--sp-4) 2px 10px !important; }
+[class*="st-key-macro_"]   { padding: 10px 2px var(--sp-1) !important; }
+
+/* 行内那条"观望 · 09-03"紧贴主行，不要另起一大段。Streamlit 默认给每个
+   元素容器留了不小的竖向间距，一行里有两个块就会撑出很高的行高。 */
+[class*="st-key-pos_row_"] [data-testid="stExpander"] { margin-top: -6px !important; }
+/* 删除键平时隐去，指到这一行才浮出来——它是破坏性操作，不需要二十个红叉
+   常驻在列表右侧。 */
+[class*="st-key-pos_row_"] [class*="st-key-pos_del_"] button { opacity: 0; transition: opacity .15s ease; }
+[class*="st-key-pos_row_"]:hover [class*="st-key-pos_del_"] button { opacity: 1; }
+
+/* 行内折叠框：去掉边框和底色，变成一行安静的可展开文字。
+   六处（持仓行 / 推荐股行 / 宏观条目 / AI决策记录 / 我的页关于 / 侧栏）
+   改造前各写了一份，合并成一条。 */
+[class*="st-key-pos_row_"] [data-testid="stExpander"] details,
+[class*="st-key-lb_row_"] [data-testid="stExpander"] details,
+[class*="st-key-macro_"] [data-testid="stExpander"] details {
+    border: none !important; background: transparent !important; border-radius: 0 !important;
+}
+[class*="st-key-sim_run_"] [data-testid="stExpander"] details,
+[class*="st-key-my_about_"] [data-testid="stExpander"] details {
+    border: none !important; background: transparent !important; border-radius: 0 !important;
+    border-bottom: 1px solid var(--line-divider) !important;
+}
+[class*="st-key-pos_row_"] [data-testid="stExpander"] summary,
+[class*="st-key-lb_row_"] [data-testid="stExpander"] summary,
+[class*="st-key-macro_"] [data-testid="stExpander"] summary,
+[class*="st-key-sim_run_"] [data-testid="stExpander"] summary,
+[class*="st-key-my_about_"] [data-testid="stExpander"] summary {
+    background: transparent !important; border-radius: 0 !important;
+}
+[class*="st-key-pos_row_"] [data-testid="stExpander"] summary { padding: 2px 0 0 !important; }
+[class*="st-key-lb_row_"] [data-testid="stExpander"] summary  { padding: var(--sp-1) 0 0 !important; }
+[class*="st-key-macro_"] [data-testid="stExpander"] summary   { padding: 2px 0 !important; }
+[class*="st-key-sim_run_"] [data-testid="stExpander"] summary { padding: 10px 0 !important; }
+[class*="st-key-my_about_"] [data-testid="stExpander"] summary { padding: 9px 0 !important; }
+
+[class*="st-key-pos_row_"] [data-testid="stExpander"] summary:hover,
+[class*="st-key-lb_row_"] [data-testid="stExpander"] summary:hover,
+[class*="st-key-macro_"] [data-testid="stExpander"] summary:hover,
+[class*="st-key-sim_run_"] [data-testid="stExpander"] summary:hover,
+[class*="st-key-my_about_"] [data-testid="stExpander"] summary:hover { background: transparent !important; }
+
+[class*="st-key-pos_row_"] [data-testid="stExpander"] summary p,
+[class*="st-key-lb_row_"] [data-testid="stExpander"] summary p,
+[class*="st-key-macro_"] [data-testid="stExpander"] summary p {
+    font-size: var(--fs-xs) !important; color: var(--text-tertiary) !important; font-weight: var(--fw-normal) !important;
+}
+[class*="st-key-sim_run_"] [data-testid="stExpander"] summary p,
+[class*="st-key-my_about_"] [data-testid="stExpander"] summary p {
+    font-size: var(--fs-sm) !important; color: var(--text-strong) !important; font-weight: var(--fw-normal) !important;
+}
+[class*="st-key-pos_row_"] [data-testid="stExpander"] summary:hover p,
+[class*="st-key-lb_row_"] [data-testid="stExpander"] summary:hover p,
+[class*="st-key-macro_"] [data-testid="stExpander"] summary:hover p { color: var(--text-secondary) !important; }
+[class*="st-key-sim_run_"] [data-testid="stExpander"] summary:hover p,
+[class*="st-key-my_about_"] [data-testid="stExpander"] summary:hover p { color: var(--text-primary) !important; }
+
+/* 图标按钮统一规格：36px 正圆、图标 18px。原来各处自己写死 44px + 1.6rem，
+   在这套克制的版式里显得又大又重，而且持仓页 44px、删除键 36px，同一个页面
+   两种尺寸。这里收口成一份，各处不再重复定义。
+   这是全站唯一保留 50% 圆角的地方——它要读成一个"圆形热区"，不是方块。 */
+[class*="st-key-pos_search_icon"] button, [class*="st-key-pos_compare_icon"] button,
+[class*="st-key-pos_add_icon"] button, [class*="st-key-watch_search_icon"] button,
+[class*="st-key-watch_add_icon"] button, [class*="st-key-pos_del_"] button,
+[class*="st-key-detail_back_"] button, [class*="st-key-idx_back_"] button,
+[class*="st-key-sector_back_"] button {
+    height: 36px !important; min-height: 36px !important;
+    width: 36px !important; min-width: 36px !important;
+    padding: 0 !important; border-radius: 50% !important;
+    display: flex !important; align-items: center !important; justify-content: center !important;
+}
+[class*="st-key-pos_search_icon"] span[data-testid="stIconMaterial"],
+[class*="st-key-pos_compare_icon"] span[data-testid="stIconMaterial"],
+[class*="st-key-pos_add_icon"] span[data-testid="stIconMaterial"],
+[class*="st-key-watch_search_icon"] span[data-testid="stIconMaterial"],
+[class*="st-key-watch_add_icon"] span[data-testid="stIconMaterial"],
+[class*="st-key-pos_del_"] span[data-testid="stIconMaterial"],
+[class*="st-key-detail_back_"] span[data-testid="stIconMaterial"],
+[class*="st-key-idx_back_"] span[data-testid="stIconMaterial"],
+[class*="st-key-sector_back_"] span[data-testid="stIconMaterial"] {
+    font-size: var(--fs-lg) !important;
+}
+/* 删除/取消关注是破坏性操作，平时保持中性，悬停才透出跌色作为警示——
+   一上来就画成红色会让整个列表看着像满屏警告。 */
+[class*="st-key-pos_del_"] button:hover span[data-testid="stIconMaterial"] { color: var(--up) !important; }
+
+/* ── 输入 ─────────────────────────────────────────────────────────────── */
+[data-testid="stTextInput"] input, [data-testid="stNumberInput"] input, [data-testid="stTextArea"] textarea {
+    background: var(--bg-card) !important; border-radius: var(--r-base) !important;
+    border-color: var(--line-border) !important; color: var(--text-primary) !important;
+    font-size: var(--fs-md) !important;
+}
+[data-testid="stTextInput"] input:focus, [data-testid="stNumberInput"] input:focus {
+    border-color: var(--ink) !important; box-shadow: none !important;
+}
+[data-baseweb="input"], [data-baseweb="base-input"] {
+    background: var(--bg-card) !important; border-radius: var(--r-base) !important;
+}
+
+/* ── 侧栏：已废弃，彻底隐藏 ───────────────────────────────────────────
+   2026-09-04把侧边栏撤掉，内容全部挪进"我的"分区。这里连侧栏本体和它那个
+   展开箭头一起隐掉——留一个点开是空白的箭头，比没有更糟。 */
+[data-testid="stSidebar"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] { display: none !important; }
+
+/* ── 表格 ─────────────────────────────────────────────────────────────── */
+[data-testid="stTable"] td, [data-testid="stTable"] th {
+    border-color: var(--line-divider) !important; font-size: var(--fs-sm) !important;
+}
+[data-testid="stTable"] th { color: var(--text-secondary) !important; font-weight: var(--fw-medium) !important; }
+
+/* ── 整卡可点的链接 ───────────────────────────────────────────────────────
+   推荐股 / 指数 / 板块 / 持仓 / 最近搜索这几种卡片，都是用一个 <a> 把若干
+   <div> 包起来。浏览器默认的 a:link / a:visited 样式（蓝字+下划线）选择器带
+   伪类，优先级比单纯的 class 选择器高，必须 !important 才真正覆盖得掉。
+   改造前这一条在 app.py 里出现了五次（pos-card / idx-card / sector-card /
+   my-search / 还有一次重复的 pos-card），内容几乎一样。合并成一条。 */
+a.pos-card-link, a.pos-card-link:link, a.pos-card-link:visited,
+a.idx-card-link, a.idx-card-link:link, a.idx-card-link:visited,
+a.sector-card-link, a.sector-card-link:link, a.sector-card-link:visited,
+a.my-search-link, a.my-search-link:link, a.my-search-link:visited {
+    text-decoration: none !important; color: inherit !important;
+    display: block; cursor: pointer;
+}
+a.my-search-link, a.my-search-link:link, a.my-search-link:visited {
+    display: flex !important; justify-content: space-between; align-items: baseline;
+    padding: 9px 0; border-bottom: 1px solid var(--line-divider);
+}
+a.my-search-link:hover { background: rgba(23, 24, 28, 0.015) !important; }
+a.pos-card-link:hover, a.idx-card-link:hover, a.sector-card-link:hover { opacity: 0.85; }
+
+/* 首页宏观条的六张卡（VIX / 美债 / 美元 / 黄金 / 原油 / 铜）。整张可点，
+   悬停时浮出一块底色——负 margin 配同值 padding，是为了让那块底色比文字
+   大一圈，而卡片本身在未悬停时仍然跟旁边严格对齐。 */
+a.macro-card-link, a.macro-card-link:link, a.macro-card-link:visited {
+    display: block; text-decoration: none; border-bottom: none; color: inherit;
+    padding: var(--sp-1) 6px; margin: calc(var(--sp-1) * -1) -6px;
+    border-radius: var(--r-base);
+    transition: background .12s ease;
+}
+a.macro-card-link:hover { background: rgba(23, 24, 28, 0.045); }
+
+/* ── 数值更新的色闪 ───────────────────────────────────────────────────────
+   行情刷新时价格直接换一个数字，眼睛抓不到"哪几个变了"。让变动的那一格
+   背景淡入涨红/跌绿再淡出——丝滑感来自局部变化，不是整页刷新。
+   改造前这段是 _price_flash_css() 用 f-string 把 theme.py 的涨跌色拼进去，
+   每次调用重新生成一遍字符串注入一次。现在涨跌色本身就是 token，这段就是
+   纯静态 CSS，没有理由还留在 Python 里。 */
+@keyframes priceFlashUp {
+    0%   { background: linear-gradient(90deg, var(--up-flash), transparent); }
+    100% { background: transparent; }
+}
+@keyframes priceFlashDown {
+    0%   { background: linear-gradient(90deg, var(--down-flash), transparent); }
+    100% { background: transparent; }
+}
+.price-flash-up   { animation: priceFlashUp 1.1s ease-out;   border-radius: var(--r-base); }
+.price-flash-down { animation: priceFlashDown 1.1s ease-out; border-radius: var(--r-base); }
+
+/* ── 自定义类：给手写的卡片/行用 ──────────────────────────────────────── */
+.fa-card {
+    background: var(--bg-card); border: 1px solid var(--line-border);
+    border-radius: var(--r-base); padding: 18px 20px;
+}
+.fa-eyebrow {
+    font-size: var(--fs-xs); font-weight: var(--fw-bold); letter-spacing: 0.055em; text-transform: uppercase;
+    color: var(--text-secondary); margin: 0 0 var(--sp-3);
+}
+.fa-num { font-weight: var(--fw-bold); letter-spacing: -0.02em; }
+
+/* 首页宏观条 / 个股关键指标 / 新股首日统计，三个都是"一排并列的数字"，
+   改造前各自内联了一份几乎相同的 grid。合并到这里。 */
+.fa-macro-strip {
+    display: grid; grid-template-columns: repeat(6, 1fr);
+    gap: 10px var(--sp-3); padding-bottom: var(--sp-3);
+    border-bottom: 1px solid var(--line-divider); margin-bottom: 20px;
+}
+.fa-keymetrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--sp-3) 14px; margin: 6px 0 var(--sp-1); }
+.fa-ipo-stats  { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+@media (max-width: 640px) {
+    .fa-macro-strip { grid-template-columns: repeat(3, 1fr); }
+    .fa-keymetrics  { grid-template-columns: repeat(3, 1fr); }
+    .fa-ipo-stats   { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ── 右下角 AI 咨询浮标与浮层 ─────────────────────────────────────────────
+   这颗按钮原来是 68px 的品牌红大圆 + 800 字重 + 很重的投影，是整页视觉上
+   最吵的一个元素，而且正好压在首页地图的右下角。现在跟次要按钮同一套语言：
+   平时只是一个带细边的白圆，悬停才填墨色——存在感够找得到，但不抢戏。 */
+.st-key-ai_assistant_popover { position: fixed; bottom: 26px; right: 26px; z-index: 9999; }
+.st-key-ai_assistant_popover button {
+    border-radius: 50% !important; width: 50px; height: 50px; padding: 0 !important;
+    background: var(--bg-card) !important; border: 1px solid var(--line-border) !important;
+    box-shadow: 0 2px 14px rgba(23, 24, 28, .10) !important;
+    transition: background .16s ease, border-color .16s ease !important;
+}
+.st-key-ai_assistant_popover button:hover { background: var(--ink) !important; border-color: var(--ink) !important; }
+/* 文字居中：Streamlit 按钮里的<p>自带上下 margin，加上 letter-spacing 会在
+   右侧多出一个字距的空白，两者叠加就是"看着没居中"。margin 清零、行高压到
+   1，并用 padding-left 抵掉尾部那个字距。 */
+.st-key-ai_assistant_popover button p {
+    color: var(--text-primary) !important; font-size: var(--fs-xs) !important;
+    font-weight: var(--fw-bold) !important; letter-spacing: .08em; line-height: 1 !important;
+    margin: 0 !important; padding-left: .08em; transition: color .16s ease;
+}
+.st-key-ai_assistant_popover button > div,
+.st-key-ai_assistant_popover button [data-testid='stMarkdownContainer'] {
+    display: flex !important; align-items: center !important; justify-content: center !important;
+    width: 100% !important; height: 100% !important;
+}
+.st-key-ai_assistant_popover button:hover p { color: #fff !important; }
+/* popover 触发键默认会在文字右边带一个下拉小箭头。这颗按钮是个圆形浮标，
+   里面只放两个字母，多一个箭头会挤成"AI⌄"，既不居中也不好看。 */
+.st-key-ai_assistant_popover button svg,
+.st-key-ai_assistant_popover button [data-testid='stIconMaterial'] { display: none !important; }
+
+/* 浮层本体：收掉 Streamlit 默认的厚投影和圆角，跟站内卡片同一套。
+   2026-09-11修：浮层原来是"整块固定高度+整块滚动"，窗口矮一点（实测609px高）
+   输入框就被挤到滚动区外面去了，要在面板里往下滚才能找到输入框——等于这个
+   功能在小窗口下是坏的。改成纵向 flex：高度跟着视口走，消息区自己滚，输入框
+   固定在底部永远可见。
+   2026-09-12再修（前端审计第10条）：宽度写死 420px。原来没设宽度，popover
+   跟着内容自适应——空对话时窄、AI 回一段长文之后突然变宽，审计原话"发送
+   消息后面板宽度会跳变"。聊天面板的宽度不该由某一条回答的长短决定。 */
+[data-testid='stPopoverBody'] {
+    border-radius: var(--r-base) !important;
+    border: 1px solid var(--line-border) !important;
+    box-shadow: 0 8px 32px rgba(23, 24, 28, .10) !important;
+    display: flex !important; flex-direction: column !important;
+    width: 420px !important; max-width: 92vw !important;
+    max-height: min(78vh, 620px) !important; overflow: hidden !important;
+}
+@media (max-width: 640px) { [data-testid='stPopoverBody'] { width: 92vw !important; } }
+/* 消息区：吃掉剩余高度并单独滚动。选的是浮层里第一层竖向容器，命中不了也
+   只是退回原来的行为，不会把布局搞坏。 */
+[data-testid='stPopoverBody'] > [data-testid='stVerticalBlock'] {
+    flex: 1 1 auto !important; min-height: 0 !important; overflow-y: auto !important;
+}
+/* 输入框：不参与伸缩，钉在底部，上面压一条发丝线跟消息区分开。 */
+[data-testid='stPopoverBody'] [data-testid='stChatInput'] {
+    flex: 0 0 auto !important; margin-top: var(--sp-2) !important;
+    border-top: 1px solid var(--line-divider) !important; padding-top: var(--sp-2) !important;
+}
+
+/* AI 咨询窗"对方正在输入"的三个点。 */
+@keyframes _fa_typing {
+    0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+    30%           { opacity: 1;    transform: translateY(-3px); }
+}
+
+/* ── 窄屏 ─────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+    .fa-flex-row { flex-wrap: wrap !important; }
+    .fa-flex-row > div { flex: 1 1 auto !important; }
+    [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
+    [data-testid="stMetricValue"] { font-size: 20px !important; }
+    .st-key-fa_nav [data-testid="stRadio"] > div { overflow-x: auto; flex-wrap: nowrap !important; }
+    .st-key-fa_nav [data-testid="stRadio"] label { margin-right: 18px !important; white-space: nowrap; }
+    .stButton button { font-size: var(--fs-xs) !important; padding: 6px 11px !important; }
+    /* 右下角那个 AI 悬浮按钮是 position:fixed，不占文档流，窄屏上会直接压在
+       正文最后几行上（2026-09-11前端审计："右下角的 AI 悬浮按钮会盖住正文"）。
+       给主内容区留出一段底部安全区，滚到底时最后一行也不会被它挡住。 */
+    section.main .block-container { padding-bottom: 96px !important; }
+}
