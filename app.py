@@ -4930,15 +4930,21 @@ def _render_ipo_calculator(items: list[dict]):
         m3.metric("利息成本", f"HK${res['interest']:,.0f}")
         m4.metric("预期净收益", f"HK${res['net_profit']:,.0f}")
 
+        # 下面几条 caption 里的 HK\$ 必须转义，不要"顺手清理"掉那个反斜杠。
+        # Streamlit 的 markdown 把成对的 $...$ 当 LaTeX 公式渲染：同一条 caption
+        # 里出现两个 HK$（比如"借来的 HK$22,500"和"净亏 HK$122"），中间整段会被
+        # 当成数学公式排成斜体，两个美元符号本身还会被吃掉——线上实际出现过，
+        # 截图里是"借来的 HK22,500计的…净亏 𝐻𝐾122"。
+        # st.metric 不走 markdown，所以上面那四个 f"HK${...}" 不用转义。
         st.caption(
-            f"按中签率 {hit:g}% 折算，预期中签金额 HK${res['allotted_amount']:,.0f}；"
+            f"按中签率 {hit:g}% 折算，预期中签金额 HK\\${res['allotted_amount']:,.0f}；"
             f"首日要涨到 **{res.get('breakeven_move_pct', 0):.2f}%** 才够覆盖利息和手续费。"
         )
         if margin_pct > 0:
             st.caption(
-                f"注意利息是按借来的 HK${res['borrowed']:,.0f} 计的，跟中不中签无关——"
+                f"注意利息是按借来的 HK\\${res['borrowed']:,.0f} 计的，跟中不中签无关——"
                 f"认购额在计息，只有中签的那部分在赚。一手都没中的话，这次净亏 "
-                f"HK${res['interest'] + res['fee']:,.0f}。"
+                f"HK\\${res['interest'] + res['fee']:,.0f}。"
             )
         if "return_on_own_capital" in res:
             st.caption(f"相对自有资金的回报率 {res['return_on_own_capital']:+.2%}"
