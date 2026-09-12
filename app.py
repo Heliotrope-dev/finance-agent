@@ -2708,7 +2708,24 @@ def _render_market_extras(market: str):
             except Exception:
                 premarket = []
 
-    if not (movers or hot or premarket):
+    # 新股清单在这里就取，而不是等到函数末尾——2026-09-13 实测发现的真bug：
+    # 原来这一段末尾才取新股，但上面这句 `if not (movers or hot or premarket):
+    # return` 在它之前，于是只要异动榜和热度榜都空，整个新股清单就跟着消失。
+    # 沪深正好每次都踩中：这个账号没有沪深行情权限，两个榜单都拿不到，所以
+    # 行情页沪深那栏的"新股上市"从加上去那天起就没显示过。
+    #
+    # 这是这个项目里反复出现的同一类问题——一块内容因为**另一块**内容的数据源
+    # 失败而静默消失，页面上看不出任何异常，只像是"今天没有新股"。
+    try:
+        ipos = get_ipo_calendar(market, limit=6) if market in ("HK", "A", "US") else []
+    except Exception:
+        ipos = []
+    # 政府银债/债券不是股票 IPO，不应混进"新股上市"。它们没有同一套招股价、
+    # 绿鞋或首日表现语义，展示在这里会和首页认购专区互相矛盾。
+    ipos = [ip for ip in ipos if "银债" not in str(ip.get("name") or "")
+            and "债券" not in str(ip.get("name") or "")]
+
+    if not (movers or hot or premarket or ipos):
         return
 
     def _rows(title, items, sub=""):
@@ -2758,50 +2775,45 @@ def _render_market_extras(market: str):
         _rows("美股盘前异动", premarket, "开盘方向最早的线索")
 
     # 三个市场都列新股，口径保持一致（用户2026-09-13要求 沪深/美股跟港股对齐）。
-    if market in ("HK", "A", "US"):
-        try:
-            ipos = get_ipo_calendar(market, limit=6)
-        except Exception:
-            ipos = []
-        # 政府银债/债券不是股票 IPO，不应混进“新股上市”。它们没有同一套
-        # 招股价、绿鞋或首日表现语义，展示在这里会和首页认购专区互相矛盾。
-        ipos = [ip for ip in ipos if "银债" not in str(ip.get("name") or "")
-                and "债券" not in str(ip.get("name") or "")]
-        if ipos:
-            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-            # 沪深的 list_time 常常是 N/A（还在申购、上市日未定），这是沪深的正常
-            # 状态不是缺数据，标题里说明一下，免得看到一排空日期以为坏了。
-            _ipo_note = {
-                "A": "新股上市 · 打新中签后才配售，上市日多为待定",
-                "HK": "新股上市 · 认购期内可申购",
-                "US": "新股上市 · 美股不设散户打新，仅作日程参考",
-            }.get(market, "新股上市")
+    # ipos 在函数开头就取好了，原因见那里的注释。
+    if ipos:
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        # 沪深的 list_time 常常是 N/A（还在申购、上市日未定），这是沪深的正常
+        # 状态不是缺数据，标题里说明一下，免得看到一排空日期以为坏了。
+        _ipo_note = {
+            "A": "新股上市 · 打新中签后才配售，上市日多为待定",
+            "HK": "新股上市 · 认购期内可申购",
+            "US": "新股上市 · 美股不设散户打新，仅作日程参考",
+        }.get(market, "新股上市")
+        st.markdown(
+            f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 6px'>{_esc(_ipo_note)}</div>",
+            unsafe_allow_html=True,
+        )
+        # 招股价的币种跟着市场走。之前三个市场都写"招股价"不带币种，港股和
+        # 美股并排看的时候分不清 15.00 是港币还是美元。
+        _ccy = {"A": "", "HK": "HK$", "US": "$"}.get(market, "")
+        for ip in ipos:
+            _pr = ""
+            if ip.get("price_min") and ip.get("price_max"):
+                _pr = (f"{ip['price_min']:,.2f}" if ip["price_min"] == ip["price_max"]
+                       else f"{ip['price_min']:,.2f}-{ip['price_max']:,.2f}")
+            elif ip.get("ipo_price"):
+                _pr = f"{ip['ipo_price']:,.2f}"
             st.markdown(
-                f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 6px'>{_esc(_ipo_note)}</div>",
+                f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
+                f"border-bottom:1px solid var(--fa-border)'>"
+                f"<span style='color:var(--fa-faint);font-size:0.78rem;min-width:76px'>"
+                # 上市日为空不是缺数据——沪深申购期内上市日本来就没定，
+                # 留白会被当成"数据没拉到"，写"待定"才是事实。
+                f"{_esc(ip.get('list_date') or '待定')}</span>"
+                f"<span style='flex:1;color:var(--fa-text);font-size:0.86rem'>{_esc(ip['name'])}"
+                f"<span style='color:var(--fa-faint);font-size:0.76rem'> {_esc(ip['symbol'])}</span></span>"
+                f"<span style='color:var(--fa-text-2);font-size:0.8rem'>"
+                f"{_esc(('招股价 ' + _ccy + _pr) if _pr else '')}</span>"
+                f"<span style='color:var(--fa-faint);font-size:0.76rem;min-width:78px;text-align:right'>"
+                f"{('每手 ' + format(int(ip['lot_size']), ',')) if ip.get('lot_size') else ''}</span></div>",
                 unsafe_allow_html=True,
             )
-            for ip in ipos:
-                _pr = ""
-                if ip.get("price_min") and ip.get("price_max"):
-                    _pr = (f"{ip['price_min']:,.2f}" if ip["price_min"] == ip["price_max"]
-                           else f"{ip['price_min']:,.2f}-{ip['price_max']:,.2f}")
-                elif ip.get("ipo_price"):
-                    _pr = f"{ip['ipo_price']:,.2f}"
-                st.markdown(
-                    f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
-                    f"border-bottom:1px solid var(--fa-border)'>"
-                    f"<span style='color:var(--fa-faint);font-size:0.78rem;min-width:76px'>"
-                    # 上市日为空不是缺数据——沪深申购期内上市日本来就没定，
-                    # 留白会被当成"数据没拉到"，写"待定"才是事实。
-                    f"{_esc(ip.get('list_date') or '待定')}</span>"
-                    f"<span style='flex:1;color:var(--fa-text);font-size:0.86rem'>{_esc(ip['name'])}"
-                    f"<span style='color:var(--fa-faint);font-size:0.76rem'> {_esc(ip['symbol'])}</span></span>"
-                    f"<span style='color:var(--fa-text-2);font-size:0.8rem'>"
-                    f"{('招股价 ' + _pr) if _pr else ''}</span>"
-                    f"<span style='color:var(--fa-faint);font-size:0.76rem;min-width:78px;text-align:right'>"
-                    f"{('每手 ' + format(int(ip['lot_size']), ',')) if ip.get('lot_size') else ''}</span></div>",
-                    unsafe_allow_html=True,
-                )
 
 
 @st.fragment
