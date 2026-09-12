@@ -3006,10 +3006,18 @@ def _render_sector_heatmap(market: str):
     if fig is None:
         return
     st.markdown("**板块热力图**")
+    # 必须标明分类口径。审计第11条：A股这张图里"通信设备 +1.90%"，紧挨着的
+    # 「热门板块」写"通信设备 +0.42%"，同一页两个数打架。查下来不是bug——
+    # 热力图走富途，板块名带"Ⅱ"是申万二级；热门板块走同花顺，是另一套行业
+    # 分类，同名不同成分（美股两处完全一致可以佐证）。但界面一个字都没说，
+    # 用户没法知道这是两套分类而不是数据错了。
+    _src = "申万二级行业（富途）" if market == "A" else "行业板块（富途）"
     st.caption(
-        "方块大小=成交额（今天有多少钱在里面），颜色深浅=涨跌幅度，"
-        "涨还是跌看方块上的正负号。只画成交额最大的前 16 个板块——"
-        "再多画出来的方块就小到写不下名字了，而尾部那些板块合计也只占几个点的成交额。"
+        f"方块大小=成交额（今天有多少钱在里面），颜色深浅=涨跌幅度，"
+        f"涨还是跌看方块上的正负号。只画成交额最大的前 16 个板块——"
+        f"再多画出来的方块就小到写不下名字了，而尾部那些板块合计也只占几个点的成交额。"
+        f"\n\n分类口径：{_src}。下面「热门板块」用的是另一套分类，"
+        f"同名板块的成分股不完全一样，涨跌幅对不上是正常的。"
     )
     st.plotly_chart(fig, use_container_width=True, config=_PLOTLY_CONFIG)
 
@@ -3343,8 +3351,28 @@ def _render_home_map():
         st.caption("指数数据暂时获取不到，地图先不展示。")
         return
 
-    tencent_codes = list(_HOME_MAP_TENCENT_CODE.values())
-    code_to_name = {v: k for k, v in _HOME_MAP_TENCENT_CODE.items()}
+    # 只对"当前正在交易的市场"启用浏览器端的腾讯轮询。
+    #
+    # 审计第8条：同一个指数，首页地图 7,656.98 / 行情页 7,656.41，纳指也差了
+    # 十几点。根因不是缓存，是**两个数据提供商**——行情页走
+    # get_multi_index_snapshot（富途/akshare），首页地图这四个核心指数额外挂了
+    # 浏览器每3秒直连腾讯的轮询。盘中两家差几分钱无所谓（下一秒就变），收盘后
+    # 就变成"静态数据还对不上"，用户来回切会直接怀疑数据。
+    #
+    # 收盘后停掉轮询，地图就保持服务端那份跟行情页同源的快照，两边自然一致；
+    # 盘中照常3秒跳动，功能不打折。
+    _sim = __import__("sim_agent")
+    try:
+        _open_now = set(_sim._open_markets())
+    except Exception:
+        _open_now = set()          # 拿不到就当全部休市，宁可不跳动也不要不一致
+    _marker_market = {n: m for n, m, *_ in _HOME_MAP_MARKERS}
+    _pollable = {
+        name: code for name, code in _HOME_MAP_TENCENT_CODE.items()
+        if _marker_market.get(name) in _open_now
+    }
+    tencent_codes = list(_pollable.values())
+    code_to_name = {v: k for k, v in _pollable.items()}
 
     map_html = f"""
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -3528,7 +3556,11 @@ def _render_home_map():
             }})
             .catch(function(e) {{}});
     }}
-    setInterval(updateTcMarkers, 3000);
+    // 全部休市时 codeToName 是空的，不要起这个定时器——否则会每3秒对
+    // 'q=' 发一次无效请求，而且拿回来的东西也没有 marker 可以更新。
+    if (Object.keys(codeToName).length > 0) {{
+        setInterval(updateTcMarkers, 3000);
+    }}
     </script>
     """
     _cv1.html(map_html, height=440)
@@ -8666,6 +8698,14 @@ else:
                 # 板块涨了多少），最后点进成分股。从面到点。
                 _render_sector_heatmap(mkt_code)
                 st.markdown("**热门板块**")
+                # 跟上面热力图标同一件事：两处用的是不同的行业分类体系，
+                # 同名板块涨跌幅对不上是分类差异不是数据错误（审计第11条）。
+                st.caption(
+                    "分类口径：同花顺行业（A股）/ 富途行业（港美股），按成交额排热度。"
+                    "跟上面热力图不是同一套分类，同名板块的成分股不完全一样。"
+                    if mkt_code == "A" else
+                    "按成交额排热度。跟上面热力图同源，数值应当一致。"
+                )
                 _render_hot_sectors(mkt_code)
                 # 异动榜/热度榜/新股放在板块之后：板块回答"哪个方向在动"，
                 # 这一块回答"具体哪几支在动"，从面到点，顺序上是收敛的。

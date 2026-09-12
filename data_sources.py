@@ -2738,7 +2738,28 @@ def get_valuation_percentile(symbol: str, market: str, period: str = "近三年"
             continue
         cur = float(vals.iloc[-1])
         pct = float((vals < cur).mean() * 100)
-        result[label] = {"current": cur, "percentile": pct, "years": round(len(vals) / 250, 1)}
+        # 年数按真实日期跨度算，不能拿样本数除交易日。
+        #
+        # 百度这个序列是**日历日**不是交易日——实测老铺黄金的头三行是
+        # 2024-06-28(周五)/06-29(周六)/06-30(周日)，周末照样有值。
+        # 原来写的 len(vals)/250 是按"一年250个交易日"折算的，套在日历日序列上
+        # 会把历史长度虚报约46%：老铺黄金 807 个样本、实际跨度 2.2 年，被报成
+        # "近3.2年分位"。这只票 2024 年年中才上市，本来就没有三年历史，而
+        # advisor 的提示词里写着"PE(TTM)处于近3年历史分位约X%"，等于让 AI 以为
+        # 自己看的是三年样本。
+        #
+        # 顺带把真实起止日期也带出来，调用方要说"近N年"时有据可依。
+        _span_years = None
+        if "date" in df.columns:
+            try:
+                _d = pd.to_datetime(df["date"], errors="coerce").dropna()
+                if len(_d) >= 2:
+                    _span_years = round((_d.max() - _d.min()).days / 365.0, 1)
+            except Exception:
+                _span_years = None
+        if _span_years is None:          # 没有 date 列时退回按日历日估
+            _span_years = round(len(vals) / 365.0, 1)
+        result[label] = {"current": cur, "percentile": pct, "years": _span_years}
     return result
 
 
