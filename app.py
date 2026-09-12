@@ -1353,6 +1353,34 @@ def _get_hot_stock_names() -> set:
     return names
 
 
+_NEWS_BOILERPLATE_WORDS = ("专享", "提前", "本文系", "独家", "转载", "原创", "免责")
+
+
+def _strip_news_boilerplate(title: str) -> str:
+    """剥掉资讯源自己加的发布方声明前缀。
+
+    2026-09-13：首页八条新闻标题全部以"【本文系数据通用户提前专享】"开头，
+    一屏看下去前十几个字完全一样，真正的标题被挤到后面。这段文字是资讯源的
+    分发声明，跟内容无关。
+
+    只剥"声明类"的方括号，不是见【】就删——【腾讯控股】【美联储】这种带信息
+    的前缀要留着。判据是括号里出现了专享/转载/独家这类分发用词。
+    只处理开头连续的几个，中间和结尾的一律不动。
+    """
+    s = str(title or "").strip()
+    for _ in range(3):                      # 最多剥三层，防止异常数据无限循环
+        if not s.startswith("【"):
+            break
+        end = s.find("】")
+        if end < 0:
+            break
+        inner = s[1:end]
+        if not any(w in inner for w in _NEWS_BOILERPLATE_WORDS):
+            break                           # 带信息的前缀，留着
+        s = s[end + 1:].lstrip()
+    return s or str(title or "")
+
+
 def _news_title_style(title: str, hot_names: set) -> str:
     """标题里提到了今天有异动的公司名就加重，否则用次级文字色。
 
@@ -5680,10 +5708,11 @@ def _render_home_page():
     # 的视觉噪声，而且跟页面上其它列表（自选/排行榜/决策记录）已经统一成的
     # 发丝线平铺行不是一套。这里直接用一个 div 画行，连 st.container 都省了。
     for _, row in news.head(show_n).iterrows():
-        _title_style = _news_title_style(row["summary"], _hot_names)
+        _title = _strip_news_boilerplate(row["summary"])
+        _title_style = _news_title_style(_title, _hot_names)
         st.markdown(
             f"<div style='padding:11px 2px;border-bottom:1px solid var(--fa-border)'>"
-            f"<a href='{_safe_href(row['url'])}' target='_blank' style='{_title_style};text-decoration:none'>{_esc(row['summary'])}</a>"
+            f"<a href='{_safe_href(row['url'])}' target='_blank' style='{_title_style};text-decoration:none'>{_esc(_title)}</a>"
             f"<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:4px'>"
             # 2026-09-12：标出这条是按哪只异动股搜到的（升级路线图第9条
             # "资讯关联化"）。这批新闻本来就是拿当天真实异动的股票名当关键词
@@ -8600,15 +8629,16 @@ else:
         # 页眉。原来是一条通栏的品牌红横幅+白色粗体字，那是整个页面上最抢眼
         # 的元素，但它承载的信息只有一个产品名——最重的视觉权重给了最不重要
         # 的信息。而且页面上真正需要被一眼看到的是涨跌色，横幅一红，涨跌红就
-        # 不再突出了。改成安静的字标+一行极淡的市场说明，视觉权重让回给数据。
+        # 不再突出了。改成一个安静的字标，视觉权重让回给数据。
+        #
+        # 右边那行"A股 · 港股 · 美股 · 虚拟货币"2026-09-13 去掉：它不回答任何
+        # 问题——用户点开"行情"就有市场切换、自选里也分市场，这行字既不能点
+        # 也不随页面变化，只是把页眉从一个字标变成了两团东西。
         st.markdown(
             """
-            <div style='display:flex;align-items:baseline;justify-content:space-between;
-                        gap:16px;margin:2px 0 20px'>
+            <div style='margin:2px 0 20px'>
                 <span style='font-size:1.14rem;font-weight:650;letter-spacing:-.022em;
                              color:var(--fa-text)'>Invest Agent</span>
-                <span style='font-size:.74rem;letter-spacing:.055em;color:var(--fa-faint);
-                             white-space:nowrap'>A股 · 港股 · 美股 · 虚拟货币</span>
             </div>
             """,
             unsafe_allow_html=True,
