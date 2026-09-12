@@ -221,7 +221,28 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
     font-size: 16px; font-weight: var(--fw-bold);
     letter-spacing: -0.008em; color: var(--text-primary); margin: 26px 0 10px;
 }
-[data-testid="stMarkdownContainer"] p { color: var(--text-strong) !important; line-height: 1.68; }
+/* markdown 渲染出来的文字要跟手写 HTML 的正文一个字号。
+   2026-09-13 用户反馈"首页所有像这样的展开的字体跟上面主体字体保持一致"。
+   问题出在这两条路径一直没对齐：项目里的卡片正文是手写 <div style='font-size:…'>，
+   都在 12-13px；而 st.markdown / 折叠框里的内容走 Streamlit 默认的 16px，
+   谁也没给它设过。同一张卡上半截 13px、点开下半截 16px，看着像两个模块拼的。
+   实测首页有 169 个 markdown 文本节点是 16px。
+
+   设在容器上而不是 p 上：折叠框里的内容有相当一部分是 _labeled_line 这类
+   手写 <div>（本身不带字号），挂在 p 上它们继承不到，还是 16px。
+   h1/h2/h3 和小节标题都有自己的显式字号，不受这一条影响。 */
+[data-testid="stMarkdownContainer"] { font-size: var(--fs-sm); }
+[data-testid="stMarkdownContainer"] p {
+    color: var(--text-strong) !important; font-size: var(--fs-sm); line-height: 1.68;
+}
+/* 长文两处例外：AI 咨询的回复和「我的」页的项目说明，是真的要一段段读下去的
+   连续文字，不是列表里的附注。13px 读一屏会累，给到正文档 15px。 */
+[data-testid="stPopoverBody"] [data-testid="stMarkdownContainer"],
+[data-testid="stPopoverBody"] [data-testid="stMarkdownContainer"] p,
+[class*="st-key-my_about_"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"],
+[class*="st-key-my_about_"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] p {
+    font-size: var(--fs-md);
+}
 /* 项目里所有小节标题都是 st.markdown("**标题**")，也就是一个只含<strong>的<p>。
    2026-09-12改（前端审计第14条"层级太平"）：上一版把它渲染成 0.825rem 的
    灰色大写眉标，出发点是"安静"，但实测的结果是标题和正文分不出来。安静和
