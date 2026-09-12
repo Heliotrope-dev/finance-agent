@@ -7046,8 +7046,14 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
         st.metric("总额（起始$10,000）", f"${net_value / _usd_rate:,.0f}")
 
     if _reconciled["foreign_positions"]:
+        # HK$ 里的 $ 必须转义。st.caption 走 markdown，成对出现的 $...$ 会被
+        # 当成 LaTeX 公式：这一条只要有两笔非AI持仓，两个 HK$ 之间的整段就被
+        # 吃掉美元符号并排成数学斜体——线上实测渲染成"新奥能源 HK9,628、
+        # 滨化股份 𝐻𝐾6,170"。项目里其它 caption 已经踩过同一个坑（见打新
+        # 测算器那几条），这里是漏网的一处。
+        # 上面那三个 st.metric 不用转义：st.metric 不走 markdown。
         _foreign_bits = "、".join(
-            f"{p.get('name') or p.get('code')} HK${(p.get('market_val_hkd') or 0):,.0f}"
+            f"{p.get('name') or p.get('code')} HK\\${(p.get('market_val_hkd') or 0):,.0f}"
             for p in _reconciled["foreign_positions"]
         )
         st.caption(
