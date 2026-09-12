@@ -793,7 +793,16 @@ st.markdown(_FA_BASE_CSS, unsafe_allow_html=True)
 # "这张图是拿现成库画的"，而且那排图标的视觉语言（灰色线框小图标）跟这个项目
 # 的其它部分完全不搭。这些功能对"看一眼走势"这个场景也几乎没用。统一关掉，
 # 同时关掉双击缩放这类容易误触的交互，让图表回到"一张安静的图"。
-_PLOTLY_CONFIG = {"displayModeBar": False, "scrollZoom": False, "doubleClick": False}
+# 图表一律只读：不缩放、不拖动、不显示工具栏。
+# doubleClick 从 False 改回 "reset"：之前设成 False 是想禁掉双击缩放，但副作用
+# 是把"双击复位"这个逃生口也堵死了——用户2026-09-13在新股散点图上误触缩放后
+# 卡在一个空白区间退不回来。真正的开关是 charts._apply_chart_theme 里的
+# fixedrange=True（轴范围锁死，框选/滚轮/双指全部失效），这里保留 reset 只是
+# 万一某张图漏设 fixedrange 时还留一条退路。
+_PLOTLY_CONFIG = {
+    "displayModeBar": False, "scrollZoom": False, "doubleClick": "reset",
+    "displaylogo": False, "staticPlot": False,  # staticPlot 会连 hover 一起关掉，不能开
+}
 
 
 # ── 加载中遮罩 ────────────────────────────────────────────────────────────────

@@ -89,8 +89,22 @@ def _apply_chart_theme(fig, height=None, *, legend=False, grid="y", margin=None,
         fig.update_layout(height=height)
     if hovermode is not None:
         fig.update_layout(hovermode=hovermode)
+    # 所有图表一律禁止缩放和拖动——只能看，不能操作。
+    #
+    # 用户2026-09-13在港股新股散点图上误触后卡在了一个空白区间
+    # （x 轴 27.8801%~27.8807%、y 轴 44.3%~44.6%，一个点都没有），退不回来。
+    # 光靠 _PLOTLY_CONFIG 的 scrollZoom:False 不够：plotly 的笛卡尔图默认
+    # dragmode='zoom'，鼠标框选就会缩放，触控板两指滑动同样会触发。而那份
+    # config 里还写了 doubleClick:False，等于把"双击复位"这个唯一的逃生口
+    # 也堵死了——缩进去就真出不来。
+    #
+    # fixedrange=True 是真正的开关：轴范围锁死，框选/滚轮/双指全部失效，
+    # 也就不需要复位了。dragmode=False 再把拖动手势一起关掉。
+    # 这跟首页世界地图那次是同一个处理（见 _render_home_map 里的说明）：
+    # 这些图是"会自己刷新数字的静态图"，不是可操作的画布。
+    fig.update_layout(dragmode=False)
     axis_common = dict(
-        showline=False, zeroline=False, ticks="",
+        showline=False, zeroline=False, ticks="", fixedrange=True,
         tickfont=dict(family=_CHART_FONT, size=10, color=_CHART_FAINT),
         title_font=dict(family=_CHART_FONT, size=10, color=_CHART_MUTED),
     )
@@ -924,6 +938,10 @@ def build_position_donut(
         margin=dict(l=10, r=10, t=10, b=10),
         showlegend=show_legend,
         legend=dict(orientation="h", yanchor="top", y=-0.05, xanchor="center", x=0.5, font=dict(size=11)) if show_legend else None,
+        # 环形图没有笛卡尔轴，但拖动手势仍要关掉，跟其它图保持一致；
+        # 空轴一并锁上，理由同树状图。
+        dragmode=False,
+        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
     )
     return fig
 
@@ -1314,6 +1332,11 @@ def build_sector_treemap(df: pd.DataFrame, max_tiles: int = _TREEMAP_MAX_TILES) 
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=0, r=0, t=0, b=0),
         height=340,
+        # 树状图没有笛卡尔轴，但拖动手势仍要关掉，跟其它图保持一致；
+        # 顺带把 plotly 自动生成的那对空轴也锁上，免得以后有人加辅助 trace
+        # 时意外恢复出缩放能力。
+        dragmode=False,
+        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
         # 小方块上的字必须能藏起来。30个板块里成交额最小的那几个只有几十像素
         # 宽，文字塞不下就会溢出到相邻方块上互相重叠，糊成一团——实测就是这样。
         # mode="hide"：装不下 9px 就整块不显示文字，靠 hover 看。
