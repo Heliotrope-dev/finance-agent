@@ -2192,6 +2192,34 @@ def _render_market_extras(market: str):
 
 
 @st.fragment
+@st.cache_data(ttl=3600, show_spinner=False)
+def _macro_spark_closes(name: str, hour_key: str) -> tuple:
+    """宏观条那六张卡的 7 日迷你走势数据。
+
+    hour_key 是缓存键（传当前小时），不是拿来用的——跟 _sparkline_closes_cached
+    传 day_key 是同一个套路：cache_data 只看参数不看内容，签名里不带会变的东西
+    就只能靠 ttl 到期，带上之后到点自然失效。这几个品种的日线一天变一次，
+    一小时一取已经远远够了。
+
+    取不到返回空元组，调用方的 _build_sparkline_svg 会自己退化成"--"。
+    """
+    try:
+        hist = get_macro_history(name, "1mo", "1d")
+        if hist is None or hist.empty:
+            return ()
+        return tuple(hist["收盘"].astype(float).dropna().tail(7).tolist())
+    except Exception:
+        return ()
+
+
+def _macro_sparkline(name: str, color: str) -> str:
+    """宏观卡片里那条无轴无网格的 7 日线。"""
+    return _build_sparkline_svg(
+        list(_macro_spark_closes(name, cn_now().strftime("%Y%m%d%H"))),
+        color, width=72, height=22,
+    )
+
+
 def _render_macro_strip():
     """行情页顶部的跨资产温度计：VIX / 美债10年期 / 美元指数 / 黄金 / 原油 / 铜。
 
@@ -2237,15 +2265,21 @@ def _render_macro_strip():
         # 这种密集横排里会各自占一个 block，排版就散了，而且点击要等一次
         # rerun 往返。
         href = f"?open_macro={urllib.parse.quote(name)}{_auth_qs()}"
+        # 7日迷你走势（2026-09-13）。这一条改造前是六个孤立的数字：VIX 15.84、
+        # 美债 4.97%、铜 6.55……每个都只回答"现在多少"，而这六项之所以摆在
+        # 首页最上面，是当"今天市场大环境是什么状态"的背景板用的——一个孤立
+        # 的点位回答不了这个问题，读者得自己记得昨天是多少。
+        # 加一条无轴无网格的 7 日线，这一条就从"数字"变成"状态"。
         cards.append(
             f"<a class='macro-card-link' href='{href}' target='_self'>"
-            f"<div style='font-size:0.72rem;color:var(--fa-faint);white-space:nowrap'>"
+            f"<div style='font-size:0.72rem;color:var(--fa-muted);white-space:nowrap'>"
             f"{_esc(name)}</div>"
-            f"<div style='font-size:0.98rem;font-weight:650;color:{color};"
+            f"<div style='font-size:0.98rem;font-weight:600;color:{color};"
             f"font-variant-numeric:tabular-nums;white-space:nowrap'>{value_txt}</div>"
             f"<div style='font-size:0.72rem;color:{color};"
             f"font-variant-numeric:tabular-nums'>{delta_txt}</div>"
             f"{unit_html}"
+            f"<div style='margin-top:5px'>{_macro_sparkline(name, color)}</div>"
             f"</a>"
         )
     if not cards:
@@ -2819,7 +2853,7 @@ def _render_home_map():
       #home-map .leaflet-control-attribution a {{ color: #7E828D !important; }}
       #home-map .leaflet-control-attribution {{ color: #7E828D !important; }}
     </style>
-    <div id="home-map" style="height:420px;border-radius:2px;overflow:hidden"></div>
+    <div id="home-map" style="height:300px;border-radius:2px;overflow:hidden"></div>
     <script>
     // 这张图是"一张会自己刷新数字的静态图"，不是可操作的地图——所有交互
     // 全部关掉。用户2026-09-12原话："那个图片我们就定死不要放大缩小移动，
@@ -2980,7 +3014,7 @@ def _render_home_map():
     }}
     </script>
     """
-    _cv1.html(map_html, height=440)
+    _cv1.html(map_html, height=316)
 
 
 _ADVICE_EMAIL = os.environ.get("ADVISOR_EMAIL", "")  # advisor.py 私人脚本写advice表时用的固定账号，跟当前登录访客无关
@@ -3444,6 +3478,60 @@ def _render_advice_section():
     # 只是首页不再读它。
     _market_label = {"US": "美股", "HK": "港股", "A": "沪深"}
 
+    def _first_clause(text: str, limit: int = 52) -> str:
+        """取一段话的第一个分句。AI 的行文习惯是先给结论再展开，第一句几乎
+        总是论点本身，后面是论据和限定语。"""
+        t = _strip_disclaimer(str(text or "")).strip()
+        if not t:
+            return ""
+        m = re.search(r"[。；;]", t)
+        if m:
+            t = t[: m.start()]
+        t = t.strip(" ，,、")
+        return t if len(t) <= limit else t[: limit - 1] + "…"
+
+    def _lb_thesis_html(parts: dict, plan_item: dict | None) -> str:
+        """排行榜卡片正面的"论点"区。
+
+        2026-09-13 改成固定结构。改造前这里是 AI 输出的"理由"段原样贴上来，
+        每张卡五到八行连续中文，五张卡就是四十行散文——**必须一张一张读完
+        才能比较**，而榜单存在的意义恰恰是横向比较。
+
+        改成三行定长标签（看多 / 看空 / 止损），每行一句话：眼睛可以只沿着
+        "看空"那一列扫下去，一屏就能看出哪几支的风险是同一类。完整论述仍然
+        在下面那个展开区里，一个字都没少。
+
+        止损取的是 daily_plan 算出来的结构化数字，跟"今日可执行清单"同一个
+        来源——不从 AI 的自由文本里抠数字，那是两个可能对不上的值。
+        老记录没有多头/空头逻辑分段时退回原来的"理由"整段，不做空白处理。
+        """
+        bull = _first_clause(parts.get("多头逻辑", ""))
+        bear = _first_clause(parts.get("空头逻辑", ""))
+        if not bull and not bear:
+            _fallback = _strip_disclaimer(parts.get("理由", ""))
+            return f"<div style='margin-top:8px'>{_esc(_fallback)}</div>" if _fallback else ""
+
+        _rows = []
+        for _label, _text, _color in (
+            ("看多", bull, UP_COLOR), ("看空", bear, DOWN_COLOR),
+        ):
+            if not _text:
+                continue
+            _rows.append(
+                f"<div style='display:flex;gap:10px;margin-top:5px'>"
+                f"<span style='flex:0 0 28px;font-size:var(--fs-xs);font-weight:600;color:{_color}'>{_label}</span>"
+                f"<span style='flex:1;min-width:0;font-size:var(--fs-sm);color:var(--fa-text-2);"
+                f"line-height:1.5'>{_esc(_text)}</span></div>"
+            )
+        if plan_item and isinstance(plan_item.get("止损参考"), (int, float)):
+            _rows.append(
+                f"<div style='display:flex;gap:10px;margin-top:5px'>"
+                f"<span style='flex:0 0 28px;font-size:var(--fs-xs);font-weight:600;color:var(--fa-muted)'>止损</span>"
+                f"<span style='flex:1;font-size:var(--fs-sm);color:var(--fa-text-2);"
+                f"font-variant-numeric:tabular-nums'>{plan_item['止损参考']:.2f}</span></div>"
+            )
+        return f"<div style='margin-top:8px'>{''.join(_rows)}</div>"
+
     def _render_board_rows(board):
         for rank, row in enumerate(board, 1):
             market_key = row.get("market", "A")
@@ -3469,7 +3557,15 @@ def _render_advice_section():
             # 不再单独展示成一个可能对不上的数字——见_daily_plan_item_for。
             _plan_item = _daily_plan_item_for(row.get("symbol", ""))
             if _plan_item and isinstance(_plan_item.get("目标价"), (int, float)):
-                target_text = f"{_plan_item['目标价']:.2f}（系统计算）"
+                # 目标价旁边补上相对现价的空间。一个孤立的"目标价 650"要求读者
+                # 自己拿它去除现价——而"还有多少空间"才是这个数存在的理由，
+                # 也是横向比较几支票时真正在比的东西。
+                # 只在两个数都来自这条记录时才算：拿别处的现价去除这里的目标价
+                # 会得到一个谁都对不上的百分比。
+                _tgt = _plan_item["目标价"]
+                target_text = f"{_tgt:.2f}（系统计算）"
+                if isinstance(price, (int, float)) and price > 0:
+                    target_text += f"，较现价{(_tgt - price) / price * 100:+.1f}%"
             else:
                 target_text = parts.get("目标价")
             score = row.get("score")
@@ -3530,8 +3626,8 @@ def _render_advice_section():
                     # 外面——一屏五张卡要滚很久，跟"简约清爽"背道而驰。卡片
                     # 正面只留结论链路（名称/分数/观点/一行元信息/理由），
                     # 拆解收进下面已有的那个展开区，想看的人点一下就有。
-                    + f"<div style='margin-top:8px'>{_esc(_strip_disclaimer(parts.get('理由', '')))}</div>"
-                    f"</a>",
+                    + _lb_thesis_html(parts, _plan_item)
+                    + f"</a>",
                     unsafe_allow_html=True,
                 )
                 # 展开区按研报的读法排序：先多空两边的论点，再是三个基础面，
@@ -3952,11 +4048,15 @@ def _render_my_page():
             _summary = {}
 
         # (口径名, 百分比或None, 分母描述, 这是什么)
+        # 分母那一列是窄的定宽列，只放数字。"还没有满7天的记录"这种整句要放进
+        # 右边的说明列——塞进窄列会折成两行，把整行的基线顶歪（实测第一行就
+        # 是这样）。所以没数据时分母留空，理由写进说明。
         _acc_rows = [(
             "个股详情页分析",
             stats["一致率"] if stats.get("总数") else None,
-            f"{stats.get('一致数', 0)} / {stats.get('总数', 0)}" if stats.get("总数") else "还没有满 7 天的记录",
-            "你在详情页点「综合数据分析」时记下的方向，满 7 天回看",
+            f"{stats.get('一致数', 0)} / {stats.get('总数', 0)}" if stats.get("总数") else "",
+            "你在详情页点「综合数据分析」时记下的方向，满 7 天回看"
+            if stats.get("总数") else "你在详情页点「综合数据分析」时记下的方向，满 7 天回看；还没有满 7 天的记录",
         )]
         for _src, _label, _what in (
             ("watchlist", "推荐股排行榜", "advisor.py 每工作日 17:30 自动出的买卖判断，满 6.9 天回看"),
@@ -3966,8 +4066,8 @@ def _render_my_page():
             _acc_rows.append((
                 _label,
                 _s["一致率"] if _s.get("总数") else None,
-                f"{_s['总数']} 次" if _s.get("总数") else "还没有满足回看窗口的记录",
-                _what,
+                f"{_s['总数']} 次" if _s.get("总数") else "",
+                _what if _s.get("总数") else f"{_what}；还没有满足回看窗口的记录",
             ))
         if _summary.get("directional_count"):
             _acc_rows.append((
@@ -6740,7 +6840,14 @@ def _render_ai_sim_dashboard():
                                    if s.get("action") in ("买入", "卖出")])
             except Exception:
                 pass
-        _last_when = _to_cn_time_str(runs[0].get("run_at")) if runs else ""
+        # 这一行的"最近一次"不带秒，也不带年——秒对"上次什么时候跑的"这个
+        # 问题没有任何意义，只是让这一行更长。当天跑的只给时分。
+        _last_dt = _to_cn_dt(runs[0].get("run_at")) if runs else None
+        _last_when = ""
+        if _last_dt:
+            _today_cn = datetime.now(timezone(timedelta(hours=8))).date()
+            _last_when = _last_dt.strftime("%H:%M") if _last_dt.date() == _today_cn \
+                else _last_dt.strftime("%m-%d %H:%M")
         _summary = f"最近 {len(runs)} 次决策 · {_sig_total} 条信号"
         if _last_when:
             _summary += f" · 最近一次 {_last_when}"
