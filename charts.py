@@ -4,7 +4,7 @@
 跟 analysis.py 里 AI 的文字判断是两条独立的证据链。
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from datetime import time as dtime
 from zoneinfo import ZoneInfo
 
@@ -23,9 +23,14 @@ from theme import UP_COLOR, DOWN_COLOR, NEUTRAL_COLOR
 # 让读者的注意力只落在数据本身的形状上。这里把这套减法收成一个函数，所有图
 # 统一走它，而不是每个函数各自写一份 update_layout。
 _CHART_FONT = "Inter, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif"
-_CHART_INK = "#17181C"
-_CHART_MUTED = "#82858E"
-_CHART_FAINT = "#A8ABB3"
+# 这三个必须跟 assets/theme.css 的 --text-* 保持同一组值。图表里的文字跟
+# 页面上的文字挨在一起，用两套灰度会让图看着像是从别的地方贴过来的。
+# 2026-09-13 随 Phase 1 一起并档：原来的 #82858E / #A8ABB3 在页面底色上分别是
+# 4.0:1 和 2.19:1，后者远低于 AA 下限——坐标轴刻度是图上唯一的文字，看不清
+# 等于这张图没有坐标。
+_CHART_INK = "#17181C"    # --text-primary
+_CHART_MUTED = "#6B6F7A"  # --text-secondary  4.9:1
+_CHART_FAINT = "#6B6F7A"  # 并入 secondary，不再有第三档
 _CHART_GRID = "rgba(23,24,28,0.055)"
 # 图上的"辅助线"（均价/MA/MACD的DIF与DEA/基准线）统一走灰阶，靠深浅区分，
 # 不再各挑一个彩色。理由同 _MULTI_COLORS 那段：饱和色是留给涨跌的，一条橙色
@@ -110,7 +115,58 @@ def _apply_chart_theme(fig, height=None, *, legend=False, grid="y", margin=None,
     )
     fig.update_xaxes(showgrid=(grid == "xy"), gridcolor=_CHART_GRID, gridwidth=1, **axis_common)
     fig.update_yaxes(showgrid=(grid in ("y", "xy")), gridcolor=_CHART_GRID, gridwidth=1, **axis_common)
+    _force_date_format(fig)
     return fig
+
+
+def _is_datetime_axis(fig) -> bool:
+    """这张图的 x 轴是不是时间轴。
+
+    看第一条有 x 数据的 trace 的第一个值是不是日期类型就够了——同一张图不会
+    一半是日期一半是数字。用 pandas 的类型判断而不是 try-parse 字符串：
+    "202609" 这种也能被 parse 成日期，但它其实是一个类别标签（按月拆解那张图
+    的 x 轴就是这种），当成日期处理会把刻度全排错。
+    """
+    for tr in fig.data:
+        x = getattr(tr, "x", None)
+        if x is None or len(x) == 0:
+            continue
+        first = x[0]
+        return isinstance(first, (pd.Timestamp, datetime, date)) or (
+            hasattr(first, "dtype") and pd.api.types.is_datetime64_any_dtype(first)
+        )
+    return False
+
+
+def _force_date_format(fig) -> None:
+    """时间轴一律用 %Y-%m-%d，不让 plotly 走它自己的英文默认格式。
+
+    2026-09-13。plotly 的日期默认格式是 "Sep 12, 2026" —— 这是全站唯一出现
+    英文的地方（模拟盘净值曲线的 hover 上），一个中文界面里冒出一个英文月份
+    缩写，很容易读成"这块是别处贴过来的"。
+
+    之所以放在 _apply_chart_theme 这个共用入口而不是逐个 builder 去补
+    xhoverformat：十四个 builder 里已经有三个记得补、其余没补，这正是"同一件
+    事有六七种写法"的典型。放在这里之后，以后新写的图自动就是对的。
+
+    只对真正的时间轴生效——tickformat 写在一个数值轴上会把数字当时间戳去
+    格式化，那比英文月份糟糕得多。
+    """
+    if not _is_datetime_axis(fig):
+        return
+    # tickformat 不写死成 %Y-%m-%d：刻度位置有限，四位年份很容易挤在一起。
+    # 交给 plotly 按缩放层级自己选，但把每一级都换成中文/数字写法。
+    fig.update_xaxes(
+        hoverformat=_HOVER_DATE,
+        tickformatstops=[
+            dict(dtickrange=[None, 3600000], value="%H:%M"),
+            dict(dtickrange=[3600000, 86400000], value="%m-%d %H:%M"),
+            dict(dtickrange=[86400000, 604800000], value="%m-%d"),
+            dict(dtickrange=[604800000, "M1"], value="%m-%d"),
+            dict(dtickrange=["M1", "M12"], value="%Y-%m"),
+            dict(dtickrange=["M12", None], value="%Y"),
+        ],
+    )
 
 
 def _compute_macd(close: pd.Series) -> pd.DataFrame:

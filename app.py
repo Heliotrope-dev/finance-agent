@@ -546,6 +546,27 @@ def _sparkline_closes_cached(symbol: str, market: str, day_key: str, days: int =
         return ()
 
 
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def _index_sparkline_closes(code: str, market: str, day_key: str, days: int = 20) -> tuple:
+    """指数迷你走势图用的收盘价。跟 _sparkline_closes_cached 同一套缓存策略
+    （按自然日缓存、一天只真取一次），但走的是另一个接口。
+
+    不能复用个股那条路：指数代码根本不是股票代码（沪深是 sh.000001 这种
+    BaoStock 格式、港股是 HSI、美股是 .INX），get_stock_history 拿它们一律
+    查不到，返回空——第一版就是这么写的，上线后三行指数的走势位置全是"—"，
+    降级得很安静，不看就发现不了。指数有自己的 get_index_history。
+
+    返回 tuple 不是 list：st.cache_data 返回的可变对象被调用方改到会污染缓存。
+    """
+    try:
+        hist = get_index_history(code, market)
+        if hist is None or hist.empty:
+            return ()
+        return tuple(hist["收盘"].astype(float).tail(days).tolist())
+    except Exception:
+        return ()
+
+
 def _fetch_sparkline_closes(symbol: str, market: str, days: int = 20) -> list:
     """取迷你图数据，并且"一旦拿到过就不会再变空"。
 
@@ -920,6 +941,13 @@ def _sim_note_for_display(note: str) -> str:
     text = str(note or "")
     if not text:
         return ""
+    # "账户内另有非AI仓位未计入净值：新奥能源(¥9,628)、滨化股份(¥6,170)" 这一段
+    # 每一条记录都一模一样（实测连续24条全带着它），把标题撑满之后真正有信息量
+    # 的部分反而被截断。同一句提示在这一页顶部的净值那块已经说过一次了，一条
+    # 说明重复二十四遍不会让它更真，只会让别的东西看不见。整页只留那一处。
+    text = re.split(r"[，,]?\s*账户内另有非AI仓位", text)[0].strip()
+    if not text:
+        return ""
     lowered = text.lower()
     if "accountoverdue" in lowered or "arrearage" in lowered or "insufficient balance" in lowered:
         return "AI服务商账户余额不足，本次决策未执行"
@@ -931,6 +959,29 @@ def _sim_note_for_display(note: str) -> str:
         return "AI调用失败，本次决策未执行"
     # 未知情况：只保留前40个字，避免整段JSON糊在标题上。
     return text if len(text) <= 40 else text[:40] + "…"
+
+
+def _sim_run_reason(reasoning_text: str, limit: int = 46) -> str:
+    """决策记录那一行的摘要——写"为什么"，不是写"状态"。
+
+    2026-09-13。改造前每行标题是"03:56 · 完成 · 0条信号，其中执行成功0条"，
+    连续二十四行一模一样：三个字段全是常量，读完不知道这一轮到底发生了什么。
+    真正的原因在 reasoning_text 里（实测这批全是"可用现金只剩 HK$259，够不到
+    任何候选的一手门槛"），只是它被折叠在展开区里，不点开看不到。
+
+    取第一句话就够——AI 的行文习惯是先给结论再展开，第一句几乎总是原因本身。
+    开头的"复盘历史战绩，"也是每条都有的套话，一并去掉。
+    """
+    t = str(reasoning_text or "").strip()
+    if not t:
+        return ""
+    t = re.sub(r"^复盘历史战绩[，,]\s*", "", t)
+    # 第一个句号/分号为止。找不到就整段截断。
+    m = re.search(r"[。；;]", t)
+    if m:
+        t = t[: m.start()]
+    t = t.strip()
+    return t if len(t) <= limit else t[: limit - 1] + "…"
 
 
 def _chat_bubble(role: str, text: str) -> str:
@@ -1798,13 +1849,12 @@ def _render_index_snapshot(mkt_code: str):
         # 一个点位数字回答"现在多少"，一条线回答"这几天怎么走的"——后者才是
         # 看指数真正想知道的，而且这张图是本地算的 SVG，不是又一个图表库。
         #
-        # 取数走的是持仓列表那套已经存在的函数：按自然日缓存 + session 兜底
-        # （一旦成功过就不会再变空）。指数代码取不到形状时 _build_sparkline_svg
-        # 自己会退化成一个"--"，不会把行撑坏，所以这里只需要挡住异常。
-        try:
-            _idx_closes = _fetch_sparkline_closes(idx_code, mkt_code) if idx_code else []
-        except Exception:
-            _idx_closes = []
+        # 走 _index_sparkline_closes 而不是持仓列表那个 _fetch_sparkline_closes：
+        # 指数代码不是股票代码（sh.000001 / HSI / .INX），个股那条路一律查不到。
+        # 取不到形状时 _build_sparkline_svg 自己会退化成一个"--"，不会把行撑坏。
+        _idx_closes = list(
+            _index_sparkline_closes(idx_code, mkt_code, cn_now().strftime("%Y%m%d"))
+        ) if idx_code else []
         _idx_spark = _build_sparkline_svg(_idx_closes, color)
         with st.container(key=f"idx_row_{mkt_code}_{idx['名称']}"):
             st.markdown(
@@ -3871,18 +3921,93 @@ def _render_my_page():
                 unsafe_allow_html=True,
             )
 
-        # ── AI 判断准确率 ───────────────────────────────────────────────
+        # ── AI 判断准确率：三套口径合成一张表 ────────────────────────────
+        #
+        # 2026-09-13。改造前这一页上有三个各自独立的准确率区块，散在三处、
+        # 各用一套 st.metric 卡片：
+        #   「AI 判断准确率」            个股详情页手动触发的分析，analyses 表
+        #   「AI 排行榜/持仓判断事后一致率」 advisor.py 每天自动出的判断，advice 表
+        #   「AI 战绩墙」                同一批 advice，但只算带方向的那些
+        # 三个数（比如 29% / 76% / 37%）长得像可以互相比较，其实分母、样本、
+        # 回看窗口全都不同——37% 的分母是 131，76% 的分母是另一批，而第一块
+        # 干脆经常是空的。
+        #
+        # 这一页是整个项目"诚实"这个卖点的门面，门面本身却是散的。合成一张
+        # 三行表，每行写清**分母和口径**：一眼能看出这是三套不同的统计，而不是
+        # 同一件事的三个版本。
         st.markdown("**AI 判断准确率**")
         _backfill_due_reviews(email)
         try:
             stats = get_accuracy_stats(email)
         except Exception:
             stats = {"总数": 0}
+        try:
+            _adv_acc = get_advice_accuracy(email)
+            _by_source = _adv_acc.get("按来源", {})
+        except Exception:
+            _by_source = {}
+        try:
+            _summary = get_advice_outcome_summary()
+        except Exception:
+            _summary = {}
+
+        # (口径名, 百分比或None, 分母描述, 这是什么)
+        _acc_rows = [(
+            "个股详情页分析",
+            stats["一致率"] if stats.get("总数") else None,
+            f"{stats.get('一致数', 0)} / {stats.get('总数', 0)}" if stats.get("总数") else "还没有满 7 天的记录",
+            "你在详情页点「综合数据分析」时记下的方向，满 7 天回看",
+        )]
+        for _src, _label, _what in (
+            ("watchlist", "推荐股排行榜", "advisor.py 每工作日 17:30 自动出的买卖判断，满 6.9 天回看"),
+            ("position", "持仓判断", "同上，只针对已持仓的标的"),
+        ):
+            _s = _by_source.get(_src) or {}
+            _acc_rows.append((
+                _label,
+                _s["一致率"] if _s.get("总数") else None,
+                f"{_s['总数']} 次" if _s.get("总数") else "还没有满足回看窗口的记录",
+                _what,
+            ))
+        if _summary.get("directional_count"):
+            _acc_rows.append((
+                "战绩墙（逐条可查）",
+                _summary["win_rate"],
+                f"{_summary['hits']} / {_summary['directional_count']}",
+                f"上面两套自动判断里声称了方向的那些，逐条列在下面；"
+                f"另有 {_summary['total_reviewed'] - _summary['directional_count']} 条持有/观望没有方向、不计入",
+            ))
+
+        st.markdown(
+            "<div style='font-size:var(--fs-xs);color:var(--fa-muted);margin:2px 0 10px'>"
+            "三套记录来自不同的数据源、不同的回看窗口，百分比之间不能互相比较。</div>",
+            unsafe_allow_html=True,
+        )
+        for _name, _pct, _denom, _what in _acc_rows:
+            _pct_html = (
+                f"<span style='font-size:var(--fs-lg);font-weight:600;color:var(--fa-text)'>{_pct:.0f}%</span>"
+                if _pct is not None else
+                "<span style='font-size:var(--fs-sm);color:var(--fa-muted)'>—</span>"
+            )
+            st.markdown(
+                f"<div style='display:flex;align-items:baseline;gap:12px;padding:10px 2px;"
+                f"border-bottom:1px solid var(--fa-border)'>"
+                f"<div style='flex:0 0 150px;font-size:var(--fs-sm);font-weight:600;color:var(--fa-text)'>{_esc(_name)}</div>"
+                f"<div style='flex:0 0 64px;text-align:right'>{_pct_html}</div>"
+                f"<div style='flex:0 0 92px;text-align:right;font-size:var(--fs-xs);color:var(--fa-muted);"
+                f"font-variant-numeric:tabular-nums'>{_esc(_denom)}</div>"
+                f"<div style='flex:1;min-width:0;font-size:var(--fs-xs);color:var(--fa-muted);"
+                f"line-height:1.5'>{_esc(_what)}</div></div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            "<div style='font-size:var(--fs-xs);color:var(--fa-muted);margin-top:8px'>"
+            "全部是历史记录的客观统计，不代表未来表现。分数越高也不代表事后表现越好——"
+            "详见打分体系的事后实证说明。</div>",
+            unsafe_allow_html=True,
+        )
+
         if stats.get("总数"):
-            a1, a2, a3 = st.columns(3)
-            a1.metric("方向一致率", f"{stats['一致率']:.0f}%")
-            a2.metric("已回看", f"{stats['总数']}")
-            a3.metric("说对", f"{stats['一致数']}")
             # 按市场/按方向拆开——笼统一个数看不出"在哪个市场准""偏多还是偏空准"。
             _rows = []
             for group_name, group in (("按市场", stats.get("按市场") or {}), ("按方向", stats.get("按方向") or {})):
@@ -3902,56 +4027,6 @@ def _render_my_page():
                             f"<span style='color:var(--fa-faint)'> · {n}次</span></span></div>",
                             unsafe_allow_html=True,
                         )
-            st.markdown(
-                "<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:10px'>"
-                "每次生成综合数据分析时记录当时价格和判断方向，满7天后自动补录实际价格做对照。"
-                "这是历史记录的客观统计，不代表未来表现。</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                "<div style='color:var(--fa-muted);font-size:0.88rem;padding:2px 0'>"
-                "还没有满7天可回看的记录</div>"
-                "<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:4px'>"
-                "在个股详情页生成过综合数据分析之后，判断会被记下来，满7天自动补录当时的实际价格算方向是否一致。</div>",
-                unsafe_allow_html=True,
-            )
-
-        # ── AI 排行榜/持仓判断 事后一致率 ──────────────────────────────────
-        # 2026-09-11修（P0，前端审计"AI在AI咨询里自己拆排行榜的台"）：审计
-        # 在AI咨询面板问"推荐股排行榜准不准"，AI如实引用了advice表
-        # （advisor.py每天17:30自动判断）的事后一致率和打分回测结论——这些
-        # 数据一直都在，只是从没在任何页面上单独展示过。而上面这一块
-        # "AI 判断准确率"统计的是完全不同的东西（用户自己在个股详情页手动
-        # 触发的"综合数据分析"，靠analyses表，独立的7天回看窗口）。两个
-        # 标签长得像、口径完全不同，用户在这个页面只看到"还没有满7天"，
-        # 却在AI咨询里听到一个具体的百分比，会以为AI在编数字或者前后矛盾
-        # ——其实是这个页面从没展示过AI真正引用的那份数据。这里补上，
-        # 标签明确写清楚"排行榜/持仓判断"，跟上面那块分开，不共用一个标题。
-        try:
-            _adv_acc = get_advice_accuracy(email)
-            _by_source = _adv_acc.get("按来源", {})
-        except Exception:
-            _by_source = {}
-        _adv_lines = []
-        for _src, _label in (("watchlist", "推荐股排行榜"), ("position", "持仓判断")):
-            _s = _by_source.get(_src)
-            if _s and _s.get("总数"):
-                _adv_lines.append((_label, _s["一致率"], _s["总数"]))
-        st.markdown("**AI 排行榜 / 持仓判断事后一致率**")
-        if _adv_lines:
-            _cols = st.columns(len(_adv_lines))
-            for _col, (_label, _rate, _n) in zip(_cols, _adv_lines):
-                _col.metric(_label, f"{_rate:.0f}%", help=f"共{_n}次判断，方向（买入应涨/卖出应跌）事后核对")
-            st.markdown(
-                "<div style='font-size:0.74rem;color:var(--fa-faint);margin-top:4px'>"
-                "这是advisor.py每天17:30自动生成的买卖判断（跟上面\"个股详情页AI分析\"是两套独立记录）。"
-                "AI咨询里回答\"排行榜准不准\"引用的就是这份数据——分数越高不代表事后表现越好，"
-                "详见打分体系的事后实证说明。</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.caption("还没有满足回看窗口的自动判断记录（advisor.py每天17:30生成，watchlist口径需满6.9天才回填）。")
 
         # ── AI 战绩墙 ───────────────────────────────────────────────────
         # 2026-09-12新增（升级路线图第1条，两份文档都把它列为最重要的一项）。
@@ -3960,31 +4035,21 @@ def _render_my_page():
         # 来自已经回填过事后价格的真实记录，不预测、不补值。
         st.divider()
         st.markdown("**AI 战绩墙**")
-        # 顶部三个数字走全样本，跟下面列表的筛选无关——所以放在列表判空之外。
-        # 之前嵌在 else 分支里，列表一为空连汇总也跟着消失；加了筛选之后
-        # "筛完没有结果"会变成常见情况，这个结构必须先拆开。
-        try:
-            _summary = get_advice_outcome_summary()
-        except Exception:
-            _summary = {}
-        if _summary.get("directional_count"):
-            _c1, _c2, _c3 = st.columns(3)
-            # 分母必须摆在明面上，不能只藏在 help 里。
-            # 2026-09-13 审计原话："'方向判断胜率37%'和'已回填判断1430'并排
-            # 显示…用户会自然认为分母是1430"——实际分母只有131（1430条里
-            # 观望752、持有547，带方向的买入86+卖出45）。这一块是全站最
-            # 强调"诚实"的地方，反而在分母上含糊，是最不该出的问题。
-            _c1.metric(
-                f"方向判断胜率（{_summary['directional_count']}条中说对{_summary['hits']}条）",
-                f"{_summary['win_rate']:.0f}%",
-                help="只统计买入/卖出这类声称了方向的判断；持有/观望没声称方向，不计入胜率。",
+        # 2026-09-13：胜率/分母这两个数已经并进上面那张三行表的最后一行了
+        # （"战绩墙（逐条可查）  37%  48/131"），这里不再重复一遍——同一个
+        # 数字在同一页上出现两次，读者第一反应是去找它们哪里不一样。
+        # 这一块从"汇总+列表"收窄成纯列表：汇总看表，逐条看这里。
+        #
+        # 只有"平均事后涨跌"上面那张表放不下（它不是一个百分比口径），留在这。
+        if _summary.get("avg_return_pct") is not None and _summary.get("directional_count"):
+            _avg_c = UP_COLOR if _summary["avg_return_pct"] >= 0 else DOWN_COLOR
+            st.markdown(
+                f"<div style='font-size:var(--fs-xs);color:var(--fa-muted);margin:-4px 0 6px'>"
+                f"这 {_summary['directional_count']} 条判断的平均事后涨跌 "
+                f"<span style='color:{_avg_c};font-weight:600'>{_summary['avg_return_pct']:+.2f}%</span>"
+                f"　亏的那几条一样列在下面，不藏。</div>",
+                unsafe_allow_html=True,
             )
-            _c2.metric("平均事后涨跌", f"{_summary['avg_return_pct']:+.2f}%")
-            _c3.metric(
-                "已回填判断（含持有/观望）", f"{_summary['total_reviewed']}",
-                help="所有已补录事后价格的记录总数。它不是左边胜率的分母。",
-            )
-            # 分母已经写进左边那个 metric 的标题里，不再重复一遍。
         # 默认只看带方向的判断。已回填的绝大多数是"持有/观望"，不筛的话一屏
         # 二十条里十九条是"无方向"——这个列表存在的意义是逐条核对"说买入的
         # 后来涨了没"，全是没有对错可言的记录时它就失去了作用（审计第13条）。
@@ -6269,13 +6334,73 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
         virtual_cash = sim_agent._VIRTUAL_BUDGET_HKD
     net_value = holdings_value + virtual_cash
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("虚拟现金（剩余可用）", f"${virtual_cash / _usd_rate:,.0f}")
-    with col2:
-        st.metric("持仓市值（仅AI自己买入的）", f"${holdings_value / _usd_rate:,.0f}")
-    with col3:
-        st.metric("总额（起始$10,000）", f"${net_value / _usd_rate:,.0f}")
+    # 2026-09-13 改成券商资产页的形态。
+    #
+    # 改造前这里是三个等大的并列卡片（虚拟现金 / 持仓市值 / 总额），三个数字
+    # 一样大、一样重——但它们的重要性根本不一样：打开这一页第一个想知道的是
+    # "现在总共值多少、今天赚了还是亏了"，现金和持仓市值是这个数的两个组成
+    # 部分，属于"要拆开看的时候才看"。三个并列等于让读者自己去挑主角。
+    #
+    # 现在一个大数当主角（--fs-2xl），当日变化和累计收益紧跟其下，右边一条
+    # 迷你净值曲线，其余全部降成第二行小字。
+    _net_usd = net_value / _usd_rate
+    _start_capital_usd = sim_agent._VIRTUAL_BUDGET_HKD / _usd_rate
+    _cum_pct = ((_net_usd - _start_capital_usd) / _start_capital_usd * 100) if _start_capital_usd else 0.0
+    _pnl = get_period_pnl(email, net_value)
+    _today_blk = _pnl.get("today")
+
+    _hero_col, _spark_col = st.columns([3, 1], vertical_alignment="center")
+    with _hero_col:
+        _today_html = "<span style='color:var(--fa-muted)'>本日 暂无数据</span>"
+        if _today_blk:
+            _tc = UP_COLOR if _today_blk["change"] >= 0 else DOWN_COLOR
+            _today_html = (
+                f"<span style='color:var(--fa-muted)'>本日</span> "
+                f"<span style='color:{_tc};font-weight:600'>"
+                f"{_fmt_usd_signed(_today_blk['change'] / _usd_rate)} "
+                f"（{_today_blk['pct']:+.2f}%）</span>"
+            )
+        _cum_c = UP_COLOR if _cum_pct >= 0 else DOWN_COLOR
+        st.markdown(
+            f"<div style='font-size:var(--fs-xs);color:var(--fa-muted);letter-spacing:.04em'>总资产</div>"
+            f"<div style='font-size:var(--fs-2xl);font-weight:600;letter-spacing:-.03em;"
+            f"color:var(--fa-text);line-height:1.15;margin:2px 0 6px'>${_net_usd:,.0f}</div>"
+            f"<div style='font-size:var(--fs-sm)'>{_today_html}"
+            f"<span style='color:var(--fa-muted);margin:0 8px'>·</span>"
+            f"<span style='color:var(--fa-muted)'>累计</span> "
+            f"<span style='color:{_cum_c};font-weight:600'>{_cum_pct:+.2f}%</span></div>",
+            unsafe_allow_html=True,
+        )
+    with _spark_col:
+        # 迷你净值曲线。数据就是下面那张大图用的同一批快照，不额外取数。
+        # 一个总资产数字回答"现在多少"，这条线回答"是怎么走到这儿的"——
+        # 在同一屏里并排放着，比翻到页面下半部分才看到曲线有用得多。
+        _eq_vals = [p.get("assets_hkd") for p in (equity_points or [])][-40:]
+        st.markdown(
+            f"<div style='display:flex;justify-content:flex-end'>"
+            f"{_build_sparkline_svg(_eq_vals, UP_COLOR if _cum_pct >= 0 else DOWN_COLOR, width=140, height=42)}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    # 构成和另外两个时间窗降成一行小字。它们都是"要拆开看的时候才看"的数，
+    # 不该跟总资产抢同样的字号。
+    _parts = [
+        f"虚拟现金 ${virtual_cash / _usd_rate:,.0f}",
+        f"持仓市值 ${holdings_value / _usd_rate:,.0f}",
+        f"起始本金 ${_start_capital_usd:,.0f}",
+    ]
+    for _label, _key in (("昨日", "yesterday"), ("本月", "month")):
+        _b = _pnl.get(_key)
+        _parts.append(
+            f"{_label} {_fmt_usd_signed(_b['change'] / _usd_rate)}（{_b['pct']:+.2f}%）"
+            if _b else f"{_label} 暂无数据"
+        )
+    st.markdown(
+        "<div style='font-size:var(--fs-xs);color:var(--fa-muted);margin:10px 0 2px'>"
+        + " · ".join(_esc(x) for x in _parts) + "</div>",
+        unsafe_allow_html=True,
+    )
 
     if _reconciled["foreign_positions"]:
         # HK$ 里的 $ 必须转义。st.caption 走 markdown，成对出现的 $...$ 会被
@@ -6293,39 +6418,13 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
             f"不计入净值和收益率。可在富途App里自行平仓清掉。"
         )
 
-    # 累计收益率的基准是起始本金，不是"图表窗口里第一个快照点"。
-    # 2026-09-11修：原来拿equity_points的最早一点当基准，而那个列表只覆盖
-    # 图表窗口（不是全部历史），算出来的"累计"比"本月"还小——页面上同时
-    # 摆着"总额（起始$10,000）$15,442"和"累计收益率+16.58%"、"本月收益
-    # +54.42%"三个互相矛盾的数字。累计就该是相对起始本金，跟上面那张
-    # "总额（起始$10,000）"卡片同一个口径。
-    _start_capital_usd = sim_agent._VIRTUAL_BUDGET_HKD / _usd_rate
-    if _start_capital_usd:
-        change_pct = (net_value / _usd_rate - _start_capital_usd) / _start_capital_usd * 100
-        st.metric("累计收益率（相对起始本金）", f"{change_pct:+.2f}%")
+    # 累计收益率、本日/昨日/本月收益这四个数原来各占一张 st.metric 卡片，
+    # 现在都并进上面那块资产头（累计和本日跟在大数下面，昨日/本月降成小字）。
+    # 口径没变：累计的基准始终是起始本金，不是"图表窗口里第一个快照点"——
+    # 2026-09-11 修过一次，用后者会让"累计"比"本月"还小，页面上同时摆着三个
+    # 互相矛盾的数字。
     if snapshot["skipped_markets"]:
         st.caption(f"以下市场暂时没查到模拟账户：{'、'.join(snapshot['skipped_markets'])}")
-
-    # 本日/昨日/本月收益——用户明确要求这三个分开的时间窗口，各自带一个
-    # 收益百分比，负收益就是负数（不用红绿颜色掩盖，数字本身带符号最直接）。
-    # 找不到某个窗口的数据（比如AI今天/本月还没运行过）时如实显示"暂无
-    # 数据"，不拿0冒充"没有变化"。
-    pnl = get_period_pnl(email, net_value)
-    pnl_col1, pnl_col2, pnl_col3 = st.columns(3)
-    for col, label, key in ((pnl_col1, "本日收益", "today"), (pnl_col2, "昨日收益", "yesterday"), (pnl_col3, "本月收益", "month")):
-        block = pnl.get(key)
-        with col:
-            if block:
-                # delta_color="inverse"：Streamlit默认是"涨绿跌红"的西方约定，
-                # 而这个项目全站用的是"红涨绿跌"的中式约定（见theme.py）。
-                # 不指定的话，同一个页面上亏损的百分比是红的、而下面持仓里
-                # 下跌的股票是绿的，两套配色互相打架。
-                st.metric(
-                    label, _fmt_usd_signed(block["change"] / _usd_rate),
-                    f"{block['pct']:+.2f}%", delta_color="inverse",
-                )
-            else:
-                st.metric(label, "暂无数据")
 
     if snapshot["positions"]:
         st.markdown("**当前持仓**")
@@ -6624,16 +6723,40 @@ def _render_ai_sim_dashboard():
     if not runs:
         st.caption("还没有运行记录")
     else:
+        # 2026-09-13：整块默认折叠成一行。
+        #
+        # 改造前这里是全页最占地方、单位面积信息量最低的一段：二十四条记录，
+        # 每条标题都是"03:56 · 完成 · 0条信号，其中执行成功0条，账户内另有非AI
+        # 仓位未计入净值：新奥能源(¥9,628)、滨化股份(¥6,170)"——三个字段全是
+        # 常量，后面那句非AI仓位的提示还把标题撑满、把真正有信息的部分挤掉。
+        # 读完二十四行，能得到的信息和读一行完全一样。
+        #
+        # 现在一行说清楚整体（多少次、出没出信号、最近一次什么时候），点开才
+        # 是明细；每条明细的摘要换成 reasoning_text 的第一句——那才是"为什么"。
+        _sig_total = 0
+        for _r in runs:
+            try:
+                _sig_total += len([s for s in json.loads(_r.get("signals_json") or "[]")
+                                   if s.get("action") in ("买入", "卖出")])
+            except Exception:
+                pass
+        _last_when = _to_cn_time_str(runs[0].get("run_at")) if runs else ""
+        _summary = f"最近 {len(runs)} 次决策 · {_sig_total} 条信号"
+        if _last_when:
+            _summary += f" · 最近一次 {_last_when}"
+        _runs_box = st.expander(_summary)
+
         _runs_key = f"_ai_sim_runs_show_all_{email}"
         show_all_runs = st.session_state.get(_runs_key, False)
         visible_runs = runs if show_all_runs else runs[:5]
         for r in visible_runs:
             when = _to_cn_time_str(r.get("run_at"))
-            title = f"{when} · {r['status']}" + (
-                f" · {_sim_note_for_display(r['note'])}" if r.get("note") else "")
+            # 标题写原因，不写状态。状态("完成")二十四行全一样，等于没写。
+            _reason = _sim_run_reason(r.get("reasoning_text", "")) or _sim_note_for_display(r.get("note", ""))
+            title = f"{when} · {_reason}" if _reason else f"{when} · {r['status']}"
             # 决策记录同样压成发丝线分隔的行，不再是一摞带边框的白盒子——
             # 这里一屏能有五到三十条，方框叠方框是这一段最主要的视觉噪声。
-            with st.container(key=f"sim_run_{r.get('run_at','')}"), st.expander(title):
+            with _runs_box, st.container(key=f"sim_run_{r.get('run_at','')}"), st.expander(title):
                 if r.get("reasoning_text"):
                     st.markdown(_esc(r["reasoning_text"]).replace("\n", "<br>"), unsafe_allow_html=True)
                 try:
@@ -6660,9 +6783,10 @@ def _render_ai_sim_dashboard():
                         suffix = ""
                     st.caption(f"{s['action']} {s['name']}（{s['symbol']}·{s['market']}）{s['shares']:g}股{suffix}")
         if not show_all_runs and len(runs) > 5:
-            if st.button(f"更多（最近{len(runs)}条）", key=f"_ai_sim_runs_more_{email}"):
-                st.session_state[_runs_key] = True
-                st.rerun()
+            with _runs_box:
+                if st.button(f"更多（最近{len(runs)}条）", key=f"_ai_sim_runs_more_{email}"):
+                    st.session_state[_runs_key] = True
+                    st.rerun()
 
     st.divider()
     st.markdown("**完整下单记录**")
