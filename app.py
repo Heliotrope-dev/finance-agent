@@ -2758,17 +2758,21 @@ def _render_market_extras(market: str):
                 unsafe_allow_html=True,
             )
 
-    st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
-    st.markdown("**今日异动**")
-    _cols = st.columns(2 if (movers and hot) else 1)
-    _i = 0
-    if movers:
-        with _cols[_i]:
-            _rows("涨跌幅榜", movers)
-        _i += 1
-    if hot:
-        with _cols[min(_i, len(_cols) - 1)]:
-            _rows("热度榜", hot, "按用户关注度排，跟涨跌幅是两个口径")
+    # "今日异动"这个标题必须跟着它下面的两个榜单一起有无。上面那句 return 的
+    # 条件加进 ipos 之后，沪深会走到这里但两个榜单都是空的——不加这层判断就会
+    # 留下一个光秃秃的标题，比不显示更像出了故障。
+    if movers or hot:
+        st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
+        st.markdown("**今日异动**")
+        _cols = st.columns(2 if (movers and hot) else 1)
+        _i = 0
+        if movers:
+            with _cols[_i]:
+                _rows("涨跌幅榜", movers)
+            _i += 1
+        if hot:
+            with _cols[min(_i, len(_cols) - 1)]:
+                _rows("热度榜", hot, "按用户关注度排，跟涨跌幅是两个口径")
 
     if premarket:
         st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
