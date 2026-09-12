@@ -3793,8 +3793,19 @@ def get_market_rank(kind: str, market: str = "HK", count: int = 10) -> list[dict
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_ipo_calendar(market: str = "HK", limit: int = 8) -> list[dict]:
-    """新股上市日历。"""
-    mk = getattr(ft.Market, market, None)
+    """新股上市日历。支持 HK / US / A（沪深合并）。
+
+    2026-09-13修：项目里统一用 "A" 表示沪深两市，但富途的枚举只有 SH 和 SZ，
+    没有 A —— `getattr(ft.Market, "A", None)` 返回 None，函数直接返回空列表。
+    行情页那块"新股上市"的条件本来就写着 `market in ("HK", "A")`，但 A 这条
+    分支从上线起就永远拿不到数据，整块静默消失，看起来像"A股最近没有新股"。
+    这类"条件写了、数据源不支持、又刚好走的是静默降级"的组合最难发现。
+
+    实测 ft.Market.SH 和 ft.Market.SZ 返回的是同一份沪深合并列表（各6条，
+    互相包含对方的代码），所以 A 股只要调一次 SH 就够，不用合并去重。
+    """
+    _FUTU_MARKET = {"A": ft.Market.SH, "HK": ft.Market.HK, "US": ft.Market.US}
+    mk = _FUTU_MARKET.get(market) or getattr(ft.Market, market, None)
     if mk is None:
         return []
     df = _unwrap_futu(_futu_call(lambda c: c.get_ipo_list(mk), timeout=20, default=None))

@@ -2757,7 +2757,8 @@ def _render_market_extras(market: str):
         st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
         _rows("美股盘前异动", premarket, "开盘方向最早的线索")
 
-    if market in ("HK", "A"):
+    # 三个市场都列新股，口径保持一致（用户2026-09-13要求 A股/美股跟港股对齐）。
+    if market in ("HK", "A", "US"):
         try:
             ipos = get_ipo_calendar(market, limit=6)
         except Exception:
@@ -2768,8 +2769,15 @@ def _render_market_extras(market: str):
                 and "债券" not in str(ip.get("name") or "")]
         if ipos:
             st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+            # A股的 list_time 常常是 N/A（还在申购、上市日未定），这是A股的正常
+            # 状态不是缺数据，标题里说明一下，免得看到一排空日期以为坏了。
+            _ipo_note = {
+                "A": "新股上市 · 打新中签后才配售，上市日多为待定",
+                "HK": "新股上市 · 认购期内可申购",
+                "US": "新股上市 · 美股不设散户打新，仅作日程参考",
+            }.get(market, "新股上市")
             st.markdown(
-                "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 6px'>新股上市</div>",
+                f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 6px'>{_esc(_ipo_note)}</div>",
                 unsafe_allow_html=True,
             )
             for ip in ipos:
@@ -2783,7 +2791,9 @@ def _render_market_extras(market: str):
                     f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
                     f"border-bottom:1px solid var(--fa-border)'>"
                     f"<span style='color:var(--fa-faint);font-size:0.78rem;min-width:76px'>"
-                    f"{_esc(ip.get('list_date', ''))}</span>"
+                    # 上市日为空不是缺数据——A股申购期内上市日本来就没定，
+                    # 留白会被当成"数据没拉到"，写"待定"才是事实。
+                    f"{_esc(ip.get('list_date') or '待定')}</span>"
                     f"<span style='flex:1;color:var(--fa-text);font-size:0.86rem'>{_esc(ip['name'])}"
                     f"<span style='color:var(--fa-faint);font-size:0.76rem'> {_esc(ip['symbol'])}</span></span>"
                     f"<span style='color:var(--fa-text-2);font-size:0.8rem'>"
@@ -5080,6 +5090,69 @@ def _render_ipo_calculator(items: list[dict]):
                        f"（融资放大的是回报率，也同样放大亏损和盈亏平衡线）。")
 
 
+def _render_a_ipo_briefs():
+    """A股新股认购专区（2026-09-13 用户要求，参照港股那块）。
+
+    没有照搬港股的 AI 简报模式：那块的招股要素（保荐人/基石/超额认购/绿鞋）
+    是 ipo_brief.py 这条独立 cron 用 AI 从公开网页挖出来再落库的，A股没有对应
+    的管线，硬做等于再起一条要维护的 AI 链路。
+
+    改成围绕一个 A股独有、而且富途接口直接给的硬指标：**发行市盈率 vs 行业
+    市盈率**。这是A股打新判断"贵不贵"的通行口径——发行PE显著高于行业PE的，
+    上市后向行业均值回归的压力就大。港股和美股的接口都没有这两个字段，所以
+    这块的形态跟港股那块本来就该不一样，不是偷懒。
+
+    只读接口不调AI，跟宏观/港股新股同一个原则：首页渲染路径上不跑模型。
+    """
+    try:
+        ipos = get_ipo_calendar("A", limit=8)
+    except Exception:
+        return
+    if not ipos:
+        return
+
+    st.markdown("**A股新股申购**")
+    # 未定价的单独归一类：A股在申购前几天才公布发行价，这期间接口返回的是0。
+    # 把0当成"发行价0元"显示出来是错的，当成"没有这只票"藏掉也是错的。
+    priced = [ip for ip in ipos if (ip.get("ipo_price") or 0) > 0]
+    unpriced = [ip for ip in ipos if (ip.get("ipo_price") or 0) <= 0]
+
+    if priced:
+        st.caption("发行市盈率高于行业市盈率越多，上市后向行业均值回归的压力越大——"
+                   "这是A股打新最直接的一个贵贱参照，但它只说估值，不代表公司好坏。")
+    for ip in priced:
+        _ipo_pe = ip.get("issue_pe") or 0
+        _ind_pe = ip.get("industry_pe") or 0
+        _ratio_txt, _ratio_color = "", "var(--fa-faint)"
+        if _ipo_pe > 0 and _ind_pe > 0:
+            _r = _ipo_pe / _ind_pe
+            _ratio_txt = f"{_r:.2f}× 行业"
+            # 红=偏贵绿=偏宜，跟全站涨跌色一致：高于行业用涨色（要警惕），
+            # 低于行业用跌色。这里的语义是"估值位置"不是"赚赔"，所以配文
+            # 必须写清楚，不能让人按"红=好"去读。
+            _ratio_color = UP_COLOR if _r > 1.15 else (DOWN_COLOR if _r < 0.9 else "var(--fa-text-2)")
+        st.markdown(
+            f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
+            f"border-bottom:1px solid var(--fa-border)'>"
+            f"<span style='flex:1;color:var(--fa-text);font-size:0.88rem;font-weight:600'>"
+            f"{_esc(ip['name'])}"
+            f"<span style='color:var(--fa-faint);font-size:0.76rem;font-weight:400'> "
+            f"{_esc(ip['symbol'])}</span></span>"
+            f"<span style='color:var(--fa-text-2);font-size:0.8rem;min-width:92px'>"
+            f"发行价 {ip['ipo_price']:,.2f}</span>"
+            f"<span style='color:var(--fa-faint);font-size:0.78rem;min-width:150px'>"
+            f"发行PE {_ipo_pe:,.1f} / 行业 {_ind_pe:,.1f}</span>"
+            f"<span style='color:{_ratio_color};font-size:0.82rem;font-weight:600;"
+            f"min-width:80px;text-align:right'>{_esc(_ratio_txt)}</span></div>",
+            unsafe_allow_html=True,
+        )
+    if unpriced:
+        st.caption(
+            "另有 " + "、".join(f"{_esc(ip['name'])}（{_esc(ip['symbol'])}）" for ip in unpriced)
+            + " 尚未公布发行价——A股通常在申购前几天才定价，不是数据缺失。"
+        )
+
+
 def _render_ipo_briefs():
     """港股新股认购专区。
 
@@ -5679,6 +5752,9 @@ def _render_home_page():
     _render_macro_briefs()
     _render_event_calendar()
     _render_ipo_briefs()
+    # A股新股紧跟港股那块。两块的形态不一样是数据决定的：港股有招股要素和
+    # AI简报，A股有发行PE/行业PE——各自用手上真有的东西，不互相硬凑。
+    _render_a_ipo_briefs()
 
     st.divider()
     st.markdown("**今日重磅消息**")
