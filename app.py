@@ -4969,7 +4969,7 @@ _IPO_SECTIONS = ("一句话结论", "公司概况", "定价与门槛", "市场�
 
 
 @st.fragment
-def _render_ipo_open_vs_close(items: list[dict]):
+def _render_ipo_open_vs_close(items: list[dict], key_suffix: str = "hk"):
     """新股首日"开盘就卖 vs 持到收盘"（升级路线图第8条）。
 
     路线图原本要的是"超购倍数 vs 首日表现"散点图。超购倍数这个数据确认拿不到：
@@ -4999,7 +4999,7 @@ def _render_ipo_open_vs_close(items: list[dict]):
     _bits.append("虚线上方＝持到收盘更好，下方＝高开回落，左下＝开盘收盘都破发")
     st.caption("；".join(_bits) + "。")
     st.plotly_chart(fig, use_container_width=True, config=_PLOTLY_CONFIG,
-                    key="_ipo_open_close")
+                    key=f"_ipo_open_close_{key_suffix}")
 
 
 def _render_ipo_calculator(items: list[dict]):
@@ -5156,7 +5156,7 @@ def _render_us_ipo_briefs():
         _perf_us = get_latest_ipo_performance(market="US")
     except Exception:
         _perf_us = {}
-    _render_ipo_perf_block(_perf_us, show_calculator=False)
+    _render_ipo_perf_block(_perf_us, show_calculator=False, key_suffix="us")
 
     try:
         ipos = get_ipo_calendar("US", limit=60)
@@ -5195,7 +5195,7 @@ def _render_us_ipo_briefs():
         )
 
 
-def _render_ipo_perf_block(perf: dict, show_calculator: bool = True):
+def _render_ipo_perf_block(perf: dict, show_calculator: bool = True, key_suffix: str = "hk"):
     """新股"首日表现统计 + 开盘vs收盘散点 + 按月拆解"这一整块。
 
     2026-09-13 从 _render_ipo_briefs 里抽出来，给港股和美股共用——用户要求
@@ -5204,6 +5204,10 @@ def _render_ipo_perf_block(perf: dict, show_calculator: bool = True):
 
     show_calculator：只有港股给打新测算器。美股 IPO 由承销商配售给机构，
     散户没有申购入口，摆一个算中签收益的工具等于引导用户去找不存在的东西。
+
+    key_suffix 必须按市场给不同的值：st.tabs 会把**所有**标签页的内容都渲染
+    出来（不是点到才渲染），所以港股和美股这两块是同时存在于页面上的，图表
+    的 key 写死就会撞 StreamlitDuplicateElementKey，整块报错。
     """
     _st = (perf or {}).get("stats") or {}
     if _st.get("count"):
@@ -5264,7 +5268,7 @@ def _render_ipo_perf_block(perf: dict, show_calculator: bool = True):
         _monthly = (perf or {}).get("monthly") or []
         _items = (perf or {}).get("items") or []
 
-        _render_ipo_open_vs_close(_items)
+        _render_ipo_open_vs_close(_items, key_suffix=key_suffix)
         if show_calculator:
             _render_ipo_calculator(_items)
 
@@ -5367,7 +5371,7 @@ def _render_ipo_briefs():
         return
 
     # 首日表现统计/散点/按月拆解跟美股共用同一个函数（见 _render_ipo_perf_block）。
-    _render_ipo_perf_block(perf, show_calculator=True)
+    _render_ipo_perf_block(perf, show_calculator=True, key_suffix="hk")
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
     st.markdown(
