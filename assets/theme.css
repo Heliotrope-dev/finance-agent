@@ -834,6 +834,26 @@ a.macro-card-link:hover { background: rgba(23, 24, 28, 0.045); }
     30%           { opacity: 1;    transform: translateY(-3px); }
 }
 
+/* ── 「我的」页那张准确率表 ───────────────────────────────────────────────
+   四列：口径名 / 百分比 / 分母 / 这是什么。宽屏并排，窄屏堆叠——414px 上四列
+   并排只剩几十像素给最后那列说明文字，一个词一行。 */
+.fa-acc-row {
+    display: flex; align-items: baseline; gap: var(--sp-3);
+    padding: 10px 2px; border-bottom: 1px solid var(--line-divider);
+}
+.fa-acc-name  { flex: 0 0 150px; font-size: var(--fs-sm); font-weight: var(--fw-bold); color: var(--text-primary); }
+.fa-acc-pct   { flex: 0 0 64px; text-align: right; }
+.fa-acc-denom { flex: 0 0 92px; text-align: right; font-size: var(--fs-xs); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.fa-acc-what  { flex: 1; min-width: 0; font-size: var(--fs-xs); color: var(--text-secondary); line-height: 1.5; }
+@media (max-width: 640px) {
+    .fa-acc-row   { flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); }
+    .fa-acc-name  { flex: 1 1 auto; }
+    .fa-acc-pct   { flex: 0 0 auto; }
+    .fa-acc-denom { flex: 0 0 auto; }
+    /* 说明整行独占，缩进到跟上面的名字对齐 */
+    .fa-acc-what  { flex: 1 1 100%; }
+}
+
 /* ── 重跑期间的视觉处理 ───────────────────────────────────────────────────
    Streamlit 是整页 rerun：从首页点到行情页，服务端要重新把行情页跑一遍，
    这期间浏览器里挂着的是**上一页的全部内容**——实测切 tab 要 5-8 秒，这几秒

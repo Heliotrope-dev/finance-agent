@@ -4220,15 +4220,16 @@ def _render_my_page():
                 if _pct is not None else
                 "<span style='font-size:var(--fs-sm);color:var(--fa-muted)'>—</span>"
             )
+            # 定宽列的宽度写在 CSS 类里而不是内联：这一行有四列定宽/弹性混排，
+            # 在 414px 宽的手机上四列并排只剩几十像素给说明文字，必须能换行堆叠。
+            # 内联 style 写不了媒体查询，所以挂类名，规则在 theme.css 的
+            # .fa-acc-row 那一段。
             st.markdown(
-                f"<div style='display:flex;align-items:baseline;gap:12px;padding:10px 2px;"
-                f"border-bottom:1px solid var(--fa-border)'>"
-                f"<div style='flex:0 0 150px;font-size:var(--fs-sm);font-weight:600;color:var(--fa-text)'>{_esc(_name)}</div>"
-                f"<div style='flex:0 0 64px;text-align:right'>{_pct_html}</div>"
-                f"<div style='flex:0 0 92px;text-align:right;font-size:var(--fs-xs);color:var(--fa-muted);"
-                f"font-variant-numeric:tabular-nums'>{_esc(_denom)}</div>"
-                f"<div style='flex:1;min-width:0;font-size:var(--fs-xs);color:var(--fa-muted);"
-                f"line-height:1.5'>{_esc(_what)}</div></div>",
+                f"<div class='fa-acc-row'>"
+                f"<div class='fa-acc-name'>{_esc(_name)}</div>"
+                f"<div class='fa-acc-pct'>{_pct_html}</div>"
+                f"<div class='fa-acc-denom'>{_esc(_denom)}</div>"
+                f"<div class='fa-acc-what'>{_esc(_what)}</div></div>",
                 unsafe_allow_html=True,
             )
         st.markdown(
