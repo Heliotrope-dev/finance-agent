@@ -2988,8 +2988,11 @@ def _render_sector_heatmap(market: str):
     if fig is None:
         return
     st.markdown("**板块热力图**")
-    st.caption("方块大小=成交额（今天有多少钱在里面），颜色深浅=涨跌幅度，"
-               "涨还是跌看方块上的正负号。")
+    st.caption(
+        "方块大小=成交额（今天有多少钱在里面），颜色深浅=涨跌幅度，"
+        "涨还是跌看方块上的正负号。只画成交额最大的前 16 个板块——"
+        "再多画出来的方块就小到写不下名字了，而尾部那些板块合计也只占几个点的成交额。"
+    )
     st.plotly_chart(fig, use_container_width=True, config=_PLOTLY_CONFIG)
 
 
@@ -3102,33 +3105,38 @@ def _render_sector_detail(name: str, market: str):
 
 
 _HOME_MAP_MARKERS = [
-    # (指数名, 所在市场, 纬度, 经度)
+    # (指数名, 所在市场, 纬度, 经度, 标签横向偏移px, 标签纵向偏移px)
     #
-    # 2026-09-04重排。此前这些坐标为了避免标签互相压住，被挪得离真实位置
-    # 相当远（上证跑到内蒙、新加坡跑到苏门答腊、德国DAX跑到亚得里亚海、
-    # 纳斯达克跑到加拿大），用户反馈"位置发生漂移"。漂移的根源是当时每个
-    # 标签都是一个带边框的白卡、占地很大；现在标签改成了透明文字，占地小
-    # 了不少，可以把大部分标的拉回真实位置。
+    # 2026-09-12重做。用户反馈"世界地图上有些点位没对上"——印度SENSEX的字
+    # 飘到了阿拉伯海、新加坡STI飘到了中南半岛、富时100飘到了北大西洋。
     #
-    # 仍然需要错开的只剩两处密集区，且都按"同一个国家/地区内部挪"的原则：
-    #   欧洲：伦敦和法兰克福纬度只差1.4度，标签必然叠。富时100放苏格兰、
-    #         DAX放德奥交界，两者仍在各自国家境内，纬度差8度刚好错开。
-    #   美国：三个美股指数真实位置都在纽约，不可能不叠。按"都留在美国境内"
-    #         横竖错开——纳斯达克放纽约州、标普放美东南、道琼斯放中部平原。
-    # 错开的判据是算出来的：zoom=2下标签约34px高、56px宽，换算成经纬度大致
-    # 是纬度差8度或经度差24度才不会重叠，下面每一对都按这个下限排的。
-    ("恒生指数", "HK", 22.3, 114.2),        # 香港，真实位置
-    ("上证指数", "A", 33.5, 119.0),          # 真实上海(31.2,121.5)，略向西北避开恒生
-    ("标普500", "US", 33.0, -84.0),          # 美东南
-    ("纳斯达克100", "US", 43.0, -76.0),      # 纽约州，最接近真实的一个
-    ("道琼斯", "US", 40.0, -100.0),          # 美国中部平原
-    ("日经225", "GLOBAL", 35.7, 139.8),      # 东京，真实位置
-    ("富时100", "GLOBAL", 56.0, -4.0),       # 苏格兰（真实伦敦在51.5,-0.1，北移避开DAX）
-    ("德国DAX", "GLOBAL", 47.8, 11.0),       # 德奥交界（真实法兰克福在50.1,8.7）
-    ("印度SENSEX", "GLOBAL", 19.1, 72.9),    # 孟买，真实位置
-    ("巴西IBOVESPA", "GLOBAL", -23.5, -46.6),# 圣保罗，真实位置
-    ("澳大利亚ASX200", "GLOBAL", -33.9, 151.2), # 悉尼，真实位置
-    ("新加坡STI", "GLOBAL", 1.3, 103.8),     # 新加坡，真实位置
+    # 根因不是坐标错了（下面这些经纬度本来就是对的），是标签的锚点：原来
+    # iconAnchor=[34,38] 把锚点放在标签盒子的正下边缘，于是整个38px高的标签
+    # 完全悬在坐标点的正上方。zoom=2 下 38px 差不多是10个纬度，等于每个标签
+    # 都被系统性地推到了自己城市的北边十度，而地图上又没有任何东西标出真实
+    # 位置，读者只能把文字本身当成位置。
+    #
+    # 改法是把"位置"和"文字"拆开：真实经纬度上画一个小圆点（位置的唯一
+    # 事实来源），文字挂在圆点下方，需要避让时只挪文字、不挪点。所以下面
+    # 的经纬度全部回到真实交易所城市，一个都不再为了排版而偏移；
+    # 后两个字段是纯像素级的标签偏移，只影响文字，不影响圆点。
+    #
+    # 需要避让的还是那两处：
+    #   美国：三个指数的交易所都在纽约，真实位置完全重合。圆点就该只有一个
+    #         （它们确实是同一个地方），三个标签纵向叠下去，落在大西洋上。
+    #   欧洲：伦敦和法兰克福只差1.4纬度/8.8经度，标签必然压住，一左一右拉开。
+    ("恒生指数", "HK", 22.3, 114.2, -46, 6),        # 香港
+    ("上证指数", "A", 31.2, 121.5, 6, 0),            # 上海（真实位置，不再北移）
+    ("道琼斯", "US", 40.7, -74.0, 0, 0),             # 纽约
+    ("标普500", "US", 40.7, -74.0, 0, 40),           # 同在纽约，标签往下叠一层
+    ("纳斯达克100", "US", 40.7, -74.0, 0, 80),       # 同在纽约，再往下一层
+    ("日经225", "GLOBAL", 35.7, 139.8, 18, 0),       # 东京
+    ("富时100", "GLOBAL", 51.5, -0.13, -46, 0),      # 伦敦（真实位置，不再北移到苏格兰）
+    ("德国DAX", "GLOBAL", 50.1, 8.7, 42, 16),        # 法兰克福（真实位置，不再南移到德奥交界）
+    ("印度SENSEX", "GLOBAL", 19.1, 72.9, -8, 0),     # 孟买
+    ("巴西IBOVESPA", "GLOBAL", -23.5, -46.6, 0, 0),  # 圣保罗
+    ("澳大利亚ASX200", "GLOBAL", -33.9, 151.2, 10, 0),  # 悉尼
+    ("新加坡STI", "GLOBAL", 1.3, 103.8, 0, 6),       # 新加坡
 ]
 
 # 恒生指数/上证指数/标普500/纳斯达克100这4个能查到腾讯行情接口
@@ -3204,7 +3212,7 @@ def _render_home_map():
     # 没有对应的K线/成分股数据源，硬点进去打不开一个能用的详情页，所以先只给
     # 这4个能查到code的指数加跳转，其余7个先保持不可点击。
     href_by_name: dict[str, str] = {}
-    for name, mkt, _, _ in _HOME_MAP_MARKERS:
+    for name, mkt, _, _, _, _ in _HOME_MAP_MARKERS:
         if mkt == "GLOBAL":
             continue
         code = dict(_MULTI_INDICES.get(mkt, [])).get(name)
@@ -3218,7 +3226,9 @@ def _render_home_map():
 
     markers_js = []
     marker_coords = []
-    for name, mkt, lat, lon in _HOME_MAP_MARKERS:
+    dotted = set()
+    anchor_by_name: dict[str, list[int]] = {}
+    for name, mkt, lat, lon, dx, dy in _HOME_MAP_MARKERS:
         if mkt == "GLOBAL":
             idx = global_idx.get(name)
         else:
@@ -3244,6 +3254,17 @@ def _render_home_map():
             f"</div>"
         )
         marker_coords.append([lat, lon])
+        # 真实位置上的小圆点。这是"这个指数在哪"的唯一事实来源——文字可以为了
+        # 排版左右挪，圆点不能。墨色不用涨跌红绿：它表达的是位置不是方向，
+        # 染成红绿会多出一组跟数字重复、又跟全站黑白灰调子打架的色块。
+        # 三个美股指数共用纽约一个坐标，圆点只画一次（它们确实是同一个地方）。
+        if (lat, lon) not in dotted:
+            dotted.add((lat, lon))
+            markers_js.append(
+                "L.circleMarker([%s, %s], {radius: 3, color: '#FFFFFF', weight: 1.5,"
+                " fillColor: '#17181C', fillOpacity: 1, interactive: false}).addTo(map);"
+                % (lat, lon)
+            )
         href = href_by_name.get(name)
         if href:
             # target='_top'：这个地图本身渲染在st.components.v1.html的iframe里，
@@ -3252,16 +3273,22 @@ def _render_home_map():
             label = f"<a href='{href}' target='_top' style='cursor:pointer;text-decoration:none'>{inner}</a>"
         else:
             label = inner
+        # iconAnchor 是"图标盒子里的哪个点对准这个经纬度"。x 用 34-dx（盒宽68
+        # 的一半，再按需要左右挪）；y 用 -8-dy，负值表示锚点在盒子上边缘之上，
+        # 于是整块文字挂在圆点下方 8px 处，而不是像以前那样整个压在点的上方。
+        anchor_x = 34 - dx
+        anchor_y = -8 - dy
+        anchor_by_name[name] = [anchor_x, anchor_y]
         if name in _HOME_MAP_TENCENT_CODE:
             # 存进tcMarkers，供后面的JS轮询按名字找到这个marker原地更新图标。
             markers_js.append(
-                "tcMarkers[%s] = L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [68, 38], iconAnchor: [34, 38]})}).addTo(map);"
-                % (json.dumps(name), lat, lon, json.dumps(label))
+                "tcMarkers[%s] = L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [68, 38], iconAnchor: [%s, %s]})}).addTo(map);"
+                % (json.dumps(name), lat, lon, json.dumps(label), anchor_x, anchor_y)
             )
         else:
             markers_js.append(
-                "L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [68, 38], iconAnchor: [34, 38]})}).addTo(map);"
-                % (lat, lon, json.dumps(label))
+                "L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [68, 38], iconAnchor: [%s, %s]})}).addTo(map);"
+                % (lat, lon, json.dumps(label), anchor_x, anchor_y)
             )
 
     if not markers_js:
@@ -3339,12 +3366,23 @@ def _render_home_map():
         var el = document.getElementById('home-map');
         var mapLeft = el.getBoundingClientRect().left, W = el.clientWidth;
         document.querySelectorAll('#home-map .leaflet-marker-icon').forEach(function(ic) {{
-            ic.style.marginLeft = '-34px';   // 先还原成默认居中再量，避免反复累加
+            // 每个标签的默认 margin-left 现在各不相同（Leaflet 按各自的
+            // iconAnchor.x 设，而锚点带了每个标记自己的横向偏移），不能再像
+            // 以前那样一律还原成 -34px——那会把所有标签的避让偏移抹平，
+            // 伦敦和法兰克福立刻叠回一起。第一次见到这个元素时把 Leaflet 设
+            // 的原始值记在 dataset 上，之后每次都还原到它再量。
+            // setIcon 会整个换掉 DOM 元素，新元素没有 dataset，自然会重新
+            // 从 Leaflet 的新值捕获一次，不用手动失效。
+            if (ic.dataset.baseMl === undefined) {{
+                ic.dataset.baseMl = ic.style.marginLeft || '-34px';
+            }}
+            ic.style.marginLeft = ic.dataset.baseMl;
+            var base = parseFloat(ic.dataset.baseMl) || -34;
             var b = ic.getBoundingClientRect();
             var left = b.left - mapLeft, right = b.right - mapLeft, shift = 0;
             if (left < 2) shift = 2 - left;
             else if (right > W - 2) shift = (W - 2) - right;
-            if (shift) ic.style.marginLeft = (-34 + shift) + 'px';
+            if (shift) ic.style.marginLeft = (base + shift) + 'px';
         }});
     }}
     clampLabels();
@@ -3381,6 +3419,7 @@ def _render_home_map():
 
     var codeToName = {json.dumps(code_to_name)};
     var hrefByName = {json.dumps(href_by_name)};
+    var anchorByName = {json.dumps(anchor_by_name)};
     function fmtNum(n) {{ return n.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}); }}
     function updateTcMarkers() {{
         fetch('https://qt.gtimg.cn/q={",".join(tencent_codes)}')
@@ -3416,7 +3455,13 @@ def _render_home_map():
                     var html = href
                         ? "<a href='" + href + "' target='_top' style='cursor:pointer;text-decoration:none'>" + inner + "</a>"
                         : inner;
-                    tcMarkers[name].setIcon(L.divIcon({{html: html, className: '', iconSize: [68, 38], iconAnchor: [34, 38]}}));
+                    // 锚点必须用这个标记自己的那一对，不能写死 [34,38]。
+                    // 写死的后果是：首屏渲染的锚点是对的，3秒后第一次行情
+                    // 刷新就把这四个标记（恒生/上证/标普/纳斯达克）打回旧锚点，
+                    // 标签又整个跳到坐标点上方去——页面看起来"过一会儿自己就
+                    // 歪了"，而且只歪这四个，非常难查。
+                    var anc = anchorByName[name] || [34, -8];
+                    tcMarkers[name].setIcon(L.divIcon({{html: html, className: '', iconSize: [68, 38], iconAnchor: anc}}));
                     needClamp = true;
                 }});
                 // setIcon整个重建了divIcon，Leaflet会把margin-left重置回默认的

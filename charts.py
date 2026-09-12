@@ -1144,7 +1144,21 @@ _HEAT_COLORSCALE = [
 _HEAT_TEXT_FLIP = 0.45
 
 
-def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
+# 树状图最多画多少个方块。定16不是拍脑袋：绘图区约1160×340px，一个方块要装下
+# "板块名"+"+1.90%"两行9px的字，大约需要 60×26px，占总面积 0.4%；考虑到 squarify
+# 会把一部分方块压成细长条，实际得留到 0.5% 以上才稳。
+#
+# 实测三个市场的成交额分布（2026-09-12）：
+#   前16个 —— A股最小块占1.07%、美股1.28%、港股0.86%，都在阈值之上；
+#             覆盖成交额 A股91.9% / 美股95.2% / 港股98.4%
+#   前20个 —— 港股最小块掉到0.11%，必然标不下
+# 所以16是"每个方块都还能写上字"的上限。用户反馈"有几个小框没标记"，根因就是
+# 画了30个，尾部十几个板块被挤成了没法标注的小条——而它们合计只占2~8%的成交额，
+# 对"今天钱往哪走"这个问题基本没有贡献。
+_TREEMAP_MAX_TILES = 16
+
+
+def build_sector_treemap(df: pd.DataFrame, max_tiles: int = _TREEMAP_MAX_TILES) -> go.Figure | None:
     """板块热力图：面积=成交额，颜色=涨跌幅。
 
     2026-09-12新增（升级路线图第5条"行情页做成市场全景"）。数据源
@@ -1181,6 +1195,16 @@ def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
             size_col = None
     else:
         sizes = pd.Series(1.0, index=d.index)
+
+    # 只留成交额最大的前 max_tiles 个。截断必须按面积(成交额)而不是按涨跌幅：
+    # 按涨跌幅截就变成了"涨幅榜前16"，剩下的全是红的，整张图会系统性地偏向
+    # 一边，那不是热力图是排行榜。
+    omitted = 0
+    if max_tiles and len(d) > max_tiles:
+        keep = sizes.sort_values(ascending=False).head(max_tiles).index
+        omitted = len(d) - len(keep)
+        d = d.loc[keep]
+        sizes = sizes.loc[keep]
 
     # 灰度的上限取当天涨跌幅绝对值的最大值：最能动的那个板块是最深的墨色，
     # 其余按比例排开。不写死 3%——平静的一天全部板块都在 0.5% 以内，写死
