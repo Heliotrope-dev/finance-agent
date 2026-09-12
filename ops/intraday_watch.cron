@@ -1,0 +1,23 @@
+# 盘中盯盘（intraday_watch.py）的定时任务 —— 目前【未安装】，等用户决定开启。
+#
+# 2026-09-12 查证：这个脚本在 crontab / systemd timer / OpenClaw commitments
+# 里都没有任何调度，data/intraday_watch_state.json 停在 9月9日。也就是说
+# 止损/目标价/急涨急跌/回到买点/到价提醒这几类推送目前全都不会触发。
+#
+# 安装方法（服务器上执行，crontab 顶部已有 CRON_TZ=Asia/Shanghai）：
+#   crontab -l > /tmp/ct && cat ops/intraday_watch.cron >> /tmp/ct && crontab /tmp/ct
+#
+# 时间窗按北京时间划，只覆盖真正有市场在交易的时段——用户要求"不开盘不用看"：
+#   09-16  周一至周五   A股(09:30-15:00) + 港股(09:30-16:10)
+#   21-23  周一至周五   美股开盘（21:30夏令时 / 22:30冬令时，两种都罩住）
+#   00-05  周二至周六   美股续到北京时间凌晨；周五美股盘对应周六凌晨，所以是 2-6
+#
+# 频率 10 分钟（用户指定）。脚本自己还会再查一次 sim_agent._open_markets()，
+# 窗口内但实际休市（节假日、午休）会直接返回"跳过"，不拉行情也不推送，
+# 所以上面的小时范围只是个粗粒度外包围，宁可宽一点也不要漏掉开盘。
+#
+# flock 防重入：某一轮卡住时不会越堆越多进程——这台机器只有 1.9G 内存，
+# 2026-09-11 刚因为内存打满触发过一次 OOM。timeout 3m 是第二道保险。
+*/10 9-16 * * 1-5 cd /root/finance-agent && flock -n /tmp/finance-agent-intraday.lock timeout 3m venv/bin/python3 intraday_watch.py >> /var/log/finance-agent-intraday.log 2>&1
+*/10 21-23 * * 1-5 cd /root/finance-agent && flock -n /tmp/finance-agent-intraday.lock timeout 3m venv/bin/python3 intraday_watch.py >> /var/log/finance-agent-intraday.log 2>&1
+*/10 0-5 * * 2-6 cd /root/finance-agent && flock -n /tmp/finance-agent-intraday.lock timeout 3m venv/bin/python3 intraday_watch.py >> /var/log/finance-agent-intraday.log 2>&1
