@@ -7807,8 +7807,23 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                 else:
                     _age_text = f"（{_age_days}天前）"
                 _label = f"AI：{adv_action}{_age_text}"
-                if _age_days is not None and _age_days >= 3:
+                _stale_adv = _age_days is not None and _age_days >= 3
+                if _stale_adv:
                     _label += " · 已过期"
+                if compact:
+                    # 紧凑档不给折叠框，只留一行贴着主行的小字。
+                    # 折叠框自带的 summary 行 + 上下 padding 是 32px，52 行就是
+                    # 1600px——实测带 AI 判断的行是 81px、不带的是 49px，整份列表
+                    # 的高度几乎全花在这一个元素上。判断本身（"观望"、几天前）
+                    # 是扫列表时有用的，展开后的理由不是：真要读理由的人会点进
+                    # 详情页，那里有完整版本。所以紧凑档保留结论、去掉展开。
+                    st.markdown(
+                        f"<div style='font-size:var(--fs-xs);margin:-8px 0 2px 2px;"
+                        f"color:{'var(--fa-muted)' if _stale_adv else adv_color};"
+                        f"{'opacity:.75' if _stale_adv else ''}'>{_esc(_label)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    continue
                 with st.expander(_label):
                     st.markdown(
                         f"<span style='background:{adv_color};color:#fff;border-radius:2px;padding:1px 8px;"
