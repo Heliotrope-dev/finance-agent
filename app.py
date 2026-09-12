@@ -873,6 +873,107 @@ def _quote_market_status(spot: dict, market: str) -> str:
     return f"已收盘 · {place} {stamp:%m-%d %H:%M}"
 
 
+_MARKET_TZ = {"A": "Asia/Shanghai", "HK": "Asia/Hong_Kong", "US": "America/New_York"}
+# 每个市场的连续交易时段（交易所本地时间）。港股和沪深有午休，所以是两段。
+_MARKET_SESSIONS = {
+    "A": [("09:30", "11:30"), ("13:00", "15:00")],
+    "HK": [("09:30", "12:00"), ("13:00", "16:00")],
+    "US": [("09:30", "16:00")],
+}
+
+
+def _market_session(market: str, now: datetime | None = None) -> dict:
+    """这个市场此刻是什么状态：交易中 / 午休 / 盘前 / 已收盘 / 周末休市。
+
+    2026-09-13 抽出来。同一套时段判断此前散在 _quote_market_status（详情页
+    报价状态）和 intraday_watch.py（盯盘要不要跳过）里各写了一份，现在首页
+    那条"数据时刻"栏是第三个用它的地方——再抄一遍就是第三份会各自漂移的
+    副本。
+
+    只判断周末和时段，不判断节假日：节假日清单要调富途接口（见
+    get_market_holidays），放在每次页面渲染的路径上不合适，而首页已经另有
+    一个节假日公告弹窗在做这件事。所以这里返回的"已收盘"在节假日当天是对的
+    （确实收盘了），只是不会说出"因为是国庆"。宁可少说一句，不要说错。
+    """
+    tz = ZoneInfo(_MARKET_TZ.get(market, "Asia/Shanghai"))
+    now = (now or datetime.now(timezone.utc)).astimezone(tz)
+    t = now.time()
+    if now.weekday() >= 5:
+        return {"state": "周末休市", "open": False, "local": now}
+    for i, (a, b) in enumerate(_MARKET_SESSIONS.get(market, [])):
+        _a = datetime.strptime(a, "%H:%M").time()
+        _b = datetime.strptime(b, "%H:%M").time()
+        if _a <= t < _b:
+            return {"state": "交易中", "open": True, "local": now}
+        # 落在两段之间就是午休。只有港股/沪深有这一段。
+        if i == 0 and len(_MARKET_SESSIONS[market]) > 1 and _b <= t < datetime.strptime(
+                _MARKET_SESSIONS[market][1][0], "%H:%M").time():
+            return {"state": "午间休市", "open": False, "local": now}
+    _first_open = datetime.strptime(_MARKET_SESSIONS.get(market, [("09:30", "16:00")])[0][0], "%H:%M").time()
+    if t < _first_open:
+        return {"state": "盘前", "open": False, "local": now}
+    return {"state": "已收盘", "open": False, "local": now}
+
+
+def _next_open_local(market: str) -> datetime | None:
+    """下一次开盘是交易所本地时间的什么时候。同样不看节假日，往后找到第一个
+    工作日的开盘点为止——节假日会让这个时间偏早，但"下次更新"给早了比给晚了
+    安全：用户按它回来看，最坏是发现还没开，不会错过。"""
+    sessions = _MARKET_SESSIONS.get(market)
+    if not sessions:
+        return None
+    tz = ZoneInfo(_MARKET_TZ.get(market, "Asia/Shanghai"))
+    now = datetime.now(tz)
+    _open_t = datetime.strptime(sessions[0][0], "%H:%M").time()
+    cand = now.replace(hour=_open_t.hour, minute=_open_t.minute, second=0, microsecond=0)
+    if cand <= now:
+        cand += timedelta(days=1)
+    for _ in range(8):
+        if cand.weekday() < 5:
+            return cand
+        cand += timedelta(days=1)
+    return None
+
+
+@st.fragment
+def _render_market_clock():
+    """顶部导航下面那条"数据时刻"栏（2026-09-13）。
+
+    为什么值得单独做：全站大量文案写着"今日/今天"（今日可执行清单、今日异动、
+    今日重磅消息），但周六打开时这些数据全是周五的，而页面上没有任何一处
+    说明当前是什么时点——顶部宏观条一个时间戳都没有，观感像是坏了。
+    个股详情页早就做对了这件事（"Futu 报价 · 已收盘 · 香港 09-11 16:07"），
+    这里是把那个模式抄到全站。
+
+    刻意只有一行、12px、次要色：它是背景信息，不是内容。做成 fragment 是因为
+    它每分钟要重算一次状态，而整页其余部分没理由跟着重跑。
+    """
+    _bits = []
+    for _mkt, _label in (("HK", "港股"), ("A", "沪深"), ("US", "美股")):
+        _s = _market_session(_mkt)
+        _t = _s["local"]
+        if _s["open"]:
+            _bits.append(f"{_label} 交易中 {_t:%H:%M}")
+        else:
+            _bits.append(f"{_label} {_s['state']}")
+    _all_closed = not any(_market_session(m)["open"] for m in ("HK", "A", "US"))
+    if _all_closed:
+        # 下一次开盘取三个市场里最早的那个，并标出是哪个市场——只写一个时间
+        # 而不说是谁的，读者没法判断它跟自己关心的市场有没有关系。
+        _nexts = [(m, _next_open_local(m)) for m in ("HK", "A", "US")]
+        _nexts = [(m, d) for m, d in _nexts if d]
+        if _nexts:
+            _m, _d = min(_nexts, key=lambda x: x[1].astimezone(timezone.utc))
+            _name = {"HK": "港股", "A": "沪深", "US": "美股"}[_m]
+            _bits.append(f"下次开盘 {_name} {_d:%m-%d %H:%M}")
+    st.markdown(
+        "<div style='font-size:var(--fs-xs);color:var(--fa-muted);"
+        "padding:8px 2px 0;letter-spacing:.01em'>"
+        + _esc(" · ".join(_bits)) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _fmt_price(value, default: str = "—") -> str:
     """价格按量级决定小数位，并统一加千分位（2026-09-11前端审计）。
 
@@ -3394,7 +3495,12 @@ def _render_advice_section():
     结果，首页访问不现场重新跑——重新跑一次要几分钟、几十次AI调用，公开页面
     每次访问都触发一遍完全不现实，也没必要（这类基本面判断一天一次足够新）。
     """
-    st.markdown("**今日可执行清单**")
+    # 标题跟着市场状态走。三个市场全收盘时叫"今日可执行清单"是错的——那份
+    # 清单对"今日"已经没有可执行性了，它只能是下一个交易日的待办。
+    # 休市是一个独立的状态，不是"数据还没来"：周六打开看到"今天还没有生成
+    # 盘前计划"，读起来像系统出了问题，其实是根本不该生成。
+    _all_closed = not any(_market_session(_m)["open"] for _m in ("HK", "A", "US"))
+    st.markdown("**下个交易日待办**" if _all_closed else "**今日可执行清单**")
     st.caption("通过买入区间、股数、止损、目标和盈亏比全部校验的标的排在最前；没过闸门的也列出来，并写明差在哪。")
 
     def _plan_row(item: dict, *, ready: bool) -> str:
@@ -3448,7 +3554,14 @@ def _render_advice_section():
     _order_ready = [item for _market in ("HK", "US") for item in _load_order_ready_items(_market)]
     _watch_only = [item for _market in ("HK", "US") for item in _load_watch_only_items(_market)]
     if not _order_ready and not _watch_only:
-        st.caption("今天还没有生成盘前计划（港股09:00前、美股21:00前各跑一次）。")
+        if _all_closed:
+            _nx = _next_open_local("HK")
+            st.caption(
+                "三个市场都已收盘，本轮没有待执行的清单。"
+                + (f"下一份盘前计划在 {_nx:%m-%d} 开盘前生成。" if _nx else "")
+            )
+        else:
+            st.caption("今天还没有生成盘前计划（港股09:00前、美股21:00前各跑一次）。")
     else:
         if _order_ready:
             for item in _order_ready:
@@ -8450,6 +8563,10 @@ else:
                 "分区", ["首页", "行情", "持仓", "自选", "AI模拟炒股", "我的"],
                 key="_active_section", horizontal=True, label_visibility="collapsed",
             )
+            # 导航底下那条"数据时刻"栏，放在吸顶容器内部，滚下去也一直在。
+            # 全站大量文案写着"今日/今天"，但周六打开时数据全是周五的，页面上
+            # 却没有任何一处说明当前是什么时点——这条就是回答这个问题的。
+            _render_market_clock()
 
         # 切分区时给一个加载提示（2026-09-05用户要求"一个界面到另一个界面
         # 实在反应不过来可以用加载中的界面辅助一下"）。只在分区真的变了那一次
