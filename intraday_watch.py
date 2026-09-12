@@ -132,8 +132,20 @@ def check() -> dict:
             seen.add((sym, mkt))
             watch.append((sym, mkt, False))
 
+    # 用户自己设的到价提醒（升级路线图第2条）。这些标的不一定在持仓或清单里
+    # ——用户完全可能对一支既没持有也没进清单的票设"跌到多少告诉我"，所以要
+    # 单独并进盯盘列表，否则设了提醒却永远不会被检查。
+    # 按 (symbol, market) 分组，同一支票可以挂多条不同价位的提醒。
+    alerts_by_key: dict[tuple[str, str], list[dict]] = {}
+    for a in tracker.get_all_active_price_alerts():
+        k = (str(a["symbol"]), a["market"])
+        alerts_by_key.setdefault(k, []).append(a)
+        if k not in seen:
+            seen.add(k)
+            watch.append((k[0], k[1], False))
+
     if not watch:
-        return {"状态": "跳过", "说明": "没有持仓、清单候选，也没有自选"}
+        return {"状态": "跳过", "说明": "没有持仓、清单候选、自选，也没有到价提醒"}
 
     # 只盯正在交易的市场。港股收盘后还在拉美股行情没有意义，反过来也一样。
     import sim_agent
@@ -147,6 +159,7 @@ def check() -> dict:
         return {"状态": "跳过", "说明": "行情取不到"}
 
     alerts = []
+    triggered_user_alerts: list[tuple[int, float]] = []
     for sym, mkt, is_held in watch:
         q = quotes.get((sym, mkt)) or {}
         last = q.get("最新价")
@@ -169,6 +182,28 @@ def check() -> dict:
             """
             k = f"{key}:{kind}"
             return not fired.get(k)
+
+        # 用户自己设的到价提醒优先于系统那几类：这是他亲手画的线，明确说过
+        # "到了告诉我"，比系统推算出来的急涨急跌更该先说。而且它不参与下面
+        # 那串 if/elif 的互斥——系统的几类是"同一支票今天只说一件最要紧的
+        # 事"，用户的线是逐条独立的承诺，两条都到了就该两条都报。
+        for a in alerts_by_key.get((sym, mkt), []):
+            tgt = float(a["target"])
+            hit = (last >= tgt) if a["direction"] == "above" else (last <= tgt)
+            if not hit:
+                continue
+            # 这里不走 once()/fired 那套当日去重：到价提醒是一次性的，触发后
+            # 直接在库里停用（见 tracker 建表处的注释）。用 id 做 event_key，
+            # 同一支票挂多条不同价位的提醒互不干扰。
+            word = "涨到" if a["direction"] == "above" else "跌到"
+            nm = a.get("name") or sym
+            alerts.append((
+                "到价",
+                f"{nm}（{sym}）{word}了你设的 {tgt:g}，现价 {last}（当日{day_pct:+.1f}%）。"
+                + (f"备注：{a['note']}" if a.get("note") else ""),
+                f"用户提醒:{a['id']}",
+            ))
+            triggered_user_alerts.append((int(a["id"]), float(last)))
 
         if is_held:
             if stop and last <= stop and once("止损"):
@@ -196,7 +231,8 @@ def check() -> dict:
     if not alerts:
         return {"状态": "静默", "盯盘": len(watch), "重试": retried, "说明": "没有触发任何条件"}
 
-    order = {"紧急": 0, "止盈": 1, "预警": 2, "异动": 3, "机会": 4}
+    # "到价"排在最前：用户亲手设的线到了，比系统推算的任何一类都更该先看到。
+    order = {"到价": 0, "紧急": 1, "止盈": 2, "预警": 3, "异动": 4, "机会": 5}
     alerts.sort(key=lambda x: order.get(x[0], 9))
     now = dt.datetime.now(dt.timezone.utc).astimezone().strftime("%H:%M")
     for tag, body, event_key in alerts:
@@ -211,6 +247,14 @@ def check() -> dict:
             fired[event_key] = dt.datetime.now().strftime("%H:%M")
     st["fired"] = fired
     _save_state(st)
+
+    # 到价提醒的销账也必须等微信真的收下之后。跟 trade_alerts.py 里那条
+    # "销账必须发生在推送成功之后"是同一个道理：先停用再发送的话，一次网关
+    # 抖动就让这条提醒永久消失，而用户还以为它在生效。反过来"发出去了但没
+    # 停用"只会下一轮重推一次，可以接受。
+    for alert_id, hit_price in triggered_user_alerts:
+        if alert_queue.status(f"用户提醒:{alert_id}") == "delivered":
+            tracker.mark_price_alert_triggered(alert_id, hit_price)
     print(f"盘中提醒：新增{len(alerts)}条，送达{delivery['delivered']}条，失败{delivery['failed']}条")
     return {"状态": "已推送" if delivery["failed"] == 0 else "待重试", "条数": len(alerts),
             "送达": delivery["delivered"], "重试": retried}

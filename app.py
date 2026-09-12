@@ -93,6 +93,7 @@ from tracker import (
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
     get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
     get_equity_snapshots, get_period_pnl,
+    add_price_alert, get_price_alerts, delete_price_alert, set_price_alert_enabled,
 )
 import sim_trader
 import sim_agent
@@ -4573,6 +4574,12 @@ def _render_my_page():
         st.divider()
         _render_risk_profile_input(email)
 
+        # ── 到价提醒 ────────────────────────────────────────────────────
+        # 详情页那个popover只看得到当前这支票的提醒，设完就散在各个页面里。
+        # 这里给一个总览：全部提醒一页看完、能删能重新启用。
+        st.divider()
+        _render_price_alerts_manager(email)
+
         # ── 最近搜索 ────────────────────────────────────────────────────
         try:
             _searches = get_search_history(email, limit=8)
@@ -5692,6 +5699,94 @@ def _render_chips_section(symbol: str, market: str):
                 )
 
 
+def _alert_line(a: dict, cur_price: float | None = None) -> str:
+    """一条到价提醒的文字描述，列表和详情页共用。"""
+    word = "涨到" if a["direction"] == "above" else "跌到"
+    txt = f"{word} {a['target']:g}"
+    if a.get("triggered_at"):
+        _t = _to_cn_dt(a["triggered_at"])
+        txt += f" · 已于 {_t.strftime('%m-%d %H:%M') if _t else a['triggered_at'][:10]} 触发"
+        if a.get("triggered_price"):
+            txt += f"（{a['triggered_price']:g}）"
+    elif cur_price:
+        gap = (a["target"] - cur_price) / cur_price * 100
+        txt += f" · 距现价 {gap:+.1f}%"
+    return txt
+
+
+def _render_price_alert_control(symbol: str, market: str, name: str, spot: dict | None):
+    """详情页的"设到价提醒"（升级路线图第2条）。
+
+    价格到了由 intraday_watch.py 在盘中盯盘时推微信——那个脚本本来就每隔几
+    分钟跑一次、已经接好了微信通道和重试队列，这里只往它的盯盘清单里加一条
+    用户自己画的线，不另起一套推送。
+
+    一次性语义：触发一次就停用，不是每天重推（理由见 tracker 建表处）。
+    """
+    if not st.session_state.get("logged_in"):
+        return
+    email = st.session_state["user_email"]
+    cur = (spot or {}).get("最新价")
+
+    try:
+        mine = [a for a in get_price_alerts(email) if str(a["symbol"]) == str(symbol)]
+    except Exception:
+        return
+    active = [a for a in mine if a["enabled"]]
+
+    label = f"到价提醒（{len(active)}）" if active else "设到价提醒"
+    with st.popover(label, use_container_width=False):
+        st.markdown("**价格到了微信通知我**")
+        # 默认值给现价，用户通常是在现价附近上下改几个点，从0开始输很烦。
+        default_val = float(cur) if cur else 0.0
+        c1, c2 = st.columns([1, 1.2])
+        with c1:
+            direction_label = st.radio(
+                "方向", ["涨到", "跌到"], horizontal=True,
+                key=f"_alert_dir_{symbol}", label_visibility="collapsed",
+            )
+        with c2:
+            target = st.number_input(
+                "目标价", min_value=0.0, value=default_val, step=0.01, format="%.2f",
+                key=f"_alert_val_{symbol}", label_visibility="collapsed",
+            )
+        note = st.text_input("备注（可选）", key=f"_alert_note_{symbol}",
+                             placeholder="到了想做什么，比如：减半仓")
+        if st.button("保存提醒", key=f"_alert_save_{symbol}", use_container_width=True):
+            if not target or target <= 0:
+                st.warning("填一个大于0的价格。")
+            else:
+                ok = add_price_alert(
+                    email, symbol, name, market,
+                    "above" if direction_label == "涨到" else "below",
+                    float(target), note or "",
+                )
+                if ok:
+                    st.success(f"已设置：{direction_label} {target:g} 通知你。")
+                    st.rerun()
+                else:
+                    st.warning("保存失败，检查一下价格。")
+
+        if mine:
+            st.divider()
+            for a in mine:
+                cols = st.columns([4, 1])
+                with cols[0]:
+                    tone = "var(--fa-text-2)" if a["enabled"] else "var(--fa-faint)"
+                    st.markdown(
+                        f"<div style='font-size:0.8rem;color:{tone};padding:4px 0'>"
+                        f"{_esc(_alert_line(a, cur))}"
+                        + (f"<br><span style='font-size:0.72rem;color:var(--fa-faint)'>"
+                           f"{_esc(a['note'])}</span>" if a.get("note") else "")
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
+                with cols[1]:
+                    if st.button("删除", key=f"_alert_del_{a['id']}", type="tertiary"):
+                        delete_price_alert(email, a["id"])
+                        st.rerun()
+
+
 def _render_stock_detail(symbol: str, market: str, name: str):
     # 之前这里还挂着 _inject_auto_refresh(30,...) 强制整页每30秒rerun一次——
     # 是_render_price_header改成@st.fragment(run_every=3)独立刷新之前的老
@@ -5751,6 +5846,13 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     hist, spot = core["hist"], core["spot"]
 
     _render_price_header(symbol, market)
+
+    # 到价提醒放在价格区块之外，不能放进去。_render_price_header 是
+    # @st.fragment(run_every=3)，每3秒自动重跑一次——弹窗里的输入框会在用户
+    # 还没输完的时候被重置，而且这个文件里已经踩过一次同类的坑（见
+    # _render_position_rows 里 pos_del_ 按钮那段：fragment 的定时刷新会让
+    # 弹窗绑定的 fragment 失效，点确认没反应）。这里是稳定作用域。
+    _render_price_alert_control(symbol, market, name, spot)
 
     st.divider()
     period_labels = ["分时K（今日）", "日K", "周K", "月K"]
@@ -6159,6 +6261,60 @@ def _render_max_capital_input(email: str):
     if st.button("保存", key=f"_max_capital_save_{email}", use_container_width=True):
         set_max_capital(email, new_value if new_value > 0 else None)
         st.success("已保存。")
+
+
+def _render_price_alerts_manager(email: str):
+    """「我的」页的到价提醒总览（升级路线图第2条）。
+
+    详情页那个 popover 只看得见当前这支票的提醒，设完就散在各个页面里，
+    过两天想不起来自己设过什么。这里一页看完全部，能删、能把已触发的重新
+    启用。
+    """
+    st.markdown("**到价提醒**")
+    try:
+        alerts = get_price_alerts(email)
+    except Exception:
+        st.caption("提醒列表暂时读不出来。")
+        return
+    if not alerts:
+        st.caption("还没有设置到价提醒。在任意个股详情页点「设到价提醒」可以添加，"
+                   "价格到了会在盘中推微信给你。")
+        return
+
+    active = [a for a in alerts if a["enabled"]]
+    st.caption(
+        f"生效中 {len(active)} 条，已触发 {len(alerts) - len(active)} 条。"
+        "只在对应市场开盘时检查；触发一次后自动停用，不会每天重复推送。"
+    )
+    _mk = {"A": "A股", "HK": "港股", "US": "美股"}
+    for a in alerts:
+        c1, c2, c3 = st.columns([3.2, 1, 1])
+        with c1:
+            tone = "var(--fa-text)" if a["enabled"] else "var(--fa-faint)"
+            st.markdown(
+                f"<div style='padding:6px 0'>"
+                f"<span style='color:{tone};font-weight:600;font-size:0.88rem'>{_esc(a['name'] or a['symbol'])}</span>"
+                f"<span style='color:var(--fa-faint);font-size:0.74rem'>　{_esc(a['symbol'])} · "
+                f"{_esc(_mk.get(a['market'], a['market']))}</span>"
+                f"<div style='font-size:0.78rem;color:var(--fa-text-2)'>{_esc(_alert_line(a))}</div>"
+                + (f"<div style='font-size:0.72rem;color:var(--fa-faint)'>{_esc(a['note'])}</div>"
+                   if a.get("note") else "")
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+        with c2:
+            if a["enabled"]:
+                if st.button("停用", key=f"_al_off_{a['id']}", type="tertiary"):
+                    set_price_alert_enabled(email, a["id"], False)
+                    st.rerun()
+            else:
+                if st.button("重新启用", key=f"_al_on_{a['id']}", type="tertiary"):
+                    set_price_alert_enabled(email, a["id"], True)
+                    st.rerun()
+        with c3:
+            if st.button("删除", key=f"_al_rm_{a['id']}", type="tertiary"):
+                delete_price_alert(email, a["id"])
+                st.rerun()
 
 
 def _render_risk_profile_input(email: str):

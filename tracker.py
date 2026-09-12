@@ -217,6 +217,39 @@ def init_db():
             """
         )
 
+        # price_alerts：用户自己设的到价提醒（升级路线图第2条）。
+        #
+        # 跟 intraday_watch.py 里已有的那几类提醒是两回事，所以单独建表：那些
+        # 是系统按早上清单算出来的线（止损/目标/急涨跌），用户没法改；这张表
+        # 是用户自己画的线，"跌到380告诉我"。两者的生命周期也不同——系统的线
+        # 每天跟着清单重算，用户的线一直有效直到他自己删。
+        #
+        # 触发后是一次性的（triggered_at 落库 + enabled 置0），不是每天重推。
+        # 路线图给的方案是用 last_fired 做当日去重，但那样"跌破380"这条会在
+        # 价格留在380以下的每一天都推一次。intraday_watch 的设计原则写得很
+        # 清楚："每三分钟推一条'还没到止损'是灾难——用户会关掉通知，然后真
+        # 出事的那条也被埋掉"。同一个道理，到价提醒也该是一次性的，跟券商
+        # App 的到价提醒行为一致。触发后在界面上标成"已触发"，用户可以一键
+        # 重新启用。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS price_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                market TEXT NOT NULL DEFAULT 'A',
+                direction TEXT NOT NULL,
+                target REAL NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                triggered_at TEXT NOT NULL DEFAULT '',
+                triggered_price REAL
+            )
+            """
+        )
+
         # portfolio_advice：跟advice表字段语义不同(没有symbol/market/technical_
         # signal，多了total_value_cny/holdings_json)，独立建表——参考advice表
         # 自己的注释，字段语义不同就不硬塞进同一张表。
@@ -2308,3 +2341,103 @@ def get_search_history(email: str, limit: int = 10) -> list[dict]:
             (email, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ── 到价提醒（升级路线图第2条） ──────────────────────────────────────────
+# 读写都很轻（一个用户撑死几十条），不做缓存也不做批量接口，保持直白。
+
+_ALERT_DIRECTIONS = ("above", "below")
+
+
+def add_price_alert(email: str, symbol: str, name: str, market: str,
+                    direction: str, target: float, note: str = "") -> int | None:
+    """新增一条到价提醒。direction: "above"(涨到) / "below"(跌到)。
+
+    返回新记录的id；参数不合法返回None。刻意不去重——同一支票设两条不同价位
+    的提醒是完全合理的用法（比如"涨到450减半仓、跌到380补仓"），把它当成重复
+    拦下来反而挡了正常需求。
+    """
+    if direction not in _ALERT_DIRECTIONS:
+        return None
+    try:
+        target = float(target)
+    except (TypeError, ValueError):
+        return None
+    if target <= 0:
+        return None
+    init_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with closing(_conn()) as c:
+        cur = c.execute(
+            "INSERT INTO price_alerts (email, symbol, name, market, direction, target, note, enabled, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+            (email, symbol, name or symbol, market, direction, target, note or "", now),
+        )
+        c.commit()
+        return cur.lastrowid
+
+
+def get_price_alerts(email: str, only_enabled: bool = False) -> list[dict]:
+    """某个用户的到价提醒。默认连已触发的一起返回，界面上要显示历史。"""
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        sql = "SELECT * FROM price_alerts WHERE email = ?"
+        if only_enabled:
+            sql += " AND enabled = 1"
+        sql += " ORDER BY enabled DESC, created_at DESC"
+        return [dict(r) for r in c.execute(sql, (email,)).fetchall()]
+
+
+def get_all_active_price_alerts() -> list[dict]:
+    """全部用户的未触发提醒，给 intraday_watch.py 的盯盘循环用。
+
+    不按用户过滤：盯盘脚本是单进程跑全站的，按用户查会变成 N 次查询，而这张
+    表本来就小，一次全捞出来再分组更省事。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM price_alerts WHERE enabled = 1"
+        ).fetchall()]
+
+
+def mark_price_alert_triggered(alert_id: int, price: float) -> None:
+    """标记一条提醒已触发：落触发时间和触发价，并停用它。
+
+    一次性语义（见建表处的注释）：停用而不是留着每天重推。
+    """
+    init_db()
+    now = datetime.now(timezone.utc).isoformat()
+    with closing(_conn()) as c:
+        c.execute(
+            "UPDATE price_alerts SET enabled = 0, triggered_at = ?, triggered_price = ? WHERE id = ?",
+            (now, float(price), int(alert_id)),
+        )
+        c.commit()
+
+
+def set_price_alert_enabled(email: str, alert_id: int, enabled: bool) -> None:
+    """启用/停用一条提醒。重新启用时清掉上次的触发记录——否则界面上会同时
+    显示"生效中"和"已于X触发"，自相矛盾。
+
+    带上 email 条件是防越权：alert_id 是自增的，猜得到别人的。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        if enabled:
+            c.execute(
+                "UPDATE price_alerts SET enabled = 1, triggered_at = '', triggered_price = NULL "
+                "WHERE id = ? AND email = ?", (int(alert_id), email))
+        else:
+            c.execute("UPDATE price_alerts SET enabled = 0 WHERE id = ? AND email = ?",
+                      (int(alert_id), email))
+        c.commit()
+
+
+def delete_price_alert(email: str, alert_id: int) -> None:
+    init_db()
+    with closing(_conn()) as c:
+        c.execute("DELETE FROM price_alerts WHERE id = ? AND email = ?", (int(alert_id), email))
+        c.commit()
