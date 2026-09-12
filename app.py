@@ -5153,6 +5153,55 @@ def _render_a_ipo_briefs():
         )
 
 
+def _render_us_ipo_briefs():
+    """美股新股上市日程（2026-09-13 用户要求，三个市场对齐）。
+
+    跟港股/A股那两块都不一样，因为美股的两件事本质不同：
+
+    1. **没有散户打新**。美股 IPO 的配售由承销商分配给机构和特定客户，散户
+       基本只能等上市后在二级市场买。所以这块不叫"认购"叫"上市日程"，也不
+       提中签率/申购上限那套——写了等于误导用户去找一个不存在的入口。
+    2. **接口只给日期和定价区间**，没有发行PE/行业PE（A股有）也没有招股要素
+       （港股有 ipo_brief 挖）。所以就老老实实呈现这两样。
+
+    富途一次返回上百条（实测102条），其中很多是没有确定上市日的。只列出已经
+    定了日期、且还没上市的，按日期升序——没定日期的堆在页面上没有行动价值。
+    """
+    try:
+        ipos = get_ipo_calendar("US", limit=60)
+    except Exception:
+        return
+    _today = cn_now().strftime("%Y-%m-%d")
+    upcoming = [ip for ip in ipos if (ip.get("list_date") or "") >= _today]
+    if not upcoming:
+        return
+    upcoming = upcoming[:8]
+
+    st.markdown("**美股新股上市日程**")
+    st.caption("美股 IPO 由承销商配售给机构，散户没有打新入口——这里只作上市日程"
+               "和定价区间参考，上市后才能在二级市场买。")
+    for ip in upcoming:
+        _lo, _hi = ip.get("price_min"), ip.get("price_max")
+        if _lo and _hi:
+            _pr = f"{_lo:,.2f}" if _lo == _hi else f"{_lo:,.2f} - {_hi:,.2f}"
+        elif ip.get("ipo_price"):
+            _pr = f"{ip['ipo_price']:,.2f}"
+        else:
+            _pr = "定价待定"
+        st.markdown(
+            f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
+            f"border-bottom:1px solid var(--fa-border)'>"
+            f"<span style='color:var(--fa-faint);font-size:0.78rem;min-width:78px'>"
+            f"{_esc(ip.get('list_date') or '待定')}</span>"
+            f"<span style='flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;"
+            f"white-space:nowrap;color:var(--fa-text);font-size:0.86rem'>{_esc(ip['name'])}"
+            f"<span style='color:var(--fa-faint);font-size:0.76rem'> {_esc(ip['symbol'])}</span></span>"
+            f"<span style='color:var(--fa-text-2);font-size:0.8rem;min-width:118px;"
+            f"text-align:right'>招股价 {_esc(_pr)}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+
 def _render_ipo_briefs():
     """港股新股认购专区。
 
@@ -5752,9 +5801,11 @@ def _render_home_page():
     _render_macro_briefs()
     _render_event_calendar()
     _render_ipo_briefs()
-    # A股新股紧跟港股那块。两块的形态不一样是数据决定的：港股有招股要素和
-    # AI简报，A股有发行PE/行业PE——各自用手上真有的东西，不互相硬凑。
+    # 三个市场的新股依次排开。三块形态都不一样，是数据和市场规则共同决定的，
+    # 不是没做统一：港股有招股要素+AI简报、A股有发行PE/行业PE、美股只有日期和
+    # 定价区间且根本没有散户打新。各自用手上真有的东西，不互相硬凑。
     _render_a_ipo_briefs()
+    _render_us_ipo_briefs()
 
     st.divider()
     st.markdown("**今日重磅消息**")
