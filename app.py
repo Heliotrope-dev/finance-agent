@@ -968,7 +968,7 @@ def _render_market_clock():
             _bits.append(f"下次开盘 {_name} {_d:%m-%d %H:%M}")
     st.markdown(
         "<div style='font-size:var(--fs-xs);color:var(--fa-muted);"
-        "padding:8px 2px 0;letter-spacing:.01em'>"
+        "padding:2px 2px 10px;letter-spacing:.01em'>"
         + _esc(" · ".join(_bits)) + "</div>",
         unsafe_allow_html=True,
     )
@@ -8563,10 +8563,16 @@ else:
                 "分区", ["首页", "行情", "持仓", "自选", "AI模拟炒股", "我的"],
                 key="_active_section", horizontal=True, label_visibility="collapsed",
             )
-            # 导航底下那条"数据时刻"栏，放在吸顶容器内部，滚下去也一直在。
-            # 全站大量文案写着"今日/今天"，但周六打开时数据全是周五的，页面上
-            # 却没有任何一处说明当前是什么时点——这条就是回答这个问题的。
-            _render_market_clock()
+
+        # "数据时刻"栏。全站大量文案写着"今日/今天"，但周六打开时数据全是周五的，
+        # 页面上却没有任何一处说明当前是什么时点——这条就是回答这个问题的。
+        #
+        # 放在吸顶容器**外面**：第一版塞在里面想让它跟着导航一起钉住，实测
+        # .st-key-fa_nav 量出来只有 69px 高、而里面的内容到了 194px，这一条
+        # 直接溢出容器 16px，压在下面宏观条的第一行文字上。没去跟 Streamlit 的
+        # sticky 布局较劲——这条是打开页面时用来校准"现在几点、开没开盘"的
+        # 背景信息，看一眼就够，不需要一路跟着滚。
+        _render_market_clock()
 
         # 切分区时给一个加载提示（2026-09-05用户要求"一个界面到另一个界面
         # 实在反应不过来可以用加载中的界面辅助一下"）。只在分区真的变了那一次
