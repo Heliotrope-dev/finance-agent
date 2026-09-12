@@ -1407,3 +1407,60 @@ def build_sim_vs_benchmark(points: list[dict], bench: pd.DataFrame,
     _apply_chart_theme(fig, height=300, legend=True, hovermode="x unified")
     fig.update_yaxes(ticksuffix="")
     return fig
+
+
+def build_ipo_open_vs_close(items: list[dict]) -> go.Figure | None:
+    """新股首日：开盘涨幅 vs 收盘涨幅（升级路线图第8条）。
+
+    路线图原本要的是"超购倍数 vs 首日表现"的散点图，但超购倍数这个数据拿不到
+    ——富途的接口没有，akshare 的 stock_ipo_hk_ths 实测返回的是A股数据而且字段
+    是抓取的页面文本，港交所披露易要逐份文件解析。所以换了一个用现有数据就能
+    回答、而且对打新同样实际的问题：**开盘就卖，还是持到收盘？**
+
+    每个点是一只新股：横轴是它首日开盘相对招股价的涨幅，纵轴是收盘相对招股价
+    的涨幅。对角线 y=x 是"开盘价即收盘价"：
+      - 点落在对角线上方 = 开盘之后还在涨，持到收盘更好
+      - 点落在对角线下方 = 高开回落，开盘就该走
+    横轴/纵轴的0线把象限分开，左下象限是开盘和收盘都破发的。
+
+    这张图不需要超购倍数、不需要暗盘数据，只用已经在库里的 open_pct 和
+    first_day_pct 两列。
+    """
+    pts = [(float(i["open_pct"]), float(i["first_day_pct"]), str(i.get("name") or ""))
+           for i in (items or [])
+           if i.get("open_pct") is not None and i.get("first_day_pct") is not None]
+    if len(pts) < 5:
+        return None
+
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    names = [p[2] for p in pts]
+    lo = min(min(xs), min(ys))
+    hi = max(max(xs), max(ys))
+    pad = max((hi - lo) * 0.08, 3.0)
+    lo, hi = lo - pad, hi + pad
+
+    fig = go.Figure()
+    # 先画参考线，让它们落在点的下面
+    fig.add_trace(go.Scatter(
+        x=[lo, hi], y=[lo, hi], mode="lines", name="开盘价=收盘价",
+        line=dict(width=1, color=_AUX_SOFT, dash="dot"), hoverinfo="skip",
+    ))
+    fig.add_hline(y=0, line=dict(width=1, color=_CHART_GRID), layer="below")
+    fig.add_vline(x=0, line=dict(width=1, color=_CHART_GRID), layer="below")
+
+    # 收盘赚钱的用涨色、亏的用跌色。这里用红绿是合适的：每个点就是一只票的
+    # 涨跌，跟全站"红涨绿跌"是同一个语义，而且散点不是大色块，不会像热力图
+    # 那样铺满整屏。
+    colors = [UP_COLOR if y >= 0 else DOWN_COLOR for y in ys]
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys, mode="markers", name="新股",
+        marker=dict(size=7, color=colors, opacity=0.75,
+                    line=dict(width=0.5, color="#FFFFFF")),
+        customdata=names,
+        hovertemplate="%{customdata}<br>开盘 %{x:+.1f}%<br>收盘 %{y:+.1f}%<extra></extra>",
+    ))
+    _apply_chart_theme(fig, height=340, legend=False, grid="xy")
+    fig.update_xaxes(title_text="首日开盘涨幅", ticksuffix="%", range=[lo, hi])
+    fig.update_yaxes(title_text="首日收盘涨幅", ticksuffix="%", range=[lo, hi])
+    return fig

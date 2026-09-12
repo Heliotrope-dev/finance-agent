@@ -103,10 +103,11 @@ from charts import (
     build_benchmark_comparison, build_return_histogram, build_multi_comparison, build_position_donut,
     build_fed_watch_chart, build_macro_series_chart,
     build_sim_equity_curve, build_sector_treemap, build_correlation_heatmap,
-    build_sim_vs_benchmark,
+    build_sim_vs_benchmark, build_ipo_open_vs_close,
 )
 import portfolio_risk
 import sim_metrics
+import ipo_calc
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
     _invalidate_token, _hash_pw, _user_exists,
@@ -4838,6 +4839,112 @@ _IPO_SECTIONS = ("一句话结论", "公司概况", "定价与门槛", "市场�
 
 
 @st.fragment
+def _render_ipo_open_vs_close(items: list[dict]):
+    """新股首日"开盘就卖 vs 持到收盘"（升级路线图第8条）。
+
+    路线图原本要的是"超购倍数 vs 首日表现"散点图。超购倍数这个数据确认拿不到：
+    富途的接口没有这个字段，akshare 的 stock_ipo_hk_ths 实测返回的是A股数据
+    （代码是001246/301716这种深市北交所的）而且列里塞的是抓取的页面文本，
+    港交所披露易那边得逐份PDF解析。与其硬凑一个不准的数，不如换一个用现有
+    数据就能回答、对打新同样实际的问题。
+    """
+    fig = build_ipo_open_vs_close(items)
+    if fig is None:
+        return
+    try:
+        summ = ipo_calc.summarize_history(items)
+    except Exception:
+        summ = {}
+
+    st.markdown("**开盘就卖，还是持到收盘**")
+    lines = []
+    if "hold_better_rate" in summ:
+        r = summ["hold_better_rate"]
+        lines.append(
+            f"这{summ.get('n', 0)}只里，持到收盘比开盘卖更划算的占 {r:.0%}"
+            f"（收盘涨幅中位数比开盘高 {summ.get('hold_gain_median', 0):+.1f} 个百分点）。"
+        )
+    if "open_median" in summ and "close_median" in summ:
+        lines.append(
+            f"开盘涨幅中位数 {summ['open_median']:+.1f}%，收盘涨幅中位数 "
+            f"{summ['close_median']:+.1f}%。"
+        )
+    lines.append("点在虚线上方＝开盘后还在涨，持到收盘更好；落在下方＝高开回落，"
+                 "开盘就该走。左下那一片是开盘和收盘都破发的。")
+    for ln in lines:
+        st.caption(ln)
+    st.plotly_chart(fig, use_container_width=True, config=_PLOTLY_CONFIG,
+                    key="_ipo_open_close")
+
+
+def _render_ipo_calculator(items: list[dict]):
+    """打新收益测算器（升级路线图第8条）。
+
+    中签率必须由用户自己填：港交所的分配结果逐只公布，而且同一只票不同认购
+    档位的中签率差很多，硬猜一个默认值比留空更误导。预期涨幅默认用历史中位数
+    而不是均值——新股首日收益是长尾分布，一只翻倍能把均值拉高十几个点。
+    """
+    try:
+        summ = ipo_calc.summarize_history(items)
+    except Exception:
+        return
+    default_move = summ.get("close_median")
+    if default_move is None:
+        return
+
+    with st.expander("打新收益测算器"):
+        st.caption(
+            "算的是「长期重复这样打新的平均结果」。单次中签是离散的——要么中0手"
+            "要么中1手，实际结果会在这个数上下大幅跳变，不要当成这一次能赚多少。"
+        )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            lot_price = st.number_input("每手入场费（港币）", min_value=0.0,
+                                        value=5000.0, step=500.0, key="_ipo_lot_price")
+            lots = st.number_input("认购手数", min_value=1, value=10, step=1,
+                                   key="_ipo_lots")
+        with c2:
+            hit = st.number_input("中签率（%）", min_value=0.0, max_value=100.0,
+                                  value=20.0, step=1.0, key="_ipo_hit",
+                                  help="券商认购页面或事后公告里有，我们没有这个数据源，需要你自己填")
+            move = st.number_input("预期首日涨幅（%）", value=float(round(default_move, 1)),
+                                   step=1.0, key="_ipo_move",
+                                   help=f"默认填的是最近{summ.get('n', 0)}只的收盘涨幅中位数")
+        with c3:
+            margin_pct = st.slider("孖展（融资）比例 %", 0, 95, 0, step=5,
+                                   key="_ipo_margin")
+            rate = st.number_input("融资年利率（%）", min_value=0.0, value=5.0,
+                                   step=0.5, key="_ipo_rate")
+        days = st.slider("冻结天数", 1, 14, 7, key="_ipo_days")
+
+        res = ipo_calc.estimate(
+            lot_price, int(lots), hit, move,
+            margin_ratio=margin_pct / 100.0, margin_rate_pct=rate,
+            margin_days=int(days), fee_per_subscription=100.0,
+        )
+        if not res:
+            return
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("认购总额", f"HK${res['subscribe_amount']:,.0f}")
+        m2.metric("自有资金", f"HK${res['own_capital']:,.0f}")
+        m3.metric("利息成本", f"HK${res['interest']:,.0f}")
+        m4.metric("预期净收益", f"HK${res['net_profit']:,.0f}")
+
+        st.caption(
+            f"按中签率 {hit:g}% 折算，预期中签金额 HK${res['allotted_amount']:,.0f}；"
+            f"首日要涨到 **{res.get('breakeven_move_pct', 0):.2f}%** 才够覆盖利息和手续费。"
+        )
+        if margin_pct > 0:
+            st.caption(
+                f"注意利息是按借来的 HK${res['borrowed']:,.0f} 计的，跟中不中签无关——"
+                f"认购额在计息，只有中签的那部分在赚。一手都没中的话，这次净亏 "
+                f"HK${res['interest'] + res['fee']:,.0f}。"
+            )
+        if "return_on_own_capital" in res:
+            st.caption(f"相对自有资金的回报率 {res['return_on_own_capital']:+.2%}"
+                       f"（融资放大的是回报率，也同样放大亏损和盈亏平衡线）。")
+
+
 def _render_ipo_briefs():
     """港股新股认购专区。
 
@@ -4948,6 +5055,10 @@ def _render_ipo_briefs():
 
         _monthly = (perf or {}).get("monthly") or []
         _items = (perf or {}).get("items") or []
+
+        _render_ipo_open_vs_close(_items)
+        _render_ipo_calculator(_items)
+
         with st.expander(f"按月拆解与逐只明细（{len(_items)} 只）"):
             if _monthly:
                 st.markdown(
