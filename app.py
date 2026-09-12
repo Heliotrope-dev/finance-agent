@@ -2364,8 +2364,8 @@ def _render_index_top_movers(market: str, index_name: str = ""):
             st.caption("需要 Futu OpenD 连接，暂不可用")
             return
         st.caption(
-            f"恒生科技指数真实成分股（名单截至 {_HSTECH_ASOF} 生效，手动维护——"
-            "指数公司按季度调整，这份名单可能跟最新官方名单有出入），按当日涨跌幅排序。"
+            f"恒生科技成分股，按当日涨跌幅排。名单截至 {_HSTECH_ASOF}，"
+            f"指数公司按季调整，可能与最新官方名单有出入。"
         )
         expand_key = f"_movers_expand_{market}_hstech"
         show_n = 30 if st.session_state.get(expand_key) else 10
@@ -3051,11 +3051,8 @@ def _render_sector_heatmap(market: str):
     # 用户没法知道这是两套分类而不是数据错了。
     _src = "申万二级行业（富途）" if market == "A" else "行业板块（富途）"
     st.caption(
-        f"方块大小=成交额（今天有多少钱在里面），颜色深浅=涨跌幅度，"
-        f"涨还是跌看方块上的正负号。只画成交额最大的前 16 个板块——"
-        f"再多画出来的方块就小到写不下名字了，而尾部那些板块合计也只占几个点的成交额。"
-        f"\n\n分类口径：{_src}。下面「热门板块」用的是另一套分类，"
-        f"同名板块的成分股不完全一样，涨跌幅对不上是正常的。"
+        f"面积=成交额，深浅=涨跌幅度，涨跌看方块上的正负号。"
+        f"取成交额前16的板块，分类是{_src}——跟下面「热门板块」不是同一套，数值对不上正常。"
     )
     st.plotly_chart(fig, use_container_width=True, config=_PLOTLY_CONFIG)
 
@@ -4049,9 +4046,8 @@ def _render_advice_section():
     # 拿"，同一支票两个答案可以同时成立，不是数据打架。详见自选行展开区里
     # 对应的那段说明。
     st.caption(
-        "这是基本面和技术面的研究排序，不是下单指令；实际操作只以上方“今日可执行清单”为准。"
-        "结论回答的是「现在值不值得新建仓」——自选/持仓里同一支票的 AI 标签回答的是"
-        "「已持有的仓位要不要继续拿」，两者是独立判断，不一致属正常。"
+        "研究排序，不是下单指令——实际操作以上方「今日可执行清单」为准。"
+        "这里回答「值不值得新建仓」，持仓页的标签回答「已持有的要不要继续拿」，两者不一致正常。"
     )
     # 卡片可点击跳转详情页——复用持仓列表卡片验证过的方案（见
     # _render_position_rows 的踩坑记录：JS/CSS猜DOM结构点不动，最后用最朴素
@@ -4666,12 +4662,7 @@ def _render_my_page():
                 "已回填判断（含持有/观望）", f"{_summary['total_reviewed']}",
                 help="所有已补录事后价格的记录总数。它不是左边胜率的分母。",
             )
-            st.caption(
-                f"这 {_summary['total_reviewed']} 条里只有 "
-                f"{_summary['directional_count']} 条声称了方向（买入/卖出），"
-                f"胜率算的是这 {_summary['directional_count']} 条；"
-                f"其余是持有/观望，没有方向可对错。"
-            )
+            # 分母已经写进左边那个 metric 的标题里，不再重复一遍。
         # 默认只看带方向的判断。已回填的绝大多数是"持有/观望"，不筛的话一屏
         # 二十条里十九条是"无方向"——这个列表存在的意义是逐条核对"说买入的
         # 后来涨了没"，全是没有对错可言的记录时它就失去了作用（审计第13条）。
@@ -5032,10 +5023,7 @@ def _render_ipo_calculator(items: list[dict]):
         return
 
     with st.expander("打新收益测算器"):
-        st.caption(
-            "算的是「长期重复这样打新的平均结果」。单次中签是离散的——要么中0手"
-            "要么中1手，实际结果会在这个数上下大幅跳变，不要当成这一次能赚多少。"
-        )
+        st.caption("算的是长期重复打新的平均结果；单次要么中0手要么中1手，实际会大幅跳变。")
         c1, c2, c3 = st.columns(3)
         with c1:
             lot_price = st.number_input("每手入场费（港币）", min_value=0.0,
@@ -5076,18 +5064,16 @@ def _render_ipo_calculator(items: list[dict]):
         # 截图里是"借来的 HK22,500计的…净亏 𝐻𝐾122"。
         # st.metric 不走 markdown，所以上面那四个 f"HK${...}" 不用转义。
         st.caption(
-            f"按中签率 {hit:g}% 折算，预期中签金额 HK\\${res['allotted_amount']:,.0f}；"
-            f"首日要涨到 **{res.get('breakeven_move_pct', 0):.2f}%** 才够覆盖利息和手续费。"
+            f"预期中签 HK\\${res['allotted_amount']:,.0f}，"
+            f"首日需涨 **{res.get('breakeven_move_pct', 0):.2f}%** 才够覆盖利息和手续费。"
         )
         if margin_pct > 0:
             st.caption(
-                f"注意利息是按借来的 HK\\${res['borrowed']:,.0f} 计的，跟中不中签无关——"
-                f"认购额在计息，只有中签的那部分在赚。一手都没中的话，这次净亏 "
-                f"HK\\${res['interest'] + res['fee']:,.0f}。"
+                f"利息按借来的 HK\\${res['borrowed']:,.0f} 计，跟中不中签无关——"
+                f"一手没中就净亏 HK\\${res['interest'] + res['fee']:,.0f}。"
             )
         if "return_on_own_capital" in res:
-            st.caption(f"相对自有资金的回报率 {res['return_on_own_capital']:+.2%}"
-                       f"（融资放大的是回报率，也同样放大亏损和盈亏平衡线）。")
+            st.caption(f"自有资金回报率 {res['return_on_own_capital']:+.2%}——融资放大回报，也同样放大亏损。")
 
 
 def _render_a_ipo_briefs():
@@ -5320,9 +5306,8 @@ def _render_ipo_briefs():
             + "</div>",
             unsafe_allow_html=True,
         )
-        st.caption(f"前两项是涨跌幅本身，后两项才是只数占比：{_st['count']}只里"
-                   f"{len(_ups)}只首日收涨。新股首日收益是典型长尾分布，均值被少数"
-                   f"翻倍股拉高，判断随便打一只大概赚多少要看中位数。")
+        st.caption(f"{_st['count']}只里{len(_ups)}只首日收涨。首日收益是长尾分布，"
+                   f"均值被少数翻倍股拉高——看中位数更接近实际。")
 
         _monthly = (perf or {}).get("monthly") or []
         _items = (perf or {}).get("items") or []
@@ -6681,8 +6666,8 @@ def _render_price_alerts_manager(email: str):
 
     active = [a for a in alerts if a["enabled"]]
     st.caption(
-        f"生效中 {len(active)} 条，已触发 {len(alerts) - len(active)} 条。"
-        "只在对应市场开盘时检查；触发一次后自动停用，不会每天重复推送。"
+        f"生效中 {len(active)} 条，已触发 {len(alerts) - len(active)} 条——"
+        f"开盘时段检查，触发一次后自动停用。"
     )
     _mk = {"A": "A股", "HK": "港股", "US": "美股"}
     for a in alerts:
@@ -6872,13 +6857,12 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
 
     if _reconciled["foreign_positions"]:
         _foreign_bits = "、".join(
-            f"{p.get('name') or p.get('code')} ¥{(p.get('market_val_hkd') or 0):,.0f}"
+            f"{p.get('name') or p.get('code')} HK${(p.get('market_val_hkd') or 0):,.0f}"
             for p in _reconciled["foreign_positions"]
         )
         st.caption(
-            f"账户里还有 {len(_reconciled['foreign_positions'])} 笔非AI下单的持仓"
-            f"（{_foreign_bits}），不计入上面的净值/收益率——这些不是AI的操作记录，"
-            f"如果是你自己在富途App里手动交易的，可以在那边平仓清掉。"
+            f"另有 {len(_reconciled['foreign_positions'])} 笔非AI持仓（{_foreign_bits}），"
+            f"不计入净值和收益率。可在富途App里自行平仓清掉。"
         )
 
     # 累计收益率的基准是起始本金，不是"图表窗口里第一个快照点"。
@@ -7471,8 +7455,8 @@ def _render_portfolio_risk(positions: list):
         st.metric("有效分散度", f"{res['concentration']['effective_n']:.1f} 只")
 
     st.caption(
-        f"基于最近 {res['n_days']} 个交易日、覆盖 {res.get('coverage', 1):.0%} 的仓位。"
-        "波动率和 Beta 都是历史统计量，描述的是过去这段时间的结构，不是对未来的预测。"
+        f"基于最近 {res['n_days']} 个交易日、覆盖 {res.get('coverage', 1):.0%} 的仓位；"
+        "都是历史统计量，不是对未来的预测。"
     )
 
     # ── 暴露度 ────────────────────────────────────────────────────
@@ -7514,11 +7498,7 @@ def _render_portfolio_risk(positions: list):
                 f"line-height:1.6'>· {_esc(t)}</div>",
                 unsafe_allow_html=True,
             )
-        st.caption(
-            "这些只是对组合结构的客观描述，不是买卖建议——集中本身不等于错，"
-            "很多人就是有意识地押注某个方向；这里的作用是确保它是想清楚之后的"
-            "选择，而不是不知不觉变成这样。"
-        )
+        st.caption("以上是对组合结构的客观描述，不是买卖建议——集中本身不等于错，但应该是想清楚之后的选择。")
 
 
 _PORTFOLIO_REANALYZE_COOLDOWN = 300  # 5分钟节流——组合分析是1次真实AI调用，不是纯本地计算，不能让用户点着玩
@@ -8858,10 +8838,8 @@ else:
                 # 跟上面热力图标同一件事：两处用的是不同的行业分类体系，
                 # 同名板块涨跌幅对不上是分类差异不是数据错误（审计第11条）。
                 st.caption(
-                    "分类口径：同花顺行业（A股）/ 富途行业（港美股），按成交额排热度。"
-                    "跟上面热力图不是同一套分类，同名板块的成分股不完全一样。"
-                    if mkt_code == "A" else
-                    "按成交额排热度。跟上面热力图同源，数值应当一致。"
+                    "同花顺行业分类，按成交额排——跟上面热力图不是同一套，数值对不上正常。"
+                    if mkt_code == "A" else "按成交额排热度，跟上面热力图同源。"
                 )
                 _render_hot_sectors(mkt_code)
                 # 异动榜/热度榜/新股放在板块之后：板块回答"哪个方向在动"，
