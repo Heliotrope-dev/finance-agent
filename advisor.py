@@ -41,6 +41,47 @@ os.environ.setdefault("TQDM_DISABLE", "1")
 import logging as _logging
 _logging.getLogger("streamlit").setLevel(_logging.ERROR)
 
+
+def _silence_streamlit_loggers() -> None:
+    """把 streamlit 所有子 logger 也压到 ERROR。
+
+    上面那行只设了父 logger "streamlit"，对
+    "streamlit.runtime.caching.cache_data_api" 不起作用——streamlit 给这个子
+    logger **显式**设过 level=INFO(20)，而 Python 的 logging 只有在子 logger
+    自己是 NOTSET 时才继承父级。实测 getEffectiveLevel() 返回 20，父级那行
+    完全压不住。
+
+    症状是脚本在 Streamlit 运行时之外被 cron 起来时，每调用一次 @st.cache_data
+    的函数就打一行 "No runtime found, using MemoryCacheStorageManager"。
+    2026-09-12 实测 intraday_watch.py 跑一次（还是"休市跳过"这种最短路径）就写
+    69 行这种警告、8.6KB，有效输出只有 1 行；按开盘时段每10分钟一次算，一天
+    约 80 次，日志会以每天近 700KB 的速度涨。这台机器内存和磁盘都不宽裕。
+
+    调用时机很关键，踩过三次才对。那69行不是运行时打的，是 **import
+    data_sources 时** 打的——它有约70个 @st.cache_data 装饰器，装饰器一应用
+    就各打一行（69行正好对上）。而本模块第91行就 import data_sources，所以
+    连"在别的脚本里 import advisor 之后再调"都已经太晚了（实测 `python -c
+    'import advisor'` 单独就打满69行）。
+
+    试错记录，别再走一遍：
+      - 只设父 logger "streamlit" → 没用，streamlit 给子 logger 显式设过
+        INFO(20)，父级压不住（logging 只在子级为 NOTSET 时才继承）
+      - 设环境变量 STREAMLIT_LOGGER_LEVEL=error → 没用，streamlit 不认
+      - 在调用方 import data_sources 之后调 → 太晚
+      - 在调用方 import advisor 之后调 → 还是太晚
+      - 正确：在本模块顶部、import data_sources **之前** 调一次
+
+    所以下面紧跟着就调用它，而不是留给调用方。实测警告数 69 → 0。
+    """
+    import streamlit  # noqa: F401  只为确保 streamlit 的 logger 对象已被建出来
+    for _name in list(_logging.root.manager.loggerDict):
+        if _name == "streamlit" or _name.startswith("streamlit."):
+            _logging.getLogger(_name).setLevel(_logging.ERROR)
+
+
+# 必须在本文件的 import data_sources（第91行附近）之前执行，不要挪到下面去。
+_silence_streamlit_loggers()
+
 import queue as _queue
 import threading
 import time

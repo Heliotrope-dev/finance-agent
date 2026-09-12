@@ -32,7 +32,7 @@ import json
 import sys
 from pathlib import Path
 
-import advisor
+import advisor  # 顺带把 streamlit 的日志噪声压掉，见其 _silence_streamlit_loggers
 import alert_queue
 import data_sources as ds
 import tracker

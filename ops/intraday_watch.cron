@@ -1,10 +1,13 @@
-# 盘中盯盘（intraday_watch.py）的定时任务 —— 目前【未安装】，等用户决定开启。
+# 盘中盯盘（intraday_watch.py）的定时任务 —— 已于 2026-09-12 12:39 安装到系统
+# crontab（安装前备份在 /root/crontab.bak-20260912-123940，原有11条→14条）。
+# 这个文件保留下来作为这三行的出处和依据，不要重复安装。
 #
 # 2026-09-12 查证：这个脚本在系统 crontab、systemd timer、以及 OpenClaw 自己的
 # 调度表 /root/.openclaw/state/openclaw.sqlite 的 cron_jobs 里都没有任何条目
 # （26个 OpenClaw 定时任务逐条查过 payload_message，没有一条提到 intraday_watch），
-# data/intraday_watch_state.json 停在 9月9日。也就是说止损/目标价/急涨急跌/
-# 回到买点/到价提醒这几类推送目前全都不会触发。
+# data/intraday_watch_state.json 停在 9月9日——也就是说在装上下面这三行之前，
+# 止损/目标价/急涨急跌/回到买点/到价提醒这几类推送一条都不会触发，
+# 而页面上完全看不出来（功能是齐的，只是没有东西按时叫它）。
 #
 # ⚠️ 这个项目有两套调度器并存，改之前先搞清楚东西在哪一套里：
 #   - 系统 crontab：warm_home_cache / advisor / expectancy / macro_brief /
@@ -13,8 +16,18 @@
 #     ai-sim-snapshot、sim-agent-* 、hk/us-mentor-scan、stock-advisor-* 等
 #   光看 `crontab -l` 会以为一堆任务没在跑，实际是在 OpenClaw 那边。
 #
-# 安装方法（服务器上执行，crontab 顶部已有 CRON_TZ=Asia/Shanghai）：
-#   crontab -l > /tmp/ct && cat ops/intraday_watch.cron >> /tmp/ct && crontab /tmp/ct
+# 当初的安装方法（已执行过，留作记录）：
+#   crontab -l > /tmp/ct && grep -vE '^#|^$' ops/intraday_watch.cron >> /tmp/ct && crontab /tmp/ct
+#
+# 装一次就长期生效，不需要每天开关。用户问过"是不是每次都要手动开启、休市会不会
+# 白烧 token"，两个都不会：
+#   - 不烧 token：这条链路上没有任何模型调用。不是额外加的保险，是项目本来的
+#     设计——README 明写 plan_push/position_report/intraday_watch/trade_alert_push
+#     全是纯脚本直出，就是为了不让模型有机会把 154.00 写成 145.00。所以它开盘
+#     推送也不烧 token。
+#   - 休市不干活：两层保险。cron 的小时段本身只覆盖交易时段；脚本自己还会再查
+#     一次 sim_agent._open_markets()，节假日和午休直接返回"跳过"。实测 2026-09-12
+#     12:39（港A午休）跑完耗时 2.0 秒，没拉行情也没发微信。
 #
 # 旁证：OpenClaw 那边的 ai-sim-agent 用的时间表达式是 */2 0-5,9-16,21-23，
 # 跟下面这三行的小时段完全一致——这个窗口划分是这个项目已经验证过的口径，
