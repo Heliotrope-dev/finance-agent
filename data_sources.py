@@ -1739,6 +1739,16 @@ def _futu_snapshot_row_to_dict(symbol: str, row) -> dict:
         "52周最低": float(row["lowest52weeks_price"]) if pd.notna(row.get("lowest52weeks_price")) else None,
         "PE_TTM": float(row["pe_ttm_ratio"]) if pd.notna(row.get("pe_ttm_ratio")) and row.get("pe_ttm_ratio") else None,
         "PB": float(row["pb_ratio"]) if pd.notna(row.get("pb_ratio")) and row.get("pb_ratio") else None,
+        # 2026-09-12新增：成交量/总市值/股息率/振幅（升级路线图第6条"个股详情页
+        # 补齐"点名缺的就是这几个）。跟上面两批一样，Futu快照本来就有这些列，
+        # 之前只是没往上传。
+        # dividend_ratio_ttm 的单位是百分数本身（核对过：腾讯 dividend_ttm 5.309
+        # / 股价约428 = 1.24，正好等于接口给的 1.24），所以渲染时直接加 % 即可，
+        # 不要再乘100。
+        "成交量": float(row["volume"]) if pd.notna(row.get("volume")) else None,
+        "总市值": float(row["total_market_val"]) if pd.notna(row.get("total_market_val")) and row.get("total_market_val") else None,
+        "股息率TTM": float(row["dividend_ratio_ttm"]) if pd.notna(row.get("dividend_ratio_ttm")) and row.get("dividend_ratio_ttm") else None,
+        "振幅": float(row["amplitude"]) if pd.notna(row.get("amplitude")) else None,
         "更新时间": str(row["update_time"]),
         "数据源": "Futu实时",
     }

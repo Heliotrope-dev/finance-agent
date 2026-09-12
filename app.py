@@ -2062,6 +2062,88 @@ def _fragment_alive(kind: str) -> bool:
 
 
 @st.fragment(run_every=3)
+def _fmt_big(v: float | None, unit: str = "") -> str:
+    """大数字换单位。市值动辄上万亿，原样打印一串数字没人读得出来。"""
+    if v is None:
+        return "—"
+    a = abs(v)
+    sign = "-" if v < 0 else ""
+    if a >= 1e12:
+        return f"{sign}{a / 1e12:,.2f}万亿{unit}"
+    if a >= 1e8:
+        return f"{sign}{a / 1e8:,.2f}亿{unit}"
+    if a >= 1e4:
+        return f"{sign}{a / 1e4:,.2f}万{unit}"
+    return f"{sign}{a:,.0f}{unit}"
+
+
+def _render_key_metrics(spot: dict, market: str):
+    """个股详情页的关键数据栏（升级路线图第6条"个股详情页补齐"）。
+
+    2026-09-12。路线图点名缺的是：昨收、成交量、换手率、总市值、PE(TTM)、PB、
+    股息率、52周高低。查下来其中大部分 Futu 快照本来就返回，2026-09-01 为了
+    给AI模拟盘用已经接进 _futu_snapshot_row_to_dict 了，只是详情页从来没渲染
+    ——这一页之前只有最高/最低/今开三个数。这次补上成交量/总市值/股息率/振幅
+    四个映射，其余直接用现成字段。
+
+    A股走的是腾讯那条路径（不是Futu），拿不到估值类字段；缺的项直接不显示，
+    不用"—"占位撑出一堆空格子——那会让人以为是加载失败。
+    """
+    rows: list[tuple[str, str]] = [
+        ("最高", f"{spot['最高']:.2f}" if spot.get("最高") else None),
+        ("最低", f"{spot['最低']:.2f}" if spot.get("最低") else None),
+        ("今开", f"{spot['今开']:.2f}" if spot.get("今开") else None),
+        ("昨收", f"{spot['昨收']:.2f}" if spot.get("昨收") else None),
+        ("成交量", _fmt_big(spot.get("成交量"), "股") if spot.get("成交量") else None),
+        ("成交额", _fmt_big(spot.get("成交额")) if spot.get("成交额") else None),
+        ("换手率", f"{spot['换手率']:.2f}%" if spot.get("换手率") is not None else None),
+        ("振幅", f"{spot['振幅']:.2f}%" if spot.get("振幅") is not None else None),
+        ("量比", f"{spot['量比']:.2f}" if spot.get("量比") is not None else None),
+        ("总市值", _fmt_big(spot.get("总市值")) if spot.get("总市值") else None),
+        # PE 为负说明公司在亏损，此时"市盈率"这个比值没有估值含义（越亏损
+        # 数值反而越接近0），直接写"亏损"比印一个 -12.3 更诚实。
+        ("PE(TTM)", ("亏损" if spot["PE_TTM"] < 0 else f"{spot['PE_TTM']:.2f}")
+                    if spot.get("PE_TTM") is not None else None),
+        ("PB", f"{spot['PB']:.2f}" if spot.get("PB") is not None else None),
+        ("股息率", f"{spot['股息率TTM']:.2f}%" if spot.get("股息率TTM") else None),
+    ]
+    cells = "".join(
+        f"<div><div style='font-size:0.72rem;color:var(--fa-faint)'>{_esc(k)}</div>"
+        f"<div style='font-size:0.92rem;font-weight:600;color:var(--fa-text);"
+        f"font-variant-numeric:tabular-nums'>{_esc(v)}</div></div>"
+        for k, v in rows if v
+    )
+    if cells:
+        st.markdown(
+            "<style>.fa-keymetrics{display:grid;grid-template-columns:repeat(5,1fr);"
+            "gap:12px 14px;margin:6px 0 4px}"
+            "@media (max-width:640px){.fa-keymetrics{grid-template-columns:repeat(3,1fr)}}</style>"
+            f"<div class='fa-keymetrics'>{cells}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # 52周区间条。给的是一个"现在贵不贵"的空间感：只报52周最高/最低两个数字，
+    # 读者还得自己算现价落在哪儿；画成一条带游标的线，一眼就知道是在高位还是
+    # 低位。这跟打分里"价格位置"那一维用的是同一个概念，前后对得上。
+    lo, hi, last = spot.get("52周最低"), spot.get("52周最高"), spot.get("最新价")
+    if lo and hi and last and hi > lo:
+        pos = max(0.0, min(1.0, (last - lo) / (hi - lo)))
+        st.markdown(
+            f"<div style='margin:10px 0 2px'>"
+            f"<div style='display:flex;justify-content:space-between;"
+            f"font-size:0.72rem;color:var(--fa-faint);margin-bottom:4px'>"
+            f"<span>52周最低 {lo:.2f}</span>"
+            f"<span>处于 {pos:.0%} 分位</span>"
+            f"<span>52周最高 {hi:.2f}</span></div>"
+            f"<div style='position:relative;height:4px;border-radius:2px;"
+            f"background:linear-gradient(to right,var(--fa-border),#C6C9CD)'>"
+            f"<div style='position:absolute;left:{pos * 100:.1f}%;top:-3px;"
+            f"width:2px;height:10px;background:var(--fa-text);"
+            f"transform:translateX(-1px)'></div></div></div>",
+            unsafe_allow_html=True,
+        )
+
+
 def _render_price_header(symbol: str, market: str):
     """价格区块单独做成 fragment，每3秒自己刷新，不带动AI模块、新闻这些重的部分
     一起重跑——之前全页面每30秒整体rerun一次，观感上像"每隔一阵闪一下"，跟
@@ -2100,10 +2182,7 @@ def _render_price_header(symbol: str, market: str):
     )
     _src = "Futu 报价" if spot.get("数据源") == "Futu实时" else "延迟报价"
     st.caption(f"{_src} · {_quote_market_status(spot, market)}")
-    hcol1, hcol2, hcol3 = st.columns(3)
-    hcol1.metric("最高", f"{spot.get('最高', 0):.2f}")
-    hcol2.metric("最低", f"{spot.get('最低', 0):.2f}")
-    hcol3.metric("今开", f"{spot.get('今开', 0):.2f}")
+    _render_key_metrics(spot, market)
 
     if not st.session_state.get("logged_in"):
         st.caption("登录后可关注/管理个人持仓")
