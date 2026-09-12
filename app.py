@@ -2793,9 +2793,11 @@ def _render_market_extras(market: str):
             f"<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 6px'>{_esc(_ipo_note)}</div>",
             unsafe_allow_html=True,
         )
-        # 招股价的币种跟着市场走。之前三个市场都写"招股价"不带币种，港股和
-        # 美股并排看的时候分不清 15.00 是港币还是美元。
+        # 币种和叫法都跟着市场走。之前三个市场统一写"招股价"且不带币种，港股
+        # 美股并排看分不清 15.00 是港币还是美元；"招股"是港股/沪深的说法，
+        # 美股那边首页已经统一叫"发行价"，两处不一致会让人以为是两个字段。
         _ccy = {"A": "", "HK": "HK$", "US": "$"}.get(market, "")
+        _price_label = "发行价" if market == "US" else "招股价"
         for ip in ipos:
             _pr = ""
             if ip.get("price_min") and ip.get("price_max"):
@@ -2813,7 +2815,7 @@ def _render_market_extras(market: str):
                 f"<span style='flex:1;color:var(--fa-text);font-size:0.86rem'>{_esc(ip['name'])}"
                 f"<span style='color:var(--fa-faint);font-size:0.76rem'> {_esc(ip['symbol'])}</span></span>"
                 f"<span style='color:var(--fa-text-2);font-size:0.8rem'>"
-                f"{_esc(('招股价 ' + _ccy + _pr) if _pr else '')}</span>"
+                f"{_esc((_price_label + ' ' + _ccy + _pr) if _pr else '')}</span>"
                 f"<span style='color:var(--fa-faint);font-size:0.76rem;min-width:78px;text-align:right'>"
                 f"{('每手 ' + format(int(ip['lot_size']), ',')) if ip.get('lot_size') else ''}</span></div>",
                 unsafe_allow_html=True,
