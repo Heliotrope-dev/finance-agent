@@ -33,6 +33,15 @@ _CHART_GRID = "rgba(23,24,28,0.055)"
 _AUX_STRONG = "#5B6470"
 _AUX_SOFT = "#A6ADB6"
 
+# 悬浮气泡里的日期格式。Plotly 默认吐的是 "Jul 10, 2026" 这种英文月份缩写，
+# 跟全站中文界面格格不入（用户2026-09-13反馈："所有图他这个估计都是默认的
+# 字样，我们设计一下变成符合我们风格的中文的注记"）。
+# 统一成 年-月-日；分时类图表另外用 _HOVER_TIME 带上时分。
+# 不用"7月10日"这种中文月份：K线一屏几十根，气泡里日期要能一眼对齐比较，
+# 数字格式比中文更紧凑也更好扫。
+_HOVER_DATE = "%Y-%m-%d"
+_HOVER_TIME = "%H:%M"
+
 
 def _style_subplot_titles(fig):
     """把 make_subplots 生成的子图标题改成左对齐小灰字。
@@ -184,6 +193,7 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
             x=merged["hm"], y=merged["价格"], mode="lines", connectgaps=True,
             line=dict(width=1.5, color=line_color), name="价格",
             fill="tozeroy", fillcolor=fill_color,
+            hovertemplate="%{x}　价格 %{y:.2f}<extra></extra>",
         ),
         row=1, col=1,
     )
@@ -191,6 +201,7 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
         go.Scatter(
             x=merged["hm"], y=merged["均价"], mode="lines", connectgaps=True,
             line=dict(width=1, color=_AUX_STRONG), name="均价",
+            hovertemplate="均价 %{y:.2f}<extra></extra>",
         ),
         row=1, col=1,
     )
@@ -210,7 +221,7 @@ def build_intraday_line(intraday: pd.DataFrame, prev_close: float | None = None,
         fig.add_trace(
             go.Bar(
                 x=merged["hm"], y=vol_wan, marker_color=merged["量色"], name="成交量",
-                hovertemplate="%{x}<br>量: %{y:.2f}万<extra></extra>",
+                hovertemplate="成交量 %{y:.2f}万<extra></extra>",
             ),
             row=2, col=1,
         )
@@ -268,17 +279,27 @@ def build_candlestick(hist: pd.DataFrame, show_volume: bool = True) -> go.Figure
             decreasing=dict(line=dict(color=DOWN_COLOR, width=1), fillcolor=DOWN_COLOR),
             whiskerwidth=0,
             name="K线",
+            # 默认气泡是英文加全精度小数（"Jul 10, 2026 / open: 201.7742 /
+            # high: 210.7642…"），还带一个 ▲ 符号。全站其它文案都是中文、
+            # 价格统一两位小数，这里必须自己写模板。
+            xhoverformat=_HOVER_DATE,
+            hovertemplate=(
+                "%{x}<br>开 %{open:.2f}　高 %{high:.2f}<br>"
+                "低 %{low:.2f}　收 %{close:.2f}<extra></extra>"
+            ),
         ),
         row=1,
         col=1,
     )
     fig.add_trace(
-        go.Scatter(x=df["日期"], y=df["MA5"], line=dict(width=1, color=_AUX_STRONG), name="MA5"),
+        go.Scatter(x=df["日期"], y=df["MA5"], line=dict(width=1, color=_AUX_STRONG), name="MA5",
+                   hovertemplate="MA5 %{y:.2f}<extra></extra>"),
         row=1,
         col=1,
     )
     fig.add_trace(
-        go.Scatter(x=df["日期"], y=df["MA20"], line=dict(width=1, color=_AUX_SOFT), name="MA20"),
+        go.Scatter(x=df["日期"], y=df["MA20"], line=dict(width=1, color=_AUX_SOFT), name="MA20",
+                   hovertemplate="MA20 %{y:.2f}<extra></extra>"),
         row=1,
         col=1,
     )
@@ -292,6 +313,7 @@ def build_candlestick(hist: pd.DataFrame, show_volume: bool = True) -> go.Figure
             go.Bar(
                 x=df["日期"], y=df["成交量"], marker_color=vol_colors, name="成交量",
                 marker_line_width=0, opacity=0.5,
+                hovertemplate="成交量 %{y:,.0f}<extra></extra>",
             ),
             row=vol_row,
             col=1,
@@ -302,17 +324,20 @@ def build_candlestick(hist: pd.DataFrame, show_volume: bool = True) -> go.Figure
         go.Bar(
             x=df["日期"], y=macd["MACD"], marker_color=macd_colors, name="MACD柱",
             marker_line_width=0, opacity=0.55,
+            hovertemplate="MACD柱 %{y:.3f}<extra></extra>",
         ),
         row=macd_row,
         col=1,
     )
     fig.add_trace(
-        go.Scatter(x=df["日期"], y=macd["DIF"], line=dict(width=1, color=_AUX_STRONG), name="DIF"),
+        go.Scatter(x=df["日期"], y=macd["DIF"], line=dict(width=1, color=_AUX_STRONG), name="DIF",
+                   hovertemplate="DIF %{y:.3f}<extra></extra>"),
         row=macd_row,
         col=1,
     )
     fig.add_trace(
-        go.Scatter(x=df["日期"], y=macd["DEA"], line=dict(width=1, color=_AUX_SOFT), name="DEA"),
+        go.Scatter(x=df["日期"], y=macd["DEA"], line=dict(width=1, color=_AUX_SOFT), name="DEA",
+                   hovertemplate="DEA %{y:.3f}<extra></extra>"),
         row=macd_row,
         col=1,
     )
@@ -454,6 +479,7 @@ def build_return_histogram(hist: pd.DataFrame) -> go.Figure:
             nbinsx=25,
             marker_color=_AUX_SOFT,
             marker_line=dict(color="rgba(23,24,28,0.25)", width=0.5),
+            hovertemplate="涨跌幅 %{x}<br>出现 %{y} 天<extra></extra>",
         )
     )
     fig.add_vline(x=0, line_color="rgba(23,24,28,0.22)", line_width=1)
@@ -475,11 +501,13 @@ def build_benchmark_comparison(hist: pd.DataFrame, benchmark: pd.DataFrame, benc
         # 之前这里写的是"#ef4444"——本文件开头theme.py的说明里提到的"旧charts.py
         # 红"，跟app.py/candlestick统一用的品牌红(UP_COLOR="#e02020")肉眼能看出
         # 不是同一个红，这里补上遗漏的一处。
-        go.Scatter(x=stock["日期"], y=stock["归一化"], name="个股", line=dict(color=UP_COLOR, width=2))
+        go.Scatter(x=stock["日期"], y=stock["归一化"], name="个股", line=dict(color=UP_COLOR, width=2),
+                   xhoverformat=_HOVER_DATE, hovertemplate="个股 %{y:.2f}<extra></extra>")
     )
     fig.add_trace(
         go.Scatter(
-            x=bm["日期"], y=bm["归一化"], name=benchmark_name, line=dict(color=_AUX_SOFT, width=1.5, dash="dot")
+            x=bm["日期"], y=bm["归一化"], name=benchmark_name, line=dict(color=_AUX_SOFT, width=1.5, dash="dot"),
+            xhoverformat=_HOVER_DATE, hovertemplate=benchmark_name + " %{y:.2f}<extra></extra>"
         )
     )
     fig.update_layout(yaxis_title="走势（起点=100）")
@@ -533,6 +561,8 @@ def build_multi_comparison(hist_by_name: dict) -> go.Figure:
         fig.add_trace(
             go.Scatter(
                 x=s["日期"], y=s["归一化"], name=name,
+                xhoverformat=_HOVER_DATE,
+                hovertemplate=str(name) + " %{y:.2f}<extra></extra>",
                 line=dict(color=_MULTI_COLORS[i % len(_MULTI_COLORS)], width=2),
             )
         )

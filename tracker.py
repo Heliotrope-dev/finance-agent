@@ -1995,7 +1995,8 @@ def get_position_advice(email: str) -> dict:
         return {r["symbol"]: dict(r) for r in rows}
 
 
-def get_recent_advice_outcomes(limit: int = 20, source: str | None = None) -> list[dict]:
+def get_recent_advice_outcomes(limit: int = 20, source: str | None = None,
+                               directional_only: bool = False) -> list[dict]:
     """最近N条"已经能对照事后价格"的AI判断，给"AI战绩墙"用。
 
     2026-09-12新增（升级路线图第1条）。这套系统一直在记"当时判断是什么、
@@ -2019,6 +2020,14 @@ def get_recent_advice_outcomes(limit: int = 20, source: str | None = None) -> li
         if source:
             sql += " AND source = ?"
             params.append(source)
+        # directional_only：只看声称了方向的判断（买入/卖出）。
+        # 2026-09-13 审计：已回填的1430条里观望752、持有547，真正带方向的只有
+        # 131条，所以默认取最近20条时，19条都是"无方向"——这个列表本来是让人
+        # 逐条核对"说买入的后来涨了没"，结果一屏全是没有对错可言的持有/观望。
+        # 必须在 SQL 层过滤而不是取回来再筛：按1430:131这个比例，取20条筛完
+        # 大概率只剩一两条。
+        if directional_only:
+            sql += " AND action IN ('买入', '卖出')"
         sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(limit)
         rows = [dict(r) for r in c.execute(sql, params).fetchall()]

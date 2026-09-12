@@ -4563,56 +4563,79 @@ def _render_my_page():
         # 来自已经回填过事后价格的真实记录，不预测、不补值。
         st.divider()
         st.markdown("**AI 战绩墙**")
+        # 顶部三个数字走全样本，跟下面列表的筛选无关——所以放在列表判空之外。
+        # 之前嵌在 else 分支里，列表一为空连汇总也跟着消失；加了筛选之后
+        # "筛完没有结果"会变成常见情况，这个结构必须先拆开。
         try:
-            _outcomes = get_recent_advice_outcomes(limit=20)
+            _summary = get_advice_outcome_summary()
+        except Exception:
+            _summary = {}
+        if _summary.get("directional_count"):
+            _c1, _c2, _c3 = st.columns(3)
+            # 分母必须摆在明面上，不能只藏在 help 里。
+            # 2026-09-13 审计原话："'方向判断胜率37%'和'已回填判断1430'并排
+            # 显示…用户会自然认为分母是1430"——实际分母只有131（1430条里
+            # 观望752、持有547，带方向的买入86+卖出45）。这一块是全站最
+            # 强调"诚实"的地方，反而在分母上含糊，是最不该出的问题。
+            _c1.metric(
+                f"方向判断胜率（{_summary['directional_count']}条中说对{_summary['hits']}条）",
+                f"{_summary['win_rate']:.0f}%",
+                help="只统计买入/卖出这类声称了方向的判断；持有/观望没声称方向，不计入胜率。",
+            )
+            _c2.metric("平均事后涨跌", f"{_summary['avg_return_pct']:+.2f}%")
+            _c3.metric(
+                "已回填判断（含持有/观望）", f"{_summary['total_reviewed']}",
+                help="所有已补录事后价格的记录总数。它不是左边胜率的分母。",
+            )
+            st.caption(
+                f"这 {_summary['total_reviewed']} 条里只有 "
+                f"{_summary['directional_count']} 条声称了方向（买入/卖出），"
+                f"胜率算的是这 {_summary['directional_count']} 条；"
+                f"其余是持有/观望，没有方向可对错。"
+            )
+        # 默认只看带方向的判断。已回填的绝大多数是"持有/观望"，不筛的话一屏
+        # 二十条里十九条是"无方向"——这个列表存在的意义是逐条核对"说买入的
+        # 后来涨了没"，全是没有对错可言的记录时它就失去了作用（审计第13条）。
+        _dir_only = st.toggle(
+            "只看买入/卖出判断", value=True, key="_wall_dir_only",
+            help="关掉会把持有/观望也列出来。那些判断没有声称方向，无所谓对错，也不计入上面的胜率。",
+        )
+        try:
+            _outcomes = get_recent_advice_outcomes(limit=20, directional_only=_dir_only)
         except Exception:
             _outcomes = []
         if not _outcomes:
-            st.caption("还没有已回填事后价格的判断记录。")
-        else:
-            # 顶部三个数字用全样本算，不是只算下面列出来的这20条：实测最近
-            # 的判断绝大多数是"持有/观望"，只看最近20条经常一条方向判断都
-            # 没有，胜率就永远显示不出来。明细看最近的，汇总看全样本。
-            try:
-                _summary = get_advice_outcome_summary()
-            except Exception:
-                _summary = {}
-            if _summary.get("directional_count"):
-                _c1, _c2, _c3 = st.columns(3)
-                _c1.metric(
-                    "方向判断胜率", f"{_summary['win_rate']:.0f}%",
-                    help=f"全部{_summary['directional_count']}条买入/卖出判断中说对"
-                         f"{_summary['hits']}条；持有/观望不声称方向，不计入",
-                )
-                _c2.metric("平均事后涨跌", f"{_summary['avg_return_pct']:+.2f}%")
-                _c3.metric("已回填判断", f"{_summary['total_reviewed']}")
-            _rows_html = []
-            for _o in _outcomes:
-                _ret = _o["return_pct"]
-                _ret_color = UP_COLOR if _ret > 0 else (DOWN_COLOR if _ret < 0 else "var(--fa-muted)")
-                if _o["hit"] is True:
-                    _mark, _mark_color = "说对", OK_COLOR
-                elif _o["hit"] is False:
-                    _mark, _mark_color = "说错", BAD_COLOR
-                else:
-                    _mark, _mark_color = "无方向", "var(--fa-faint)"
-                _rows_html.append(
-                    "<div style='display:flex;align-items:center;gap:10px;padding:7px 2px;"
-                    "border-bottom:1px solid var(--fa-border);font-size:0.8rem'>"
-                    f"<span style='color:var(--fa-faint);min-width:42px'>{_esc((_o.get('created_at') or '')[5:10])}</span>"
-                    f"<span style='flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;"
-                    f"white-space:nowrap'>{_esc(_clean_name(_o.get('name') or _o.get('symbol')))}</span>"
-                    f"<span style='min-width:34px;color:var(--fa-text-2)'>{_esc(_o.get('action') or '')}</span>"
-                    f"<span style='min-width:30px;color:var(--fa-faint)'>{_o.get('score') if _o.get('score') is not None else '—'}</span>"
-                    f"<span style='min-width:62px;text-align:right;color:{_ret_color};font-weight:600'>{_ret:+.2f}%</span>"
-                    f"<span style='min-width:44px;text-align:right;color:{_mark_color};font-size:0.74rem'>{_mark}</span>"
-                    "</div>"
-                )
-            st.markdown("".join(_rows_html), unsafe_allow_html=True)
             st.caption(
-                "「说对/说错」只对买入、卖出这类带方向的结论成立，持有/观望不计入胜率。"
-                "事后价格是系统按固定回看窗口自动补录的，不是挑出来的时点。"
+                "最近还没有已回填事后价格的买入/卖出判断，关掉上面的开关可以看持有/观望。"
+                if _dir_only else "还没有已回填事后价格的判断记录。"
             )
+        _rows_html = []
+        for _o in _outcomes:
+            _ret = _o["return_pct"]
+            _ret_color = UP_COLOR if _ret > 0 else (DOWN_COLOR if _ret < 0 else "var(--fa-muted)")
+            if _o["hit"] is True:
+                _mark, _mark_color = "说对", OK_COLOR
+            elif _o["hit"] is False:
+                _mark, _mark_color = "说错", BAD_COLOR
+            else:
+                _mark, _mark_color = "无方向", "var(--fa-faint)"
+            _rows_html.append(
+                "<div style='display:flex;align-items:center;gap:10px;padding:7px 2px;"
+                "border-bottom:1px solid var(--fa-border);font-size:0.8rem'>"
+                f"<span style='color:var(--fa-faint);min-width:42px'>{_esc((_o.get('created_at') or '')[5:10])}</span>"
+                f"<span style='flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;"
+                f"white-space:nowrap'>{_esc(_clean_name(_o.get('name') or _o.get('symbol')))}</span>"
+                f"<span style='min-width:34px;color:var(--fa-text-2)'>{_esc(_o.get('action') or '')}</span>"
+                f"<span style='min-width:30px;color:var(--fa-faint)'>{_o.get('score') if _o.get('score') is not None else '—'}</span>"
+                f"<span style='min-width:62px;text-align:right;color:{_ret_color};font-weight:600'>{_ret:+.2f}%</span>"
+                f"<span style='min-width:44px;text-align:right;color:{_mark_color};font-size:0.74rem'>{_mark}</span>"
+                "</div>"
+            )
+        st.markdown("".join(_rows_html), unsafe_allow_html=True)
+        st.caption(
+            "「说对/说错」只对买入、卖出这类带方向的结论成立，持有/观望不计入胜率。"
+            "事后价格是系统按固定回看窗口自动补录的，不是挑出来的时点。"
+        )
 
         # ── 风险偏好 ────────────────────────────────────────────────────
         # 放在"我的"而不是"持仓"：清单里那句"低于风险档案下限2:1"是全站性的
@@ -6514,30 +6537,65 @@ def _render_risk_profile_input(email: str):
     st.markdown("**风险偏好**")
     st.caption("可执行清单的闸门参数：不满足这几条的标的只会被列为“仅观察”，不会给出下单数量。")
 
+    # 兜底值必须跟出厂的 risk_profile.example.json 一致（1% / 10% / 3% / 2.5）。
+    # 2026-09-13 审计抓到：这里原来的兜底是 10% / 100% / 10% / 2.0，是整组里
+    # 最宽松的一套——单一标的 100% 等于这道闸门根本不存在，而界面还把它
+    # 介绍成"闸门参数"，会让人以为有保护。没有配置文件的用户第一次打开这个
+    # 面板，看到的就该是一套真正能兜住的默认值，而不是等于没设。
+    _DEF = {"min_reward_risk": 2.5, "max_risk_per_trade_pct": 1.0,
+            "max_position_pct": 10.0, "max_daily_loss_pct": 3.0}
+
     min_rr = st.number_input(
         "最低盈亏比（清单里那句“低于风险档案下限 X:1”就是这个值）",
         min_value=0.5, max_value=10.0, step=0.5,
-        value=float(profile.get("min_reward_risk") or 2.0),
+        value=float(profile.get("min_reward_risk") or _DEF["min_reward_risk"]),
         key=f"_risk_min_rr_{email}",
+        help="常见区间 2:1 ~ 3:1。低于 1.5:1 意味着赢的时候赚得比输的时候亏得还少。",
     )
     max_risk = st.number_input(
         "单笔最大亏损占总资金比例（%）",
         min_value=0.1, max_value=100.0, step=0.5,
-        value=float(profile.get("max_risk_per_trade_pct") or 10.0),
+        value=float(profile.get("max_risk_per_trade_pct") or _DEF["max_risk_per_trade_pct"]),
         key=f"_risk_per_trade_{email}",
+        help="业界常规是 1%~2%。设成 10% 意味着连错 7 次本金就腰斩。",
     )
     max_pos = st.number_input(
         "单一标的最大仓位占比（%）",
         min_value=1.0, max_value=100.0, step=5.0,
-        value=float(profile.get("max_position_pct") or 100.0),
+        value=float(profile.get("max_position_pct") or _DEF["max_position_pct"]),
         key=f"_risk_max_pos_{email}",
+        help="常见区间 10%~25%。设成 100% 等于这道闸门不存在，单一标的可以吃掉全部资金。",
     )
     max_daily = st.number_input(
         "单日最大回撤容忍度（%）",
         min_value=0.1, max_value=100.0, step=0.5,
-        value=float(profile.get("max_daily_loss_pct") or 10.0),
+        value=float(profile.get("max_daily_loss_pct") or _DEF["max_daily_loss_pct"]),
         key=f"_risk_daily_{email}",
+        help="常见区间 2%~5%。触发后当天不再新开仓。",
     )
+
+    # 只改兜底值救不了已经存成 100% 的档案——那份 json 已经落盘，兜底只在
+    # 字段缺失时才生效。所以这里对"等于没有风控"的取值直接点名，但不擅自
+    # 改用户的数：这是他的风险偏好，我们能做的是确保他知道自己设的是什么。
+    _danger = []
+    if max_pos >= 100:
+        _danger.append("**单一标的 100%** 等于这道闸门不存在——一只票就能吃掉全部资金")
+    elif max_pos > 40:
+        _danger.append(f"单一标的 {max_pos:g}% 偏高（常见 10%~25%）")
+    if max_risk >= 10:
+        _danger.append(f"**单笔亏损 {max_risk:g}%** 远高于常规的 1%~2%，连错 7 次本金腰斩")
+    elif max_risk > 3:
+        _danger.append(f"单笔亏损 {max_risk:g}% 偏高（常见 1%~2%）")
+    if min_rr < 1.5:
+        _danger.append(f"盈亏比下限 {min_rr:g}:1 偏低，赢的时候赚得可能比输的时候亏得还少")
+    if _danger:
+        st.warning(
+            "当前这组参数的保护力度很弱：\n\n"
+            + "\n".join(f"- {d}" for d in _danger)
+            + "\n\n这是你自己的偏好，系统不会替你改；但"
+              "上面那句“不满足条件只列为仅观察”在这组值下几乎拦不住任何标的。"
+        )
+
     if st.button("保存风险偏好", key=f"_risk_save_{email}", use_container_width=True):
         try:
             risk_policy.save_profile({
