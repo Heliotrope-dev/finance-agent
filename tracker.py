@@ -90,7 +90,7 @@ def init_db():
             )
             """
         )
-        # 老库升级：多市场之前建的watchlist表没有 market 列，统一按A股兼容
+        # 老库升级：多市场之前建的watchlist表没有 market 列，统一按沪深兼容
         wcols = [r[1] for r in c.execute("PRAGMA table_info(watchlist)").fetchall()]
         if "market" not in wcols:
             c.execute("ALTER TABLE watchlist ADD COLUMN market TEXT NOT NULL DEFAULT 'A'")
@@ -378,7 +378,7 @@ def init_db():
 
         # sim_agent_runs：AI模拟盘"自主决策"每次运行的完整记录——2026-09-01
         # 用户要求"全自动、自己学习试错"，这是每15分钟一次的独立决策循环
-        # (sim_agent.py，只在港股/美股开盘时跑，A股不参与)，跟每天17:30那次
+        # (sim_agent.py，只在港股/美股开盘时跑，沪深不参与)，跟每天17:30那次
         # 组合分析(advise_portfolio)不是同一回事，各自留自己的执行记录：
         # 这张表记的是"这次AI看到了什么、想了什么、决定怎么做"的完整上下文，
         # 不只是最终下了哪些单（simulated_orders已经记了下单结果，这张表
@@ -472,8 +472,8 @@ def init_db():
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_macro_topic ON macro_briefs (topic, created_at DESC)")
 
-        # ipo_briefs：港股新股的申购参考（2026-09-05新增）。跟 macro_briefs
-        # 同一个模式——预先算好落库，首页只读，不在渲染路径里跑AI。
+        # ipo_briefs：新股的申购参考（2026-09-05新增，当时只有港股）。跟
+        # macro_briefs 同一个模式——预先算好落库，首页只读，不在渲染路径里跑AI。
         # 每只新股每次重算写一条新记录，读的时候按 symbol 取最新那条，保留
         # 历史是为了事后能回看"当时是怎么判断的"，跟实际上市表现对照。
         c.execute(
@@ -492,6 +492,15 @@ def init_db():
             """
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_ipo_symbol ON ipo_briefs (symbol, created_at DESC)")
+        # market：2026-09-13 新增。在此之前这张表只存港股，美股那块首页只有
+        # 日程和定价区间、没有AI简报，用户要求做成跟港股一致。老记录一律回填
+        # 成 HK——这是事实，不是猜测。
+        # 读的时候要按 (market, symbol) 取最新一条而不是只按 symbol：港股代码是
+        # 5位数字、美股是字母，现实中撞不上，但靠"现实中撞不上"来保证唯一性
+        # 是运气不是设计，多市场的表就该按多市场的键分组。
+        _brief_cols = [r[1] for r in c.execute("PRAGMA table_info(ipo_briefs)").fetchall()]
+        if "market" not in _brief_cols:
+            c.execute("ALTER TABLE ipo_briefs ADD COLUMN market TEXT NOT NULL DEFAULT 'HK'")
 
         # ipo_performance：近期已上市新股的首日表现统计（2026-09-05新增）。
         # 算一次要为每只新股各发一次历史K线请求，几十次，富途历史K线有每日
@@ -908,19 +917,20 @@ def get_latest_ipo_performance(market: str = "HK") -> dict:
 
 
 def log_ipo_brief(symbol: str, name: str, list_date: str, apply_end: str,
-                  brief_text: str, facts_json: str = "", sources_json: str = "") -> None:
+                  brief_text: str, facts_json: str = "", sources_json: str = "",
+                  market: str = "HK") -> None:
     init_db()
     with closing(_conn()) as c:
         c.execute(
             "INSERT INTO ipo_briefs (symbol, name, list_date, apply_end, brief_text, "
-            "facts_json, sources_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "facts_json, sources_json, market, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (symbol, name, list_date, apply_end, brief_text, facts_json, sources_json,
-             datetime.now(timezone.utc).isoformat()),
+             (market or "HK").upper(), datetime.now(timezone.utc).isoformat()),
         )
         c.commit()
 
 
-def get_latest_ipo_briefs(limit: int = 6) -> list[dict]:
+def get_latest_ipo_briefs(limit: int = 6, market: str = "HK") -> list[dict]:
     """每只新股最新的一条，按上市日期正序——先上市的排前面，因为申购截止
     也更早，用户要先处理那一只。已经上市的不再显示（打新窗口已经过了）。
 
@@ -934,12 +944,13 @@ def get_latest_ipo_briefs(limit: int = 6) -> list[dict]:
        新股在真正的上市当天早上误判成"明天上市"继续展示。
     """
     init_db()
+    _mkt = (market or "HK").upper()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
         rows = c.execute(
-            "SELECT * FROM ipo_briefs WHERE id IN "
-            "(SELECT MAX(id) FROM ipo_briefs GROUP BY symbol) "
-            "ORDER BY list_date ASC LIMIT ?", (limit * 3,),
+            "SELECT * FROM ipo_briefs WHERE market = ? AND id IN "
+            "(SELECT MAX(id) FROM ipo_briefs WHERE market = ? GROUP BY symbol) "
+            "ORDER BY list_date ASC LIMIT ?", (_mkt, _mkt, limit * 3),
         ).fetchall()
     today = datetime.now(_CN_TZ).strftime("%Y-%m-%d")
     out = [dict(r) for r in rows if (r["list_date"] or "9999") > today]
@@ -1276,7 +1287,7 @@ def get_accuracy_stats(email: str) -> dict:
 
     除了总体一致率，额外按市场（A/HK/US）和按方向（偏多/偏空）拆分出子统计
     （"按市场""按方向"两个字段，各自是"分组值 -> 同样结构的统计字典"）——
-    笼统的一个数字看不出"AI是在A股准还是在美股准""偏多判断准还是偏空判断准"，
+    笼统的一个数字看不出"AI是在沪深准还是在美股准""偏多判断准还是偏空判断准"，
     拆开看才有实际分析价值。样本量小的分组（比如只有1-2条）算出来的百分比
     统计意义不大，前端展示时会按总数决定要不要显示。
     """
@@ -1554,10 +1565,10 @@ def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict
     如实说"数据还不够"，这是这个项目一贯"不编数字"的原则在这里的延伸。
 
     2026-08-29新增"按市场"拆分（返回字典多一个"按市场"键）：Fable 5复核
-    时指出，A股观察池选股口径是涨停股池（当天已经涨停10%/20%的股票），
-    跟港美股"人气榜/知名蓝筹"完全不是同一类总体——A股涨停股次日走势更多
+    时指出，沪深观察池选股口径是涨停股池（当天已经涨停10%/20%的股票），
+    跟港美股"人气榜/知名蓝筹"完全不是同一类总体——沪深涨停股次日走势更多
     是"情绪面剩余动能能不能延续"，跟基本面质量的相关性天然弱，如果三个
-    市场混在同一批分数区间里回测，A股这类跟基本面无关的噪音会污染"这套
+    市场混在同一批分数区间里回测，沪深这类跟基本面无关的噪音会污染"这套
     打分体系到底有没有预测力"这个问题的检验结果。总体的bands还保留（有
     些场景就是想看整体），但同时也按市场各自独立算一遍，方便对照。
 
@@ -2137,7 +2148,7 @@ def get_score_evidence_text(source: str = "watchlist") -> str:
                     ——高分没有优势，但谈不上单调反向；
         港股(n=281) 70-89档-1.42%，50-69档-1.07%，30-49档-1.85%
                     ——根本不单调，最低档反而最差，各档全负；
-        A股(n=28)   样本太小，不作结论。
+        沪深(n=28)   样本太小，不作结论。
         港股整体基线就差（各档全负），而它在高分档里占比又比美股高得多
         （89/281=32% vs 77/477=16%），于是把合并后的高分档整体拖了下去。
 
@@ -2203,7 +2214,7 @@ def get_score_evidence_text(source: str = "watchlist") -> str:
         window_txt = "核对窗口未知"
 
     by_market = bt.get("按市场") or {}
-    _label = {"US": "美股", "HK": "港股", "A": "A股"}
+    _label = {"US": "美股", "HK": "港股", "A": "沪深"}
     mkt_lines = []
     for mk in ("US", "HK", "A"):
         sub = by_market.get(mk)
@@ -2272,7 +2283,7 @@ def get_score_evidence_text(source: str = "watchlist") -> str:
         f"本系统打分体系的事后实证（{total}条已回填样本，{window_txt}，"
         f"是客观统计不是理论）：\n"
         + "\n".join(mkt_lines) + "\n"
-        "  必须按市场分开看：三个市场的候选池口径完全不同（A股是当天涨停股池，"
+        "  必须按市场分开看：三个市场的候选池口径完全不同（沪深是当天涨停股池，"
         "港美股是人气榜/蓝筹），混在一起统计会出现辛普森悖论——港股整体基线更差、"
         "又在高分档占比更高，会把合并后的高分档拖低，看上去像\"分数越高越差\"，"
         "拆开后并不成立。\n"

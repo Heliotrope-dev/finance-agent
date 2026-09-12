@@ -39,7 +39,7 @@ def calc_fee_hkd(market: str, shares: float, price: float, action: str, usd_hkd_
     只给sim_agent.py那条自主决策的虚拟现金台账(_settle_virtual_cash)用——
     持仓页那条每日信号交易走的是富途真实SIMULATE账户余额(get_sim_snapshot)，
     富途自己的模拟盘本身就会按真实费率扣账，不用在这边重复算一遍。
-    A股不在自主agent操作范围内，给0兜底，不硬编一套A股费率。
+    沪深不在自主agent操作范围内，给0兜底，不硬编一套沪深费率。
     """
     if shares <= 0 or price <= 0:
         return 0.0
@@ -66,7 +66,7 @@ def calc_fee_hkd(market: str, shares: float, price: float, action: str, usd_hkd_
 
 
 def _a_share_prefix(symbol: str) -> str:
-    """A股代码转富途SH./SZ.前缀——6开头是上交所，0/3开头是深交所。8/4开头
+    """沪深代码转富途SH./SZ.前缀——6开头是上交所，0/3开头是深交所。8/4开头
     理论上是北交所，富途模拟盘是否支持不确定，不特殊处理，交给下单接口
     自己报错（上层会catch住记成失败，不会导致整批信号中断）。"""
     if symbol.startswith("6"):
@@ -140,7 +140,7 @@ def _get_sim_acc_id(trd) -> str | None:
 
 
 def _get_lot_size(qot, code: str) -> int:
-    """A股/港股必须按整手下单，AI算出来的shares是理论数字，不一定刚好是
+    """沪深/港股必须按整手下单，AI算出来的shares是理论数字，不一定刚好是
     整手的倍数——下单前按实际lot_size取整，取整后是0就放弃这条信号（金额
     太小连一手都买不起，不该硬凑一手冲上去，也不该四舍五入拉到一手）。
     美股不按手交易，lot_size统一按1处理，不用查（省一次网络请求）。
@@ -394,8 +394,8 @@ def get_sim_snapshot() -> dict:
 
 def get_agent_snapshot() -> dict:
     """sim_agent.py自主决策专用的快照——2026-09-01用户明确要求"暂时先港美股，
-    A股不让AI碰，总资金按十万港币算"：跟get_sim_snapshot()的区别是只统计
-    HK/US两个市场（不含A股），并且统一折算成HKD而不是CNY——用户把这个自主
+    沪深不让AI碰，总资金按十万港币算"：跟get_sim_snapshot()的区别是只统计
+    HK/US两个市场（不含沪深），并且统一折算成HKD而不是CNY——用户把这个自主
     agent的记账本位币定为港币，跟"持仓页"那个面向全部三个市场、以人民币
     汇总的通用快照(get_sim_snapshot)是两回事，服务于不同的展示需求，所以
     分开两个函数，不在同一个函数里加参数分叉（分叉逻辑会让两种用途互相

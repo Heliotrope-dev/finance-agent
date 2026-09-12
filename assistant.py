@@ -69,7 +69,7 @@ _SYSTEM_PROMPT_TEMPLATE = """你是"投研站"网站里的AI助手，一个小�
 应该正常凭知识回答，需要更精确的实时数据时可以调用下面提供的工具查。
 
 网站功能说明（回答"这是什么/怎么用"这类问题时依据这个）：
-- 首页"推荐股排行榜"：AI每天从美股/港股/A股当天最热门的约50支股票里逐一打分
+- 首页"推荐股排行榜"：AI每天从美股/港股/沪深当天最热门的约50支股票里逐一打分
   （0-100分，六个维度加权算出——基本面22分：盈利能力/增长是否可持续/负债水平；
   价格位置20分：现价相对52周高低点的位置+估值历史分位；技术面20分：技术信号跟
   基本面判断是不是同向；筹码面20分：主力资金流向、空头持仓、机构持股变化、
@@ -102,9 +102,9 @@ _SYSTEM_PROMPT_TEMPLATE = """你是"投研站"网站里的AI助手，一个小�
 - "持仓"页面：用户手动记录自己的实际持仓，AI 会结合基本面/技术面/价格位置
   给出买入/卖出/持有/观望的参考判断（同样不是指令性建议），还有组合层面的
   体检（集中度、行业集中、市场敞口、宏观适配、逐支处理建议）。
-- "行情"页面：三个市场的指数快照、涨跌停池（A股）、核心股（港美股）、热门板块、
+- "行情"页面：三个市场的指数快照、涨跌停池（沪深）、核心股（港美股）、热门板块、
   今日异动（涨跌幅榜/热度榜/美股盘前）、新股上市，纯数据展示不下结论。
-- 港股/美股/A股有节假日休市时，用户打开网站会收到弹窗公告。
+- 港股/美股/沪深有节假日休市时，用户打开网站会收到弹窗公告。
 
 对话规则：
 1. 涉及"用户自己在这个网站上的数据"（持仓、历史判断记录、组合分析、这个
@@ -533,7 +533,7 @@ _TOOLS = [
                 "type": "object",
                 "properties": {
                     "symbol": {"type": "string", "description": "股票代码，比如TSLA、00700、600519"},
-                    "market": {"type": "string", "enum": ["A", "HK", "US"], "description": "所属市场：A股/港股/美股"},
+                    "market": {"type": "string", "enum": ["A", "HK", "US"], "description": "所属市场：沪深/港股/美股"},
                 },
                 "required": ["symbol", "market"],
             },
@@ -548,7 +548,7 @@ _TOOLS = [
                 "type": "object",
                 "properties": {
                     "symbol": {"type": "string", "description": "股票代码"},
-                    "market": {"type": "string", "enum": ["A", "HK", "US"], "description": "所属市场：A股/港股/美股"},
+                    "market": {"type": "string", "enum": ["A", "HK", "US"], "description": "所属市场：沪深/港股/美股"},
                 },
                 "required": ["symbol", "market"],
             },
@@ -573,13 +573,13 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "get_valuation_percentile",
-            "description": "查一支股票当前PE/PB相对自己过去三年历史区间处于什么分位（只支持A股/港股）——"
+            "description": "查一支股票当前PE/PB相对自己过去三年历史区间处于什么分位（只支持沪深/港股）——"
             "回答“现在贵不贵/便宜不便宜”这类估值问题时用，比只看静态PE倍数更有依据。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "symbol": {"type": "string", "description": "股票代码"},
-                    "market": {"type": "string", "enum": ["A", "HK"], "description": "只支持A股/港股"},
+                    "market": {"type": "string", "enum": ["A", "HK"], "description": "只支持沪深/港股"},
                 },
                 "required": ["symbol", "market"],
             },

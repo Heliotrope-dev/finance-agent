@@ -23,7 +23,7 @@ export default function RootLayout({ children }) {
               Invest Agent
             </span>
             <span className="text-[0.72rem]" style={{ color: "var(--fa-faint)" }}>
-              A股 · 港股 · 美股 · 虚拟货币
+              沪深 · 港股 · 美股 · 虚拟货币
             </span>
           </header>
           <Nav />

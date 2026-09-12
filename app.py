@@ -1066,8 +1066,8 @@ _BENCHMARK_NAMES = {"A": "沪深300", "HK": "恒生指数", "US": "标普500"}
 def _fetch_news_items(keyword: str, symbol: str | None, market: str) -> tuple:
     """页面展示和AI分析要用同一份新闻源，不然会出现页面上一手资讯明明有
     （比如寒武纪的官方公告），AI资讯解读那栏却说"没有找到相关新闻"这种自相
-    矛盾的情况。优先级：A股官方公告（get_stock_notices，监管强制披露，永远
-    免费）> 富途资讯搜索（get_futu_news，真按关键词匹配，港股/美股/A股通吃，
+    矛盾的情况。优先级：沪深官方公告（get_stock_notices，监管强制披露，永远
+    免费）> 富途资讯搜索（get_futu_news，真按关键词匹配，港股/美股/沪深通吃，
     链接免费可读）> 财新关键词匹配（get_stock_news，兜底，有付费墙）。
     返回 (DataFrame, 来源标记："notices"/"futu"/"caixin")。
     """
@@ -1249,10 +1249,10 @@ def _auth_qs() -> str:
 
 
 def _resolve_add_symbol(q: str, market_code: str) -> str | None:
-    """"新增持仓"用的名称→代码解析，A股之前一直漏了——resolve_symbol_by_name
-    只支持HK/US（内部的知名股名单和Futu模糊搜索都没有A股这块），A股market
+    """"新增持仓"用的名称→代码解析，沪深之前一直漏了——resolve_symbol_by_name
+    只支持HK/US（内部的知名股名单和Futu模糊搜索都没有沪深这块），沪深market
     传进去必然返回None，退化成直接把"茅台"这种中文名当代码用，当然查不到。
-    这里A股单独先走search_stock_by_name（BaoStock按名称模糊匹配，真支持A股），
+    这里沪深单独先走search_stock_by_name（BaoStock按名称模糊匹配，真支持沪深），
     查不到再试_A_FUND_NAME_MAP——BaoStock按名称搜索只覆盖个股不含ETF/基金，
     "沪深300ETF"这类名字搜不到，用户反馈过这个问题。
     """
@@ -1444,7 +1444,7 @@ def _quote_market_status(spot: dict, market: str) -> str:
         # "已收盘 · 美东09-10 23:19"，而当时美东实际是09-11 11:19、正在
         # 盘中——现查Futu的get_market_snapshot证实，美股的update_time字段
         # 本来就是交易所当地时间（美东，naive，不带时区），不是北京时间；
-        # 之所以港股/A股这条路径一直没暴露问题，是因为香港/中国跟北京
+        # 之所以港股/沪深这条路径一直没暴露问题，是因为香港/中国跟北京
         # 恰好同一个UTC+8时区，"按北京时间解释"这一步在数值上是空操作，
         # 只有美股(UTC-4/-5)才会因为这个错误假设多减/多减一次时区差，
         # 时间和日期都跟着错位。改成naive时间戳直接当成交易所本地时间，
@@ -1512,7 +1512,7 @@ def _fmt_usd_signed(value, decimals: int = 0, default: str = "—") -> str:
 def _clean_name(name) -> str:
     """去掉行情接口返回的名称里的补位空格。
 
-    2026-09-11前端审计抓到「南 京 港」这种——A股接口对三个字的名字会用
+    2026-09-11前端审计抓到「南 京 港」这种——沪深接口对三个字的名字会用
     全角空格补齐成四个字宽（老行情软件对齐用的习惯），原样渲染到网页上
     就变成了字中间带空格。
 
@@ -1666,7 +1666,7 @@ def _render_overall_summary(raw_text: str):
 
 
 def _display_name(symbol: str, market: str, spot: dict) -> str:
-    """给个股详情页AI模块用的展示名（拿去做新闻搜索关键词）——A股优先用
+    """给个股详情页AI模块用的展示名（拿去做新闻搜索关键词）——沪深优先用
     get_stock_name(symbol)（BaoStock查到的规范公司名），因为这个名字要
     拿去搜新闻，spot实时快照（Tencent/Futu）里的名称字段有时跟新闻源
     用的公司全称对不上，会影响新闻关键词命中率；港股/美股没有BaoStock
@@ -1724,7 +1724,7 @@ def _stream_ai_text(gen, raise_on_error: bool = True) -> str:
 
 def _render_news_section(keyword: str, symbol: str | None = None, market: str = "A", is_index: bool = False):
     """一手资讯单独成块，标题不截断——是AI解读的依据来源，放在AI解读前面让用户
-    自己先看一手材料。A股优先用官方公告（监管强制披露，永远免费，比新闻评论
+    自己先看一手材料。沪深优先用官方公告（监管强制披露，永远免费，比新闻评论
     更"一手"，点进去就是东财公告中心原文，不存在付费墙）；港股/美股没有对应的
     免费公告聚合源，退回财新新闻摘要（有付费墙，已经标注清楚）。
 
@@ -1822,7 +1822,7 @@ def _financial_key_rows(fin, market: str = "A") -> list[dict]:
             return None
 
     # 金额带上币种单位（2026-09-11前端审计："479.4亿"没有单位）。
-    # 只给能确定的两个市场加：A股报表一定是人民币，美股一定是美元；港股
+    # 只给能确定的两个市场加：沪深报表一定是人民币，美股一定是美元；港股
     # 刻意留空——大量港股公司用人民币出报表，而这套数据里没有"报表币种"
     # 这个字段（项目早先就踩过一次坑：以为有，实际那个字段给的是交易币种，
     # 见 git 历史里"港股的财报币种一直是错的"那次修复）。宁可不标，也不
@@ -2132,7 +2132,7 @@ def _render_key_metrics(spot: dict, market: str):
     ——这一页之前只有最高/最低/今开三个数。这次补上成交量/总市值/股息率/振幅
     四个映射，其余直接用现成字段。
 
-    A股走的是腾讯那条路径（不是Futu），拿不到估值类字段；缺的项直接不显示，
+    沪深走的是腾讯那条路径（不是Futu），拿不到估值类字段；缺的项直接不显示，
     不用"—"占位撑出一堆空格子——那会让人以为是加载失败。
     """
     rows: list[tuple[str, str]] = [
@@ -2390,7 +2390,7 @@ def _render_index_top_movers(market: str, index_name: str = ""):
         return
 
     # 之前是 f"_movers_expand_{market}"，只带市场不带指数名——同一市场下
-    # 切换不同指数（比如A股的上证指数/深证成指/创业板指）会共享同一个展开
+    # 切换不同指数（比如沪深的上证指数/深证成指/创业板指）会共享同一个展开
     # 状态，在一个指数里点过"展开"，切到同市场另一个指数也变成展开状态。
     # 恒生科技分支（上面）已经正确带了 "_hstech" 后缀，这里补上指数名区分。
     _movers_qualifier = index_name or "default"
@@ -2503,7 +2503,7 @@ def _render_index_snapshot(mkt_code: str):
 
 @st.fragment
 def _render_a_share_overview():
-    """A股大盘统计+涨停/跌停股池。之前这几块和指数快照、热门板块全部挤在
+    """沪深大盘统计+涨停/跌停股池。之前这几块和指数快照、热门板块全部挤在
     "行情"tab同一段代码里——点"显示更多（前30）"这一个按钮，会触发整个
     tab重新rerun，连带指数快照、热门板块这些跟这次点击完全无关的区块也要
     重新拉一遍数据（其中指数快照缓存只有25秒，涨停跌停池等未必命中缓存），
@@ -2677,7 +2677,7 @@ def _render_us_overview():
 def _render_market_extras(market: str):
     """行情页的补充板块：异动榜、热度榜、新股。
 
-    2026-09-05新增。行情页原本有指数、涨跌停池（A股）、核心股（港美股）、
+    2026-09-05新增。行情页原本有指数、涨跌停池（沪深）、核心股（港美股）、
     热门板块，覆盖的是"整体怎么样"和"板块怎么样"，缺的是"今天哪几支特别不
     一样"。异动榜和热度榜正好补这个：一个按涨跌幅、一个按关注度，两个口径
     挑出来的往往不是同一批——涨得多不一定有人看，热度高不一定在涨，两个都
@@ -2757,7 +2757,7 @@ def _render_market_extras(market: str):
         st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
         _rows("美股盘前异动", premarket, "开盘方向最早的线索")
 
-    # 三个市场都列新股，口径保持一致（用户2026-09-13要求 A股/美股跟港股对齐）。
+    # 三个市场都列新股，口径保持一致（用户2026-09-13要求 沪深/美股跟港股对齐）。
     if market in ("HK", "A", "US"):
         try:
             ipos = get_ipo_calendar(market, limit=6)
@@ -2769,7 +2769,7 @@ def _render_market_extras(market: str):
                 and "债券" not in str(ip.get("name") or "")]
         if ipos:
             st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-            # A股的 list_time 常常是 N/A（还在申购、上市日未定），这是A股的正常
+            # 沪深的 list_time 常常是 N/A（还在申购、上市日未定），这是沪深的正常
             # 状态不是缺数据，标题里说明一下，免得看到一排空日期以为坏了。
             _ipo_note = {
                 "A": "新股上市 · 打新中签后才配售，上市日多为待定",
@@ -2791,7 +2791,7 @@ def _render_market_extras(market: str):
                     f"<div style='display:flex;align-items:baseline;gap:10px;padding:8px 2px;"
                     f"border-bottom:1px solid var(--fa-border)'>"
                     f"<span style='color:var(--fa-faint);font-size:0.78rem;min-width:76px'>"
-                    # 上市日为空不是缺数据——A股申购期内上市日本来就没定，
+                    # 上市日为空不是缺数据——沪深申购期内上市日本来就没定，
                     # 留白会被当成"数据没拉到"，写"待定"才是事实。
                     f"{_esc(ip.get('list_date') or '待定')}</span>"
                     f"<span style='flex:1;color:var(--fa-text);font-size:0.86rem'>{_esc(ip['name'])}"
@@ -2813,7 +2813,7 @@ def _render_macro_strip():
     里——VIX 说的是恐慌程度，美债收益率是所有资产定价的锚，美元强弱直接压
     着黄金和原油。这几个数字看一眼要跳三个网站，放在最上面一行才有意义。
 
-    放在市场单选之上：这一条跟选A股/港股/美股无关，它是全球共用的背景板。
+    放在市场单选之上：这一条跟选沪深/港股/美股无关，它是全球共用的背景板。
     挂在某个市场下面会让人误以为"这是美股的VIX"。
     """
     try:
@@ -3044,7 +3044,7 @@ def _render_sector_heatmap(market: str):
     if fig is None:
         return
     st.markdown("**板块热力图**")
-    # 必须标明分类口径。审计第11条：A股这张图里"通信设备 +1.90%"，紧挨着的
+    # 必须标明分类口径。审计第11条：沪深这张图里"通信设备 +1.90%"，紧挨着的
     # 「热门板块」写"通信设备 +0.42%"，同一页两个数打架。查下来不是bug——
     # 热力图走富途，板块名带"Ⅱ"是申万二级；热门板块走同花顺，是另一套行业
     # 分类，同名不同成分（美股两处完全一致可以佐证）。但界面一个字都没说，
@@ -4070,7 +4070,7 @@ def _render_advice_section():
     # 每个市场本来就是独立池子，不存在"被另一个市场挤占名额"这回事。
     # 老的source="watchlist"（三市场混排）不删，advisor.py主流程仍然在写，
     # 只是首页不再读它。
-    _market_label = {"US": "美股", "HK": "港股", "A": "A股"}
+    _market_label = {"US": "美股", "HK": "港股", "A": "沪深"}
 
     def _render_board_rows(board):
         for rank, row in enumerate(board, 1):
@@ -4223,7 +4223,7 @@ def _render_app_guide():
     with st.container(key="my_about_guide"), st.expander("应用指南"):
         st.markdown(
             "**定位**\n\n"
-            "Invest Agent 是一个多市场（A股/港股/美股）行情查询和数据交叉验证工具，"
+            "Invest Agent 是一个多市场（沪深/港股/美股）行情查询和数据交叉验证工具，"
             "把行情、财务、新闻这几类原始数据放在一起给你看。个股/指数详情页的 AI 分析"
             "只做交叉核对和综合评分，不做黑箱荐股、不直接给买卖判断；"
             "「持仓」页的组合分析是例外——它只针对你自己填的真实持仓和设定的资金上限，"
@@ -4231,11 +4231,11 @@ def _render_app_guide():
             "（附股数和金额），这是基于你自己数据算出来的仓位管理建议，不是选股推荐，"
             "同样不构成投资建议，请自行判断风险。\n\n"
             "**行情**\n\n"
-            "在「行情」分区按市场查看核心指数（A股按涨跌幅列示，港股按东财人气榜排热度，"
-            "美股展示固定核心股名单），A股另有涨停/跌停池和南向资金；"
+            "在「行情」分区按市场查看核心指数（沪深按涨跌幅列示，港股按东财人气榜排热度，"
+            "美股展示固定核心股名单），沪深另有涨停/跌停池和南向资金；"
             "局部报价会自动刷新，模块旁会标注市场状态与数据时间。\n\n"
             "**个股/指数详情页**\n\n"
-            "点开任意标的先看K线或分时图，再看一手资讯（A股优先展示官方公告，"
+            "点开任意标的先看K线或分时图，再看一手资讯（沪深优先展示官方公告，"
             "港股/美股优先富途资讯，都查不到才退回财新摘要），最后是 AI 深度分析——"
             "包含资讯解读、财务摘要、对比大盘、技术面与消息面交叉验证，"
             "以及一段综合评分（0-100，越高越偏多头证据、越低越偏空头证据，"
@@ -4245,7 +4245,7 @@ def _render_app_guide():
             "（不填只是关注），卡片显示迷你走势图、实时涨跌和持仓浮盈，"
             "点卡片进详情页，点 × 卖出或取消关注。\n\n"
             "**AI模拟炒股**\n\n"
-            "内置 Gemini AI 用虚拟资金自主管理一个模拟盘——只交易港股/美股（A股不参与），"
+            "内置 Gemini AI 用虚拟资金自主管理一个模拟盘——只交易港股/美股（沪深不参与），"
             "在开盘时段按行情触发决策，不需要手动操作；"
             "这里能看到它的持仓、收益曲线和完整交易记录，仅供观察AI决策能力，"
             "不构成投资建议。\n\n"
@@ -4336,7 +4336,7 @@ def _render_data_source_health():
 def _show_closure_notice(items: list[dict]):
     """开市安排有变时的一次性公告。
 
-    2026-09-04用户要求："如果港股A股美股有特殊节假日休假，在前一天我们点进
+    2026-09-04用户要求："如果港股沪深美股有特殊节假日休假，在前一天我们点进
     网页的时候触发弹窗公告，几月几号什么股因为什么节假日休市"。
 
     只在"临近"时弹：默认看未来3天。提前太久没有行动价值（十月的假期九月初
@@ -4527,7 +4527,7 @@ def _render_my_page():
         total_mkt = sum(by_market.values())
         if total_mkt:
             st.markdown("**关注的市场**")
-            _label = {"A": "A股", "HK": "港股", "US": "美股"}
+            _label = {"A": "沪深", "HK": "港股", "US": "美股"}
             # 一根横向占比条 + 一行图例。比三个数字更直观地回答"我主要在看哪个
             # 市场"，配色走图表那套去饱和色板，不引入新颜色。
             _seg_colors = ["#2F3A45", "#7C8B9A", "#B9A17B"]
@@ -4567,7 +4567,7 @@ def _render_my_page():
                 for k, v in group.items():
                     if not v.get("总数"):
                         continue
-                    _label_map = {"A": "A股", "HK": "港股", "US": "美股"}
+                    _label_map = {"A": "沪深", "HK": "港股", "US": "美股"}
                     _rows.append((group_name, _label_map.get(k, k), v["一致率"], v["总数"]))
             if _rows:
                 with st.expander("按市场 / 按方向拆开看"):
@@ -4728,7 +4728,7 @@ def _render_my_page():
             _searches = []
         if _searches:
             st.markdown("**最近搜索**")
-            _mk = {"A": "A股", "HK": "港股", "US": "美股"}
+            _mk = {"A": "沪深", "HK": "港股", "US": "美股"}
             if st.session_state.pop("_search_open_error", None):
                 st.caption("这条搜索记录查不到对应行情，可能当时就没搜到，或者标的已经退市。")
             # 整行做成链接（2026-09-04用户要求"最新搜索的股票最好能点进去显示
@@ -4738,7 +4738,7 @@ def _render_my_page():
             # 把现有的div原样包起来，外观一点不变。
             # flex 直接加在 <a> 上，里面只放两个 span，不再嵌一层 <div>。
             # 第一版是 <a> 包一个 display:flex 的 <div>，结果整行挤成了
-            # "500001A股 · 08-22"——右对齐没了、间距也没了。Streamlit 的
+            # "500001沪深 · 08-22"——右对齐没了、间距也没了。Streamlit 的
             # markdown 会把这段塞进 <p>，而浏览器遇到 <p> 里的块级 <div> 会
             # 提前把 <p> 闭掉，<a> 和它包着的 <div> 的父子关系当场被打散，
             # 内层的 flex 布局跟着失效。项目里别处的 *-card-link 是同一个坑
@@ -4965,7 +4965,13 @@ def _render_ai_assistant():
 _MACRO_SECTIONS = ("一句话结论", "现状", "影响", "盯什么")
 
 
+# 新股简报的段名。两个市场不一样，因为两个市场决定"要不要打"的因素本来就
+# 不一样：港股散户从公开发售认购，回拨机制和绿鞋直接影响散户拿到多少货；
+# 美股由承销商配售，没有回拨这回事，真正决定开盘走势的是领投行档次、流通盘
+# 和锁定期。段名必须跟 ipo_brief.py 里对应的系统提示词逐字一致，_parse_ipo_text
+# 是按这些名字切段的，改一边不改另一边会让整份简报解析成空白。
 _IPO_SECTIONS = ("一句话结论", "公司概况", "定价与门槛", "市场热度", "绿鞋与回拨", "风险")
+_IPO_SECTIONS_US = ("一句话结论", "公司概况", "定价与门槛", "承销与基石", "锁定期与流通盘", "风险")
 
 
 @st.fragment
@@ -4973,7 +4979,7 @@ def _render_ipo_open_vs_close(items: list[dict], key_suffix: str = "hk"):
     """新股首日"开盘就卖 vs 持到收盘"（升级路线图第8条）。
 
     路线图原本要的是"超购倍数 vs 首日表现"散点图。超购倍数这个数据确认拿不到：
-    富途的接口没有这个字段，akshare 的 stock_ipo_hk_ths 实测返回的是A股数据
+    富途的接口没有这个字段，akshare 的 stock_ipo_hk_ths 实测返回的是沪深数据
     （代码是001246/301716这种深市北交所的）而且列里塞的是抓取的页面文本，
     港交所披露易那边得逐份PDF解析。与其硬凑一个不准的数，不如换一个用现有
     数据就能回答、对打新同样实际的问题。
@@ -5071,15 +5077,86 @@ def _render_ipo_calculator(items: list[dict]):
             st.caption(f"自有资金回报率 {res['return_on_own_capital']:+.2%}——融资放大回报，也同样放大亏损。")
 
 
+def _render_us_ipo_calculator(items: list[dict]):
+    """美股打新测算器（2026-09-13，用户要求美股跟港股一致）。
+
+    不是把港股那个换成美元。美股 IPO 的机制不同，照搬会让每一个输入框都在问
+    一个不存在的数：
+
+      每手入场费  美股按股认购，没有"一手"这个单位；
+      中签率      港股是交易所公开分配、事后逐只公告的比率；美股散户拿到的是
+                  承销团分给零售渠道的配额，比例由券商自己定、不公开，所以这里
+                  的输入项叫"获配比例"而不是"中签率"——它们不是同一件事，
+                  用同一个词会让人以为有个官方数字可查；
+      孖展        美股 IPO 认购是现金冻结，券商不提供融资认购，整块砍掉。
+
+    真正值得算的反而是港股那个算不了的一件事：**开盘就卖 vs 持到收盘**。
+    美股新股首日振幅比港股大得多，这两个选择的差距常常比"打不打"本身更大，
+    而这两个数我们的 items 里都有（open_pct / first_day_pct），是真实统计
+    不是假设，所以这里两个都算出来并排摆。
+    """
+    try:
+        summ = ipo_calc.summarize_history(items)
+    except Exception:
+        return
+    _close_med = summ.get("close_median")
+    _open_med = summ.get("open_median")
+    if _close_med is None:
+        return
+
+    with st.expander("打新收益测算器"):
+        st.caption("算的是长期重复参与的平均结果；单次配额要么是0要么很小，实际会大幅跳变。")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            amount = st.number_input("认购金额（美元）", min_value=0.0, value=10000.0,
+                                     step=1000.0, key="_us_ipo_amount")
+        with c2:
+            alloc = st.number_input("预期获配比例（%）", min_value=0.0, max_value=100.0,
+                                    value=10.0, step=1.0, key="_us_ipo_alloc",
+                                    help="承销团分给零售渠道的配额比例，由券商自己定、不公开，需要你按自己的经验填")
+        with c3:
+            fee = st.number_input("认购手续费（美元）", min_value=0.0, value=0.0,
+                                  step=5.0, key="_us_ipo_fee")
+
+        # 两种卖法各算一遍。margin 全部传 0：美股 IPO 认购是现金冻结，
+        # 券商不提供融资认购，留着这条路只会算出一个不可能发生的场景。
+        _rows = []
+        for _label, _move in (("开盘就卖", _open_med), ("持到收盘", _close_med)):
+            if _move is None:
+                continue
+            r = ipo_calc.estimate(amount, 1, alloc, _move,
+                                  margin_ratio=0.0, margin_rate_pct=0.0,
+                                  margin_days=0, fee_per_subscription=fee)
+            if r:
+                _rows.append((_label, _move, r))
+        if not _rows:
+            return
+
+        _cols = st.columns(len(_rows))
+        for _col, (_label, _move, r) in zip(_cols, _rows):
+            with _col:
+                st.metric(f"{_label}（首日中位数 {_move:+.1f}%）",
+                          f"${r['net_profit']:,.0f}")
+        _r0 = _rows[0][2]
+        st.caption(f"预期获配 \\${_r0['allotted_amount']:,.0f}——"
+                   f"这个数才是真正在赚钱的部分，认购金额里剩下的会在上市当天退回。")
+        if len(_rows) == 2:
+            _d_open, _d_close = _rows[0][2]["net_profit"], _rows[1][2]["net_profit"]
+            _better = "持到收盘" if _d_close > _d_open else "开盘就卖"
+            st.caption(f"按近{summ.get('n', 0)}只的中位数，{_better}多赚 "
+                       f"\\${abs(_d_close - _d_open):,.0f}——但这是中位数，"
+                       f"单只的开盘和收盘经常差出几十个百分点。")
+
+
 def _render_a_ipo_briefs():
-    """A股新股认购专区（2026-09-13 用户要求，参照港股那块）。
+    """沪深新股认购专区（2026-09-13 用户要求，参照港股那块）。
 
     没有照搬港股的 AI 简报模式：那块的招股要素（保荐人/基石/超额认购/绿鞋）
-    是 ipo_brief.py 这条独立 cron 用 AI 从公开网页挖出来再落库的，A股没有对应
+    是 ipo_brief.py 这条独立 cron 用 AI 从公开网页挖出来再落库的，沪深没有对应
     的管线，硬做等于再起一条要维护的 AI 链路。
 
-    改成围绕一个 A股独有、而且富途接口直接给的硬指标：**发行市盈率 vs 行业
-    市盈率**。这是A股打新判断"贵不贵"的通行口径——发行PE显著高于行业PE的，
+    改成围绕一个 沪深独有、而且富途接口直接给的硬指标：**发行市盈率 vs 行业
+    市盈率**。这是沪深打新判断"贵不贵"的通行口径——发行PE显著高于行业PE的，
     上市后向行业均值回归的压力就大。港股和美股的接口都没有这两个字段，所以
     这块的形态跟港股那块本来就该不一样，不是偷懒。
 
@@ -5092,14 +5169,14 @@ def _render_a_ipo_briefs():
     if not ipos:
         return
 
-    # 未定价的单独归一类：A股在申购前几天才公布发行价，这期间接口返回的是0。
+    # 未定价的单独归一类：沪深在申购前几天才公布发行价，这期间接口返回的是0。
     # 把0当成"发行价0元"显示出来是错的，当成"没有这只票"藏掉也是错的。
     priced = [ip for ip in ipos if (ip.get("ipo_price") or 0) > 0]
     unpriced = [ip for ip in ipos if (ip.get("ipo_price") or 0) <= 0]
 
     if priced:
         st.caption("发行市盈率高于行业市盈率越多，上市后向行业均值回归的压力越大——"
-                   "这是A股打新最直接的一个贵贱参照，但它只说估值，不代表公司好坏。")
+                   "这是沪深打新最直接的一个贵贱参照，但它只说估值，不代表公司好坏。")
     for ip in priced:
         _ipo_pe = ip.get("issue_pe") or 0
         _ind_pe = ip.get("industry_pe") or 0
@@ -5129,7 +5206,7 @@ def _render_a_ipo_briefs():
     if unpriced:
         st.caption(
             "另有 " + "、".join(f"{_esc(ip['name'])}（{_esc(ip['symbol'])}）" for ip in unpriced)
-            + " 尚未公布发行价——A股通常在申购前几天才定价，不是数据缺失。"
+            + " 尚未公布发行价——沪深通常在申购前几天才定价，不是数据缺失。"
         )
 
 
@@ -5140,39 +5217,59 @@ def _render_us_ipo_briefs():
     _render_ipo_perf_block——底层那条"上市首日 last_close 即发行价"的约定
     在美股一样成立（实测 US.AAC.U：last_close=10.0、close=10.05、+0.5%）。
 
-    只有两处按市场差异处理：
-
-    1. **没有打新测算器**。美股 IPO 由承销商配售给机构和特定客户，散户没有
-       申购入口，摆一个算中签收益的工具等于引导用户去找不存在的东西。
-    2. **没有 AI 招股简报**。港股那份的保荐人/基石/超额认购是 ipo_brief.py
-       用 AI 从公开网页挖的，美股没有对应管线，就只给日程和定价区间。
+    2026-09-13 补齐到跟港股一致（用户："港股新股下面也有美股那边也要移植"）：
+    打新收益测算器和 AI 招股简报这两块原来美股没有，现在都有了，但都不是把
+    港股那份换个币种——机制不同，见 _render_us_ipo_calculator 和
+    ipo_brief.py 里 _US_SYSTEM 上方的注释。
 
     富途一次返回上百条（实测102条），其中很多是没有确定上市日的。只列出已经
     定了日期、且还没上市的，按日期升序——没定日期的堆在页面上没有行动价值。
     """
     # 首日表现统计跟港股共用同一块（数据由 ipo_brief.py 按 market="US" 另存一份）。
-    # 不给打新测算器：美股散户没有申购入口。
     try:
         _perf_us = get_latest_ipo_performance(market="US")
     except Exception:
         _perf_us = {}
-    _render_ipo_perf_block(_perf_us, show_calculator=False, key_suffix="us")
+    _render_ipo_perf_block(_perf_us, show_calculator=True, key_suffix="us")
+
+    # AI 招股简报。港股那块叫"即将上市与认购中"，美股这里只能叫"即将上市"——
+    # 美股没有公开认购窗口，接口的 apply_end_time 全是 N/A，写"认购中"是编的。
+    try:
+        _us_briefs = get_latest_ipo_briefs(limit=4, market="US")
+    except Exception:
+        _us_briefs = []
+    if _us_briefs:
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 4px'>"
+            "即将上市</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 10px'>"
+            "发行数据来自交易接口，承销商／基石／锁定期来自公开资讯，"
+            "资讯里没提到的一律标注未查到</div>",
+            unsafe_allow_html=True,
+        )
+        _render_ipo_brief_cards(_us_briefs, market="US")
 
     try:
         ipos = get_ipo_calendar("US", limit=60)
     except Exception:
         ipos = []
     _today = cn_now().strftime("%Y-%m-%d")
-    upcoming = [ip for ip in ipos if (ip.get("list_date") or "") >= _today][:8]
+    # 已经出了 AI 简报的不在下面重复列一遍——那几只上面已经有完整的一张卡了，
+    # 再出现在日程表里只会让人以为是两只不同的票。
+    _done = {str(b.get("symbol") or "") for b in _us_briefs}
+    upcoming = [ip for ip in ipos
+                if (ip.get("list_date") or "") >= _today and ip["symbol"] not in _done][:8]
     if not upcoming:
-        if not (_perf_us or {}).get("stats"):
+        if not (_perf_us or {}).get("stats") and not _us_briefs:
             st.caption("暂时没有美股新股数据。")
         return
 
     st.markdown(
-        "<div style='font-size:0.76rem;color:var(--fa-faint);margin:2px 0 6px'>"
-        "即将上市</div>", unsafe_allow_html=True)
-    st.caption("美股 IPO 由承销商配售给机构，散户没有申购入口——只作日程和定价区间参考。")
+        "<div style='font-size:0.76rem;color:var(--fa-faint);margin:14px 0 6px'>"
+        "其余日程</div>", unsafe_allow_html=True)
+    st.caption("美股 IPO 由承销商配售，散户通过券商拿到的是零售渠道配额，没有公开认购窗口。")
     for ip in upcoming:
         _lo, _hi = ip.get("price_min"), ip.get("price_max")
         if _lo and _hi:
@@ -5190,7 +5287,7 @@ def _render_us_ipo_briefs():
             f"white-space:nowrap;color:var(--fa-text);font-size:0.86rem'>{_esc(ip['name'])}"
             f"<span style='color:var(--fa-faint);font-size:0.76rem'> {_esc(ip['symbol'])}</span></span>"
             f"<span style='color:var(--fa-text-2);font-size:0.8rem;min-width:118px;"
-            f"text-align:right'>招股价 {_esc(_pr)}</span></div>",
+            f"text-align:right'>发行价 {_esc(_pr)}</span></div>",
             unsafe_allow_html=True,
         )
 
@@ -5202,8 +5299,9 @@ def _render_ipo_perf_block(perf: dict, show_calculator: bool = True, key_suffix:
     美股那块做成跟港股一致并且能标签切换。两个市场的这部分完全同构：底层都是
     "上市首日那根日K的 last_close 即发行价"这条约定（实测美股同样成立）。
 
-    show_calculator：只有港股给打新测算器。美股 IPO 由承销商配售给机构，
-    散户没有申购入口，摆一个算中签收益的工具等于引导用户去找不存在的东西。
+    show_calculator 为真时按 key_suffix 分派到各自的测算器：港股那个算中签率
+    和孖展，美股那个算获配比例和"开盘卖 vs 收盘卖"。两者不能互换，见
+    _render_us_ipo_calculator 的 docstring。
 
     key_suffix 必须按市场给不同的值：st.tabs 会把**所有**标签页的内容都渲染
     出来（不是点到才渲染），所以港股和美股这两块是同时存在于页面上的，图表
@@ -5270,7 +5368,10 @@ def _render_ipo_perf_block(perf: dict, show_calculator: bool = True, key_suffix:
 
         _render_ipo_open_vs_close(_items, key_suffix=key_suffix)
         if show_calculator:
-            _render_ipo_calculator(_items)
+            if key_suffix == "us":
+                _render_us_ipo_calculator(_items)
+            else:
+                _render_ipo_calculator(_items)
 
         with st.expander(f"按月拆解与逐只明细（{len(_items)} 只）"):
             if _monthly:
@@ -5328,7 +5429,6 @@ def _render_ipo_briefs():
         briefs = []
 
     import datetime as _d
-    today = _d.date.today()
 
     st.markdown("<div style='height:26px'></div>", unsafe_allow_html=True)
 
@@ -5384,8 +5484,28 @@ def _render_ipo_briefs():
         unsafe_allow_html=True,
     )
 
+    _render_ipo_brief_cards(briefs, market="HK")
+
+
+def _render_ipo_brief_cards(briefs: list[dict], market: str = "HK"):
+    """一只新股一张卡：名称 + 代码 + AI结论 + 关键数字，展开看全文。
+
+    2026-09-13从 _render_ipo_briefs 里抽出来给美股复用。两个市场共用同一套
+    版式是对的——用户在标签间切换时，同一个位置应该是同一个意思的东西。
+    真正按市场分叉的只有三处，都是数据决定的，不是样式偏好：
+
+      认购截止日   港股有公开认购窗口，倒计时是这块最有行动价值的信息；
+                  美股没有这个概念（接口的 apply_end_time 全是 N/A），
+                  摆一个空位比不摆更糟。
+      入场费/每手   同上，美股按股买，没有"一手"。
+      段名         见 _IPO_SECTIONS / _IPO_SECTIONS_US 上方那段注释。
+    """
+    import datetime as _dd
+    today = _dd.date.today()
+    _sections = _IPO_SECTIONS_US if market == "US" else _IPO_SECTIONS
+
     for b in briefs:
-        parts = _parse_ipo_text(_clean_ai_markdown(b.get("brief_text", "")))
+        parts = _parse_ipo_text(_clean_ai_markdown(b.get("brief_text", "")), market)
         head = parts.get("一句话结论", "")
         # 结论词决定颜色：值得申购用涨色，建议回避用跌色，其余中性。
         _tone = "var(--fa-muted)"
@@ -5399,12 +5519,12 @@ def _render_ipo_briefs():
         except Exception:
             facts = {}
 
-        # 认购截止的紧迫度
-        _due = b.get("apply_end") or ""
+        # 认购截止的紧迫度（只有港股有公开认购窗口）
         _due_txt = ""
+        _due = (b.get("apply_end") or "") if market != "US" else ""
         if _due:
             try:
-                left = (_d.date.fromisoformat(_due) - today).days
+                left = (_dd.date.fromisoformat(_due) - today).days
                 if left < 0:
                     _due_txt = f"认购已截止（{_due}）"
                 elif left == 0:
@@ -5417,13 +5537,24 @@ def _render_ipo_briefs():
         _meta = []
         if b.get("list_date"):
             _meta.append(f"{b['list_date']} 上市")
-        if facts.get("entrance_price"):
-            _meta.append(f"入场费 HK${facts['entrance_price']:,.0f}")
-        if facts.get("lot_size"):
-            _meta.append(f"每手 {int(facts['lot_size'])}股")
         _pmin, _pmax = facts.get("price_min"), facts.get("price_max")
-        if _pmin and _pmax:
-            _meta.append(f"招股价 {_pmin:,.2f}" + (f"-{_pmax:,.2f}" if _pmax != _pmin else ""))
+        if market == "US":
+            if _pmin and _pmax:
+                _meta.append(f"发行价 {_pmin:,.2f}"
+                             + (f"-{_pmax:,.2f}" if _pmax != _pmin else ""))
+            if facts.get("issue_size"):
+                _meta.append(f"发行 {int(facts['issue_size']):,} 股")
+                if _pmin and _pmax:
+                    _raise = int(facts["issue_size"]) * (float(_pmin) + float(_pmax)) / 2.0
+                    _meta.append(f"募资约 {_raise / 1e6:,.0f}M")
+        else:
+            if facts.get("entrance_price"):
+                _meta.append(f"入场费 HK${facts['entrance_price']:,.0f}")
+            if facts.get("lot_size"):
+                _meta.append(f"每手 {int(facts['lot_size'])}股")
+            if _pmin and _pmax:
+                _meta.append(f"招股价 {_pmin:,.2f}"
+                             + (f"-{_pmax:,.2f}" if _pmax != _pmin else ""))
 
         st.markdown(
             f"<div style='padding:14px 0 4px;border-top:1px solid var(--fa-border)'>"
@@ -5435,8 +5566,10 @@ def _render_ipo_briefs():
             f"{_esc(' · '.join(_meta))}{('　' + _esc(_due_txt)) if _due_txt else ''}</div></div>",
             unsafe_allow_html=True,
         )
+        # key 必须带市场后缀：st.tabs 会把所有标签页的内容都渲染出来（不是点到
+        # 才渲染），港股和美股同时在场，不加后缀会撞 key。
         with st.expander("展开详情"):
-            for name in _IPO_SECTIONS[1:]:
+            for name in _sections[1:]:
                 body = parts.get(name)
                 if body:
                     st.markdown(_labeled_line(name, body), unsafe_allow_html=True)
@@ -5448,12 +5581,17 @@ def _render_ipo_briefs():
                 st.caption(f"参考资讯 {len(srcs)} 条")
 
 
-def _parse_ipo_text(text: str) -> dict:
-    """按段名切开新股简报。跟 _parse_advice_text 同一套约定和同样的加粗容忍。"""
+def _parse_ipo_text(text: str, market: str = "HK") -> dict:
+    """按段名切开新股简报。跟 _parse_advice_text 同一套约定和同样的加粗容忍。
+
+    段名按市场取（见 _IPO_SECTIONS / _IPO_SECTIONS_US）。这里不做"两套段名
+    都试一遍"的兜底：那样会把一份港股简报里恰好出现的"风险"段落塞进美股的
+    解析结果，掩盖掉"提示词和解析器对不上"这种真正需要暴露的配置错误。
+    """
     parts: dict = {}
     text = text or ""
     positions = []
-    for name in _IPO_SECTIONS:
+    for name in (_IPO_SECTIONS_US if market == "US" else _IPO_SECTIONS):
         m = re.search(r"(?:^|\n)\s*\*{0,2}" + re.escape(name) + r"\*{0,2}\s*[：:]", text)
         if m:
             positions.append((m.start(), name, m.end()))
@@ -5805,15 +5943,15 @@ def _render_home_page():
     _render_macro_briefs()
     _render_event_calendar()
     # 三个市场的新股收进一组标签，而不是竖着排三段——竖排的话首页要多滚三屏，
-    # 而用户一次只关心一个市场（用户2026-09-13："上面设置三个标签港股，A股，
+    # 而用户一次只关心一个市场（用户2026-09-13："上面设置三个标签港股，沪深，
     # 美股三个小标签任意切换"）。
     #
     # 港股和美股的内容是同构的（首日表现统计/开盘vs收盘散点/按月拆解，共用
-    # _render_ipo_perf_block）；A股那块形态不同是数据决定的——这个账号没有A股
+    # _render_ipo_perf_block）；沪深那块形态不同是数据决定的——这个账号没有沪深
     # 行情权限，取不到历史新股的首日K线，所以算不出首日表现统计，改成用富途
-    # 直接给的发行PE/行业PE，那也是A股打新判断贵贱的通行口径。
+    # 直接给的发行PE/行业PE，那也是沪深打新判断贵贱的通行口径。
     st.markdown("**新股**")
-    _ipo_tab_hk, _ipo_tab_a, _ipo_tab_us = st.tabs(["港股", "A股", "美股"])
+    _ipo_tab_hk, _ipo_tab_a, _ipo_tab_us = st.tabs(["港股", "沪深", "美股"])
     with _ipo_tab_hk:
         _render_ipo_briefs()
     with _ipo_tab_a:
@@ -6417,7 +6555,7 @@ def _render_index_detail(name: str, code: str, market: str):
 
     base_price = idx_snap.get("最新") - idx_snap.get("涨跌") if idx_snap else None
 
-    # 2026-09-11修（P0，前端审计"指数K线空白"）：实测不是取不到数据——A股
+    # 2026-09-11修（P0，前端审计"指数K线空白"）：实测不是取不到数据——沪深
     # 指数分时/日K走的是BaoStock/新浪这两个接口（个股K线走本地Futu，几乎
     # 秒回），从这台VPS访问境内接口本身就有真实网络延迟，缓存没命中时单次
     # 加载能到8-9秒。之前这段时间页面上什么都不画，用户等到8秒以上只看到
@@ -6698,7 +6836,7 @@ def _render_price_alerts_manager(email: str):
         f"生效中 {len(active)} 条，已触发 {len(alerts) - len(active)} 条——"
         f"开盘时段检查，触发一次后自动停用。"
     )
-    _mk = {"A": "A股", "HK": "港股", "US": "美股"}
+    _mk = {"A": "沪深", "HK": "港股", "US": "美股"}
     for a in alerts:
         c1, c2, c3 = st.columns([3.2, 1, 1])
         with c1:
@@ -7050,7 +7188,7 @@ def _render_ai_sim_dashboard():
     保留，只是不在这个入口展示）。
 
     展示的是sim_agent.py那条每5分钟一次的自主决策链路（只交易港股/美股，
-    A股不参与，起始本金1万美金，2026-09-02从十万港币改的——内部记账仍按
+    沪深不参与，起始本金1万美金，2026-09-02从十万港币改的——内部记账仍按
     港币结算，页面展示层统一折成美元，见_render_ai_sim_live_snapshot里
     _usd_rate那处说明），不是持仓页那个"跟着每天17:30组合分析走"的模拟盘
     （那个继续在持仓页自己的开关那块，两条链路各自独立）。
@@ -7766,11 +7904,11 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
     def _collect_rows():
         # 之前是for循环一只一只顺序取（实时价+迷你图两个接口都要等网络返回），
         # 用户反馈"持仓加载好慢"——几只股票乘以两次网络请求累加起来确实慢。
-        # A股走BaoStock/akshare，内部各自有全局锁保证线程安全，并发提交时这
+        # 沪深走BaoStock/akshare，内部各自有全局锁保证线程安全，并发提交时这
         # 部分本来就会排队，不会因为并发就变快；但港股/美股走Futu，现在走的是
         # 单一常驻worker线程+队列（见data_sources.py的_futu_call），单次查询
         # 本身只要零点几秒，并发提交多只互不阻塞。用线程池把每只股票的取数
-        # 并发起来，A股之间该排队还是排队，但A股和港股/美股之间、以及港股/
+        # 并发起来，沪深之间该排队还是排队，但沪深和港股/美股之间、以及港股/
         # 美股彼此之间不用再互相等，混合市场的持仓整体加载时间能明显缩短。
         #
         # 统一截止时间/避免线程堆积的实现细节抽到了共享的
@@ -7793,7 +7931,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
             hk_us_quotes = {}
 
         # 第一段：价格。港美股的值已经在上面那次批量调用里了，这一段基本是
-        # 内存取值；只有A股需要真的发请求（走BaoStock/akshare各自的全局锁）。
+        # 内存取值；只有沪深需要真的发请求（走BaoStock/akshare各自的全局锁）。
         quote_results = _run_concurrent_with_deadline(
             position_items, lambda item: _fetch_quote(item, hk_us_quotes), timeout=4,
         )
@@ -8148,7 +8286,7 @@ def _render_accuracy_dashboard(email: str):
     # 大字号的总体准确率 + 一句自动生成的人话点评（哪个方向/哪个市场判断
     # 更准），剩下细分数字降级成小字辅助信息，不再是一排并列的st.metric
     # 让人自己去比大小。
-    _market_label = {"A": "A股", "HK": "港股", "US": "美股"}
+    _market_label = {"A": "沪深", "HK": "港股", "US": "美股"}
     _dir_bull = stats.get("按方向", {}).get("偏多", {})
     _dir_bear = stats.get("按方向", {}).get("偏空", {})
     _mkt_stats = stats.get("按市场", {})
@@ -8374,7 +8512,7 @@ def _resolve_confirmed_symbol(email: str, q: str, market_code: str) -> dict | No
     if not add_symbol:
         st.error(f"没查到「{q}」的行情——检查一下代码对不对，或者这家公司没上市（比如私营公司本来就没有股票代码）。")
         return None
-    # check_stock_valid 只覆盖 A 股（内部走 BaoStock，港美股没有等价数据源）——
+    # check_stock_valid 只覆盖 沪深（内部走 BaoStock，港美股没有等价数据源）——
     # 能提前区分"代码格式对但公司已退市"和"数据源临时故障"这两种情况，
     # 不再一律甩给用户一句含糊的"检查一下代码对不对"。
     if market_code == "A":
@@ -8458,7 +8596,7 @@ def _show_stock_search_dialog(email: str):
     if history:
         st.divider()
         st.caption("最近搜索")
-        _hist_market_label = {"A": "A股", "HK": "港股", "US": "美股"}
+        _hist_market_label = {"A": "沪深", "HK": "港股", "US": "美股"}
         for h in history:
             row_label = f"{h['query']}（{_hist_market_label.get(h['market'], h['market'])}）"
             if st.button(row_label, key=f"_pos_search_hist_{h['id']}", use_container_width=True):
@@ -8641,7 +8779,7 @@ def _show_add_position_dialog(email: str):
     if history:
         st.divider()
         st.caption("最近搜索")
-        _hist_market_label = {"A": "A股", "HK": "港股", "US": "美股"}
+        _hist_market_label = {"A": "沪深", "HK": "港股", "US": "美股"}
         for h in history:
             row_label = f"{h['query']}（{_hist_market_label.get(h['market'], h['market'])}）"
             # 点历史记录直接跳去那只股票的详情页，不是再加一遍持仓——
@@ -8767,7 +8905,7 @@ else:
         # 的信息。而且页面上真正需要被一眼看到的是涨跌色，横幅一红，涨跌红就
         # 不再突出了。改成一个安静的字标，视觉权重让回给数据。
         #
-        # 右边那行"A股 · 港股 · 美股 · 虚拟货币"2026-09-13 去掉：它不回答任何
+        # 右边那行"沪深 · 港股 · 美股 · 虚拟货币"2026-09-13 去掉：它不回答任何
         # 问题——用户点开"行情"就有市场切换、自选里也分市场，这行字既不能点
         # 也不随页面变化，只是把页眉从一个字标变成了两团东西。
         st.markdown(
@@ -8838,8 +8976,8 @@ else:
             # 按用户要求移到首页，跟指数横条、世界地图叠成"今天全球什么情况"
             # 的第一屏。这里不再重复渲染——同一条数据在两个页面各画一遍，用户
             # 会以为是两份不同的东西。
-            mkt_pick = st.radio("市场", ["A股", "港股", "美股", "虚拟货币"], horizontal=True, key="_market_overview_pick")
-            mkt_code = {"A股": "A", "港股": "HK", "美股": "US", "虚拟货币": "CC"}[mkt_pick]
+            mkt_pick = st.radio("市场", ["沪深", "港股", "美股", "虚拟货币"], horizontal=True, key="_market_overview_pick")
+            mkt_code = {"沪深": "A", "港股": "HK", "美股": "US", "虚拟货币": "CC"}[mkt_pick]
 
             # 虚拟货币走单独一条渲染路径，不是"少调用几个函数"那么简单：
             # 指数快照、涨停跌停池、南向资金、热门板块、新股这几块的概念在
@@ -8935,7 +9073,7 @@ else:
                     with donut_col:
                         _render_positions_donut(holding_items)
                     with list_col:
-                        # 用户反馈持仓一般也就几只，市场筛选(全部/A股/港股/美股)没有实际
+                        # 用户反馈持仓一般也就几只，市场筛选(全部/沪深/港股/美股)没有实际
                         # 必要，反而多一层点击——去掉筛选，统一直接展示全部持仓。
                         _render_position_rows(holding_items, _email)
 
@@ -9009,7 +9147,7 @@ else:
                     # 字段，不需要行情数据，最便宜）；排序要用到行情和AI评分，
                     # 塞不进这一层，作为参数交给 _render_position_rows 在取完
                     # 数之后做。
-                    _mkt_labels = {"全部": None, "港股": "HK", "美股": "US", "A股": "A", "加密": "CC"}
+                    _mkt_labels = {"全部": None, "港股": "HK", "美股": "US", "沪深": "A", "加密": "CC"}
                     _present = {it.get("market", "A") for it in watch_items}
                     _opts = ["全部"] + [k for k, v in _mkt_labels.items() if v in _present]
                     _f_col, _s_col = st.columns([2, 1], vertical_alignment="center")

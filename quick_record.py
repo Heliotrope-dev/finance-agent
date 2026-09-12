@@ -55,7 +55,7 @@ def _resolve(text: str) -> tuple[str, str, str] | None:
     t = (text or "").strip()
     if not t:
         return None
-    # 已经是纯数字代码：港股5位、A股6位
+    # 已经是纯数字代码：港股5位、沪深6位
     digits = "".join(ch for ch in t if ch.isdigit())
     if digits and len(digits) == len(t.replace(".", "").replace("·", "")):
         if len(digits) == 5:

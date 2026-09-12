@@ -197,7 +197,7 @@ def _capital_cny() -> float:
 
 
 def _fx_to_cny(market: str) -> tuple[float, str]:
-    """市场货币兑人民币。A股本身就是CNY。"""
+    """市场货币兑人民币。沪深本身就是CNY。"""
     cur = {"HK": "HKD", "US": "USD"}.get(market)
     if not cur:
         return 1.0, "CNY"

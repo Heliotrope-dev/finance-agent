@@ -40,7 +40,7 @@ _CN_TZ = timezone(timedelta(hours=8))
 def cn_now() -> datetime:
     """2026-08-31修复：VPS服务器系统时区是America/Los_Angeles（`timedatectl`
     查到的，不是猜的），不是北京时间——PDT比北京时间晚15小时。这个项目
-    从A股/港股/美股取数据、算"今天""过去N天"这些窗口，语义上全都是"北京
+    从沪深/港股/美股取数据、算"今天""过去N天"这些窗口，语义上全都是"北京
     交易日"，但之前散落在各处的`datetime.now()`用的是服务器本地时间
     （PDT），每天从北京时间0点到15点这段时间（对应PDT前一天9点到当天
     0点），服务器本地日历日期还停在"昨天"。
@@ -307,9 +307,9 @@ def _benchmark_history_a(start_date: str, end_date: str, index_code: str) -> pd.
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_benchmark_history(start_date: str, end_date: str, market: str = "A") -> pd.DataFrame:
-    """基准指数历史收盘价：A股用沪深300，港股用恒生指数，美股用标普500。
+    """基准指数历史收盘价：沪深用沪深300，港股用恒生指数，美股用标普500。
 
-    三个分支原来都是裸调用（HK/US是没套_with_retry的新浪akshare接口，A股是
+    三个分支原来都是裸调用（HK/US是没套_with_retry的新浪akshare接口，沪深是
     baostock，出错会raise RuntimeError）——调用方（app.py"对比大盘"模块）没有
     try/except，接口一抖动就是整个详情页崩掉报错，而不是"对比大盘暂时不可用"
     这种降级。这里统一包一层try/except，取数失败就返回空DataFrame，跟
@@ -549,7 +549,7 @@ def get_index_history(code: str, market: str, period: str = "日K") -> pd.DataFr
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_market_breadth() -> dict:
-    """A股大盘涨跌家数统计（上涨/下跌/涨停/跌停/活跃度）。只有A股有这个概念。"""
+    """沪深大盘涨跌家数统计（上涨/下跌/涨停/跌停/活跃度）。只有沪深有这个概念。"""
     df = _with_retry(ak.stock_market_activity_legu, throttle=False)  # 乐咕乐股网，不是东财
     return dict(zip(df["item"], df["value"]))
 
@@ -572,7 +572,7 @@ def get_southbound_flow() -> dict | None:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_limit_pool(kind: str = "up", limit: int = 10) -> pd.DataFrame:
-    """涨停股池(kind='up')/跌停股池(kind='down')，按涨跌幅排序取前 limit 条。只有A股有这个概念。
+    """涨停股池(kind='up')/跌停股池(kind='down')，按涨跌幅排序取前 limit 条。只有沪深有这个概念。
 
     TTL之前跟着"涨跌闪烁"需求缩到过3秒，但那个功能所在的_render_a_share_
     overview后来因为导致页面残留问题被撤回了（改回手动刷新），3秒的缓存
@@ -893,7 +893,7 @@ _US_NAME_MAP = {
     "铜": "CPER", "copper": "CPER",
 }
 
-# A股场内基金/ETF名称->代码，BaoStock的按名称模糊搜索(search_stock_by_name)
+# 沪深场内基金/ETF名称->代码，BaoStock的按名称模糊搜索(search_stock_by_name)
 # 只覆盖个股不含基金，中文名搜不到——手动维护这份最主流宽基/行业ETF的别名表
 # 补上这块。用户反馈"ETF基金搜索搜不到"，排查发现两个独立问题都要修：一是
 # 这里(名称搜索完全没覆盖基金)，二是check_stock_valid原来直接拒绝非个股
@@ -949,7 +949,7 @@ def detect_symbol_candidates(query: str) -> list[dict]:
     不问market直接添加；像"阿里巴巴"这种港股美股都有手动维护的别名条目，
     会返回两条，调用方就得让用户选。
 
-    只走快速安全的路径（纯代码格式的正则判断 + A股名称库 + 港股/美股手动
+    只走快速安全的路径（纯代码格式的正则判断 + 沪深名称库 + 港股/美股手动
     维护的别名map），不碰Futu的全市场模糊搜索兜底——那条路径在没有本地
     OpenD连接、或者跨线程调用时实测会直接卡死不返回（get_stock_realtime_futu
     那边记录过这个坑），放在这种"先探测再决定"的轻量场景里风险太大。
@@ -964,11 +964,11 @@ def detect_symbol_candidates(query: str) -> list[dict]:
         # （比如012805），两者代码格式完全一样区分不了，交给get_stock_realtime
         # 自己按"先试交易所行情、查不到再试基金净值"的顺序兜底，这里不用
         # 提前判断是哪一种。
-        return [{"symbol": q, "market": "A", "market_label": "A股"}]
+        return [{"symbol": q, "market": "A", "market_label": "沪深"}]
     if re.match(r"^\d{4,5}$", q):
         return [{"symbol": q.zfill(5), "market": "HK", "market_label": "港股"}]
     if q.upper() in _SGE_SYMBOL_MAP:
-        return [{"symbol": q.upper(), "market": "A", "market_label": "A股"}]
+        return [{"symbol": q.upper(), "market": "A", "market_label": "沪深"}]
 
     results = []
     q_lower = q.lower()
@@ -977,18 +977,18 @@ def detect_symbol_candidates(query: str) -> list[dict]:
     except Exception:
         a_matches = []
     if a_matches:
-        results.append({"symbol": a_matches[0]["code"], "market": "A", "market_label": "A股"})
+        results.append({"symbol": a_matches[0]["code"], "market": "A", "market_label": "沪深"})
     else:
         # search_stock_by_name(BaoStock按名称模糊搜索)只覆盖个股，不含ETF/基金，
-        # 名字查不到个股时先试手动维护的A股场内ETF别名表，再试OTC联接基金
+        # 名字查不到个股时先试手动维护的沪深场内ETF别名表，再试OTC联接基金
         # 全量名录子串匹配（覆盖面更广但没有人工筛选过，放在最后兜底）。
         a_fund_code = _A_FUND_NAME_MAP.get(q_lower)
         if a_fund_code:
-            results.append({"symbol": a_fund_code, "market": "A", "market_label": "A股"})
+            results.append({"symbol": a_fund_code, "market": "A", "market_label": "沪深"})
         else:
             otc_hit = search_otc_fund_by_name(q)
             if otc_hit:
-                results.append({"symbol": otc_hit["symbol"], "market": "A", "market_label": "A股"})
+                results.append({"symbol": otc_hit["symbol"], "market": "A", "market_label": "沪深"})
 
     hk_code = _HK_NAME_MAP.get(q_lower)
     if hk_code:
@@ -1050,7 +1050,7 @@ def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
     比"点了多少次"更能说明这个板块今天是不是真的热，是个合理的替代指标，
     页面上会如实标注这不是官方热度指数。
 
-    A股：同花顺的行业板块汇总接口（stock_board_industry_summary_ths），
+    沪深：同花顺的行业板块汇总接口（stock_board_industry_summary_ths），
     不依赖东财——今晚测试的时候东财的板块接口（stock_board_industry_name_em）
     连续多次连接失败，同花顺这条线稳定。
     港股/美股：Futu的板块快照——get_plate_list拿到这个市场全部行业板块，
@@ -1095,7 +1095,7 @@ def get_sector_constituents(market: str, sector_name: str, limit: int = 30) -> p
     跟_render_stock_movers_cards期望的格式一致，成分股本身直接复用已有的
     个股详情页（走势+AI分析），不用给"板块"这个概念单独再造一套。
 
-    A股：get_hot_sectors用的是同花顺板块名(stock_board_industry_summary_ths)，
+    沪深：get_hot_sectors用的是同花顺板块名(stock_board_industry_summary_ths)，
     但同花顺没有对应的"成分股"接口(akshare里只有_em版本)，这里改用东财的
     stock_board_industry_cons_em——实测过东财的板块类接口这几天连续失败过
     (见get_hot_sectors的说明)，且东财自己的板块命名和同花顺不是同一套分类，
@@ -1159,7 +1159,7 @@ def get_sector_constituents(market: str, sector_name: str, limit: int = 30) -> p
     return snap[["代码", "名称", "最新价", "涨跌幅"]].reset_index(drop=True)
 
 
-# A股三大宽基指数各自覆盖的交易所/板块代码前缀。用来在"涨停股池"（覆盖
+# 沪深三大宽基指数各自覆盖的交易所/板块代码前缀。用来在"涨停股池"（覆盖
 # 全市场）结果里筛掉根本不属于这个指数所在交易所/板块的股票——之前没做
 # 这层过滤，"创业板指"的成分股板块会混进60/68开头（上交所主板/科创板）
 # 的股票，这些公司压根没在创业板上市，比"不是官方成分股名单"这个已知的
@@ -1173,23 +1173,23 @@ _A_INDEX_CODE_PREFIX = {
 
 @st.cache_data(ttl=120, show_spinner=False)
 def get_index_top_movers(market: str, limit: int = 30, index_name: str = "") -> pd.DataFrame:
-    """指数详情页"成分股"板块用——不是严格意义上的官方成分股名单（A股几个
+    """指数详情页"成分股"板块用——不是严格意义上的官方成分股名单（沪深几个
     宽基指数动辄几百上千只成分股，没法也没必要全拉一遍实时行情；港股/美股
     压根没找到带股票代码的官方成分股免费源），而是"这个市场里涨幅最大的一批
     股票"，按用户的说法："涨的最多的十个/三十个就好，不用都显示"——够用，
     不用追求跟官方成分股名单逐一对应。
 
-    A股：复用涨停股池（stock_zt_pool_em）而不是拉全市场快照——之前这里用
+    沪深：复用涨停股池（stock_zt_pool_em）而不是拉全市场快照——之前这里用
     stock_zh_a_spot_em 拉全市场几千只股票的快照，本地排序取前limit名，
     用户反馈"成分股板块卡住了"，实测这个接口单次调用要接近2分钟（内部分页
-    拉全市场，跟之前港股那个"热门板块"慢的问题是同一类根因）。A股涨幅有
+    拉全市场，跟之前港股那个"热门板块"慢的问题是同一类根因）。沪深涨幅有
     10%/20%封顶，当天涨幅最大的股票几乎必然是涨停股，语义上"涨停股池"
     约等于"涨幅最大的一批股票"，直接复用这个已经很快（十几秒，且跟"行情"
     页共用同一份缓存，用户逛过一次"行情"页的话这里经常是秒开）的数据源，
     不用再单独扛一次全市场扫描。传入index_name时按_A_INDEX_CODE_PREFIX
     过滤掉不属于这个指数所在交易所/板块的股票（比如"创业板指"不会再混进
     上交所主板的股票）——用户反馈过恒生科技那边混进不相关公司的问题，
-    排查时顺带发现A股这边也有同一类问题，一并修了。
+    排查时顺带发现沪深这边也有同一类问题，一并修了。
     港股：复用已经在用的东财人气榜（stock_hk_hot_rank_em，100只热门港股），
     改成按涨跌幅排序而不是按人气排序。
     美股：复用_US_FAMOUS_CODES这份手动维护的核心股名单（新浪批量行情），
@@ -1317,10 +1317,10 @@ def get_stock_history(symbol: str, start_date: str, end_date: str, frequency: st
     # 实时拼接进去的(_append_today_bar)，不依赖这份缓存的新鲜度——所以底层
     # 历史数据缓存30分钟不新鲜完全没问题，换来的是把这个慢路径的触发频率
     # 从"每5分钟一次"降到"每30分钟一次"，6倍地减少用户撞见这个坑的概率。
-    """历史行情。symbol：A股例如'600519'，港股例如'00700'，美股例如'AAPL'。
+    """历史行情。symbol：沪深例如'600519'，港股例如'00700'，美股例如'AAPL'。
 
-    market: A=沪深A股（默认）, HK=港股, US=美股。
-    A股：三层兜底 BaoStock（主，稳定免注册）→ 东财 → 新浪，frequency 支持 d/w/m/5/15/30/60。
+    market: A=沪深（默认）, HK=港股, US=美股。
+    沪深：三层兜底 BaoStock（主，稳定免注册）→ 东财 → 新浪，frequency 支持 d/w/m/5/15/30/60。
     港股/美股：新浪源 + 拼今日实时价兜底（见 _append_today_bar）。
     这里特意不用 Futu 的 request_history_kline 当主数据源——实测这个接口延迟不稳定，
     偶尔会卡住十几秒到几分钟不返回，放在默认页面加载路径上风险太大。它仍然接在
@@ -1657,7 +1657,7 @@ def get_futu_watchlist(market: str) -> list[dict]:
 
 
 _BREAKER_DISPLAY_NAMES = {
-    "index_snapshot_A": "A股指数快照兜底",
+    "index_snapshot_A": "沪深指数快照兜底",
     "index_snapshot_HK": "港股指数快照兜底",
     "index_snapshot_US": "美股指数快照兜底",
     "limit_pool_up": "涨停池",
@@ -1789,9 +1789,9 @@ def get_hk_lot_size(symbol: str) -> int | None:
 
 
 def get_stock_realtime_futu(symbol: str, market: str) -> dict:
-    """走本地 Futu OpenD 网关拿真实时快照，支持港股/美股/虚拟货币（A股无权限）。
+    """走本地 Futu OpenD 网关拿真实时快照，支持港股/美股/虚拟货币（沪深无权限）。
 
-    market 检查放在最前面——A股走这函数是必然返回空的，没必要为此白连一次 Futu。
+    market 检查放在最前面——沪深走这函数是必然返回空的，没必要为此白连一次 Futu。
 
     2026-09-06补上 CC（虚拟货币）：观察池并入 BTC/ETH/SOL/BNB 之后，那几条
     判断记录的 price_at_advice 全是 NULL——AI 正文里明明写着"现价79,918美元"
@@ -1810,7 +1810,7 @@ def get_stock_realtime_futu(symbol: str, market: str) -> dict:
 
 
 def get_stock_realtime_futu_batch(items: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
-    """一次get_market_snapshot调用查一批港股/美股的实时行情（A股不支持，
+    """一次get_market_snapshot调用查一批港股/美股的实时行情（沪深不支持，
     调用方自己过滤）——2026-09-01真实故障修复：持仓/自选页那个每3秒刷新
     的fragment之前是每支股票各自单独调get_stock_realtime_futu，20支股票
     3秒刷新一次就是每30秒约200次get_market_snapshot调用，而Futu这个接口
@@ -2002,7 +2002,7 @@ def get_analyst_consensus(symbol: str, market: str) -> dict:
 def get_futu_news(keyword: str, max_count: int = 8, *, symbol: str | None = None,
                   market: str | None = None) -> pd.DataFrame:
     """走 Futu OpenD 的资讯搜索（get_search_news）——这是目前找到的最好的新闻源：
-    真按关键词匹配（不是财新那种整段大盘资讯里瞎找子串），A股/港股/美股通吃
+    真按关键词匹配（不是财新那种整段大盘资讯里瞎找子串），沪深/港股/美股通吃
     （财新的公司新闻只覆盖到个别大公司，港股/美股基本没东西），链接指向
     news.futunn.com（富途自己的资讯站，公开可读，不需要富途账号订阅）。
     只有本机/服务器跑了 OpenD 才能用，连不上就静默返回空，上层自然会退回
@@ -2238,7 +2238,7 @@ def _sina_minute_intraday(sina_code: str) -> pd.DataFrame:
     这里原来是裸调用 ak.stock_zh_a_minute，没有 _with_retry 也没有 try/except——
     调用方（get_stock_intraday_a/get_index_intraday_a）又是"分时K（今日）"这个
     st.radio默认选中的第一个选项（app.py），意味着新浪分时接口一抖动，打开任意
-    A股个股/指数详情页的默认视图就直接整页报错，而不是设计文档里说好的"退化成
+    沪深个股/指数详情页的默认视图就直接整页报错，而不是设计文档里说好的"退化成
     日K"。改成异常兜底返回空DataFrame——跟这个函数一贯"取不到就返回空表"的
     约定一致，调用方原有的 `if intraday.empty` 判断不用改就能正确降级。
     """
@@ -2266,7 +2266,7 @@ def _sina_minute_intraday(sina_code: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=20, show_spinner=False)
 def get_stock_intraday_a(symbol: str) -> pd.DataFrame:
-    """A股个股真分时——走新浪的分钟线接口（ak.stock_zh_a_minute），不是 BaoStock。
+    """沪深个股真分时——走新浪的分钟线接口（ak.stock_zh_a_minute），不是 BaoStock。
     BaoStock 的 5 分钟线是 EOD 数据，交易时段内查不到"今天"；这个新浪接口实测
     是真新鲜的，一直更新到最新一分钟。一次会拉回最近多天历史（接口不支持只要
     某一天），这里过滤出今天的。
@@ -2276,7 +2276,7 @@ def get_stock_intraday_a(symbol: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=20, show_spinner=False)
 def get_index_intraday_a(code: str) -> pd.DataFrame:
-    """A股指数真分时，code 是 BaoStock 格式（如 sh.000001），换成新浪格式（sh000001）。"""
+    """沪深指数真分时，code 是 BaoStock 格式（如 sh.000001），换成新浪格式（sh000001）。"""
     return _sina_minute_intraday(code.replace(".", ""))
 
 
@@ -2296,7 +2296,7 @@ def get_stock_intraday_futu(symbol: str, market: str) -> pd.DataFrame:
 
 # 恒生系列指数在 Futu 里走独立的指数代码（跟股票代码格式不一样）。
 # 美股指数 Futu 目前不支持原生代码（实测 US.SPX/US.IXIC/US.DJI 都查不到），
-# A股在这个账号下压根没有 Futu 权限，所以指数分时只做港股这一档。
+# 沪深在这个账号下压根没有 Futu 权限，所以指数分时只做港股这一档。
 _HK_INDEX_FUTU_CODE = {"恒生指数": "800000", "恒生科技": "800700", "国企指数": "800100"}
 
 
@@ -2332,7 +2332,7 @@ def get_index_intraday_futu(name: str, market: str, index_prev_close: float | No
 
 
 def _a_index_snapshot_tencent(code: str) -> dict | None:
-    """A股指数的实时快照，走腾讯行情接口，跟个股实时价（get_stock_realtime）
+    """沪深指数的实时快照，走腾讯行情接口，跟个股实时价（get_stock_realtime）
     是同一套字段格式——指数代码在腾讯那边跟个股一样能查，不是独立的一套接口。
     code 是 BaoStock 格式（如 sh.000001），转成腾讯格式（sh000001）。
     """
@@ -2521,9 +2521,9 @@ def _fetch_sge_spot_quote(symbol: str) -> dict:
 
 @st.cache_data(ttl=3, show_spinner=False)
 def get_stock_realtime(symbol: str, market: str = "A") -> dict:
-    """真正的实时行情，港股/美股优先走本地 Futu OpenD 网关，A股 + Futu查不到时
+    """真正的实时行情，港股/美股优先走本地 Futu OpenD 网关，沪深 + Futu查不到时
     走腾讯行情接口(qt.gtimg.cn)兜底——跟富途互补，一个管港美股实时+分时，
-    一个管A股 + 港美股在Futu掉线时的兜底。
+    一个管沪深 + 港美股在Futu掉线时的兜底。
 
     之前这条兜底路径走的是新浪(hq.sinajs.cn)：把跳动周期从15秒缩到3秒后，
     新浪/东财这两个免费接口的请求量直接翻了5倍，实测被限流/拒绝了
@@ -2548,8 +2548,8 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
         fields = _tencent_quote_fields(r.content.decode("gbk", errors="ignore"))
         if fields is None:
             return {}
-        # 成交额单位A股是"万元"，港股/美股这个字段本身就是原始货币单位，
-        # 只有A股需要乘10000（跟field[35]里拼进去的精确成交额反推验证过）。
+        # 成交额单位沪深是"万元"，港股/美股这个字段本身就是原始货币单位，
+        # 只有沪深需要乘10000（跟field[35]里拼进去的精确成交额反推验证过）。
         turnover = float(fields[37]) if fields[37] else None
         if turnover is not None and market == "A":
             turnover *= 10000
@@ -2565,7 +2565,7 @@ def get_stock_realtime(symbol: str, market: str = "A") -> dict:
     if tencent_data:
         return tencent_data
 
-    # 交易所行情(Futu/腾讯)都查不到，A股范围内再试两类非交易所标的：
+    # 交易所行情(Futu/腾讯)都查不到，沪深范围内再试两类非交易所标的：
     # 场外联接基金(OTC，走净值不走盘口)、上金所现货合约。两者都是T-1
     # 数据，"今日收益"这类实时刷新场景对它们没意义，但至少能记持仓。
     if market == "A":
@@ -2640,7 +2640,7 @@ def _save_fx_cache(cache: dict):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_fx_rate(currency: str, quote: str = "CNY") -> tuple[float | None, str]:
-    """currency兑quote的汇率，目前只支持quote="CNY"（HKD/USD → CNY，A股本身
+    """currency兑quote的汇率，目前只支持quote="CNY"（HKD/USD → CNY，沪深本身
     就是CNY不用转）。缓存最多60秒：成交回显和持仓盈亏都以人民币展示时，30分钟
     前的汇率不能再标成“实时”；但逐秒刷新对汇率没有决策价值，只会把第三方数据
     源的限流风险引入最热路径。
@@ -2682,8 +2682,8 @@ def to_cny(amount: float, currency: str) -> tuple[float | None, str]:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_financial_abstract(symbol: str, market: str = "A") -> pd.DataFrame:
-    """财务摘要指标。A股是东财"股票财务摘要"接口；港股/美股是东财对应的分析指标接口，
-    字段跟A股完全不是一回事（更细、列更多），直接原样返回给AI消化，不强行对齐格式。
+    """财务摘要指标。沪深是东财"股票财务摘要"接口；港股/美股是东财对应的分析指标接口，
+    字段跟沪深完全不是一回事（更细、列更多），直接原样返回给AI消化，不强行对齐格式。
 
     _with_retry 重试耗尽后是 raise 而不是返回 None——调用方（app.py 的"财务摘要"模块）
     原来直接拿这个函数的返回值，东财接口一抖动、重试也失败，异常会一路冒穿到Streamlit
@@ -2716,7 +2716,7 @@ def get_valuation_percentile(symbol: str, market: str, period: str = "近三年"
     的区间里处于什么分位"，跟_price_position_text算52周价格分位是同一个思路，
     只是换成估值维度。
 
-    只支持A股/港股（ak.stock_zh_valuation_baidu / stock_hk_valuation_baidu）。
+    只支持沪深/港股（ak.stock_zh_valuation_baidu / stock_hk_valuation_baidu）。
     美股同名接口(stock_us_valuation_baidu)2026-08-25实测对AAPL/BILI等任意
     代码都返回JSONDecodeError（接口本身挂了或被墙，不是参数问题），不强行
     降级伪造分位数，直接返回空字典——调用方(advisor.py _valuation_text)对
@@ -2989,12 +2989,12 @@ def get_market_news() -> pd.DataFrame:
 def _hot_news_keywords(limit: int = 8) -> list[str]:
     """收集今天真正有异动的股票名，当搜新闻的关键词种子。
 
-    2026-08-30实测过：本来想连A股涨停池（get_limit_pool）也一起拿来当
+    2026-08-30实测过：本来想连沪深涨停池（get_limit_pool）也一起拿来当
     种子，跟app._get_hot_stock_names的数据源对齐——但实测ak.stock_zt_
     pool_em在冷缓存时能跑到100秒以上（akshare内部自己在分页拉取，不是
     网络卡住，是真的在等它一页页拉完），get_limit_pool虽然包了60秒缓存，
     但缓存过期那一刻撞上的用户还是要扛这上百秒。这个新闻功能不值得为了
-    多几个A股关键词背上这个尾部风险，只用港股/美股核心股的显著异动
+    多几个沪深关键词背上这个尾部风险，只用港股/美股核心股的显著异动
     （数据源本身够快，前面已经反复实测过），不取涨停池。
     """
     names: list[str] = []
@@ -3093,11 +3093,11 @@ def get_hot_market_news(limit: int = 30) -> pd.DataFrame:
 
 
 def get_index_news(name: str, limit: int = 10) -> tuple:
-    """指数版的资讯，优先走 get_futu_news（真按"这个指数"关键词搜，港股/美股/A股
+    """指数版的资讯，优先走 get_futu_news（真按"这个指数"关键词搜，港股/美股/沪深
     指数都覆盖得到，恒生科技指数不会被喂一堆跟它毫无关系的全球宏观新闻）。
 
     Futu 连不上（本地没装 OpenD）时才退回财新兜底——但财新那份大盘资讯偏
-    全球宏观/A股，对港股/美股指数来说本来就文不对题，所以退回财新时只做
+    全球宏观/沪深，对港股/美股指数来说本来就文不对题，所以退回财新时只做
     严格关键词匹配，匹配不到就如实说没有，不再拿不相关的资讯硬凑（这曾经
     导致恒生科技指数页面显示一堆油价、谷歌股价这类完全不相关的内容）。
     返回 (DataFrame, 来源标记："futu"/"caixin")。
@@ -3124,9 +3124,9 @@ def get_index_news(name: str, limit: int = 10) -> tuple:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_stock_notices(symbol: str) -> pd.DataFrame:
-    """A股官方公告——监管强制披露，来自东财公告中心，永远免费，不存在付费墙这回事，
+    """沪深官方公告——监管强制披露，来自东财公告中心，永远免费，不存在付费墙这回事，
     比新闻评论类内容更"一手"（财报、分红、股东会决议这些直接是公司自己发的）。
-    只支持A股，港股/美股没有对应的免费公告聚合源，那两个市场还是走 get_stock_news。
+    只支持沪深，港股/美股没有对应的免费公告聚合源，那两个市场还是走 get_stock_news。
     """
     df = _with_retry(lambda: ak.stock_individual_notice_report(security=symbol, symbol="全部"))
     if df is None or df.empty:
@@ -3382,7 +3382,7 @@ _HOLIDAY_NAMES: dict[str, str] = {
     # 港股
     "2026-10-01": "国庆节", "2026-10-19": "重阳节",
     "2026-12-25 HK": "圣诞节", "2026-12-26 HK": "节礼日",
-    # A股
+    # 沪深
     "2026-09-25": "中秋节", "2026-10-02": "国庆节", "2026-10-05": "国庆节",
     "2026-10-06": "国庆节", "2026-10-07": "国庆节",
 }
@@ -3390,7 +3390,7 @@ _HOLIDAY_NAMES: dict[str, str] = {
 
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def get_market_closures(days: int = 30) -> list[dict]:
-    """未来 days 天内港股/美股/A股的休市安排。
+    """未来 days 天内港股/美股/沪深的休市安排。
 
     返回 [{"date": "2026-09-07", "market": "US", "market_label": "美股",
            "name": "劳动节", "half_day": False}, ...]，按日期正序。
@@ -3411,7 +3411,7 @@ def get_market_closures(days: int = 30) -> list[dict]:
     for market, label, mk in (
         ("HK", "港股", getattr(ft.TradeDateMarket, "HK", None)),
         ("US", "美股", getattr(ft.TradeDateMarket, "US", None)),
-        ("A", "A股", getattr(ft.TradeDateMarket, "CN", None)),
+        ("A", "沪深", getattr(ft.TradeDateMarket, "CN", None)),
     ):
         if mk is None:
             continue
@@ -3585,7 +3585,7 @@ def _unwrap_futu(r):
 def get_capital_distribution(symbol: str, market: str) -> dict:
     """当日资金流向分布。返回主力/大单/中单/小单的净流入（单位：原始货币）。
 
-    2026-09-05新增。这是港股A股散户最常看、而这个项目一直缺的一个维度：
+    2026-09-05新增。这是港股沪深散户最常看、而这个项目一直缺的一个维度：
     价格告诉你成交在什么位置，成交量告诉你有多热，但都答不了"是谁在买"。
     大单持续净流入而股价没动，跟小单堆量把价格推上去，是完全不同的两件事。
 
@@ -3714,7 +3714,7 @@ def get_insider_trades(symbol: str, market: str, limit: int = 8) -> list[dict]:
 
 def _futu_code(symbol: str, market: str) -> str:
     """(代码, 市场) 转成富途的 code 格式。项目里这个转换原本散在各个函数里
-    各写一遍（f"HK.{s}" if m=="HK" else f"US.{s}" 这样），A股的前缀规则还
+    各写一遍（f"HK.{s}" if m=="HK" else f"US.{s}" 这样），沪深的前缀规则还
     不一样，新接口一多就该收口了。"""
     s = str(symbol or "").strip()
     if not s:
@@ -3798,11 +3798,11 @@ def get_ipo_calendar(market: str = "HK", limit: int = 8) -> list[dict]:
     2026-09-13修：项目里统一用 "A" 表示沪深两市，但富途的枚举只有 SH 和 SZ，
     没有 A —— `getattr(ft.Market, "A", None)` 返回 None，函数直接返回空列表。
     行情页那块"新股上市"的条件本来就写着 `market in ("HK", "A")`，但 A 这条
-    分支从上线起就永远拿不到数据，整块静默消失，看起来像"A股最近没有新股"。
+    分支从上线起就永远拿不到数据，整块静默消失，看起来像"沪深最近没有新股"。
     这类"条件写了、数据源不支持、又刚好走的是静默降级"的组合最难发现。
 
     实测 ft.Market.SH 和 ft.Market.SZ 返回的是同一份沪深合并列表（各6条，
-    互相包含对方的代码），所以 A 股只要调一次 SH 就够，不用合并去重。
+    互相包含对方的代码），所以 沪深只要调一次 SH 就够，不用合并去重。
     """
     _FUTU_MARKET = {"A": ft.Market.SH, "HK": ft.Market.HK, "US": ft.Market.US}
     mk = _FUTU_MARKET.get(market) or getattr(ft.Market, market, None)
@@ -3836,6 +3836,12 @@ def get_ipo_calendar(market: str = "HK", limit: int = 8) -> list[dict]:
             "issue_pe": _f("issue_pe_rate"),
             "industry_pe": _f("industry_pe_rate"),
             "list_price": _f("list_price"),
+            # 发行股数。美股这块之所以要取：实测 get_ipo_list(US) 的
+            # lot_size / entrance_price / apply_end_time / ipo_price 全是
+            # N/A（美股 IPO 没有"每手"和"公开认购截止"这两个概念），
+            # issue_size 和 ipo_price_min/max 是仅有的两项硬数据，
+            # 募资规模和流通盘判断全靠它。
+            "issue_size": _f("issue_size"),
         })
     out.sort(key=lambda x: x["list_date"] or "9999")
     return out[:limit]
@@ -3893,8 +3899,8 @@ def get_recent_ipo_performance(days: int = 120, max_count: int = 60,
     market 支持 HK / US。2026-09-13 实测美股同样成立——"上市首日那根日K的
     last_close 就是发行价"这条约定在美股一样（US.AAC.U 首日 last_close=10.0、
     close=10.05、change_rate=0.5%），近120天有154只新股且首日K线全部取得到。
-    A股取不到：这个账号没有A股行情权限，request_history_kline 直接返回空，
-    所以 A 股那块走的是另一套（发行PE vs 行业PE，见 app._render_a_ipo_briefs）。
+    沪深取不到：这个账号没有沪深行情权限，request_history_kline 直接返回空，
+    所以 沪深那块走的是另一套（发行PE vs 行业PE，见 app._render_a_ipo_briefs）。
 
     2026-09-05新增。用户要求"列一个近期已经上市的新股的涨跌幅，把近几个月新股
     首日涨跌幅的平均值算一下"。这个统计对打新的判断价值比单只新股的招股材料
@@ -4401,7 +4407,7 @@ def get_crypto_regime() -> dict:
 def get_crypto_quotes() -> pd.DataFrame:
     """主流虚拟货币行情，列名跟项目里其它行情表一致（代码/名称/最新价/涨跌幅）。
 
-    2026-09-05新增。用户要求在行情页的A股/港股/美股旁边再开一栏。选它有个
+    2026-09-05新增。用户要求在行情页的沪深/港股/美股旁边再开一栏。选它有个
     别处没有的好处：虚拟货币24小时不休市，周末和三个股票市场都休市的时段，
     行情页原本是一片死数据，这一栏是唯一活的。
     """

@@ -1,3 +1,18 @@
+# 2026-09-13：这一段从"最老的7个键"扩到 Streamlit 1.59 的完整主题面。
+#
+# 为什么值得改：在此之前，圆角、边框可见性、标题字阶、st.metric 的字号、
+# 图表色板，全部是 app.py 里注入的 CSS 用 !important 一条条盖出来的。那套做法
+# 有两个真实代价——
+#
+#   1. **盖不全。** CSS 只能命中我当时想到的选择器。Streamlit 用 React portal
+#      渲染的那些东西（下拉菜单弹层、tooltip、日期选择器、dataframe 的网格线）
+#      挂在 DOM 树的另一个位置，我的选择器够不着，所以它们一直是 Streamlit
+#      的默认蓝+默认圆角，跟页面其余部分不是一套。
+#   2. **闪一下。** 注入的 CSS 要等页面渲染到那一步才生效，首屏会先按默认主题
+#      画一遍再被盖掉——st.metric 那个数字尤其明显，默认 2.25rem 先画出来，
+#      然后跳到 1.5rem。主题配置是在首次绘制之前就进去的，没有这一跳。
+#
+# 下面每个色值都跟 app.py 里 :root 那组 --fa-* 变量一一对应，改一边必须改另一边。
 [theme]
 base = "light"
 # 2026-09-04前端重做：主色从品牌红改成墨色。整个界面现在只有一条配色规矩
@@ -5,10 +20,53 @@ base = "light"
 # 用墨色而不是红色，涨跌数字才是页面上最跳的东西，这也是这类金融界面看着
 # 专业的根本原因：品牌色一旦也很红，涨跌红就不再是最醒目的信息了。
 primaryColor = "#17181C"
-backgroundColor = "#FAFAFB"
-secondaryBackgroundColor = "#F3F4F6"
-textColor = "#17181C"
-font = "sans serif"
+backgroundColor = "#FAFAFB"          # --fa-bg
+secondaryBackgroundColor = "#F3F4F6" # --fa-fill
+textColor = "#17181C"                # --fa-text
+# 链接同样走墨色而不是默认的蓝。这个项目里链接几乎都是"点进详情"这类导航，
+# 不是外链引用，用一个饱和蓝会在满屏灰阶里变成最跳的东西，抢掉涨跌红绿。
+linkColor = "#17181C"
+# --fa-border。这一条影响的范围比看上去大：dataframe 的网格线、expander 的
+# 分隔线、下拉弹层的描边全走它，而这些正是 CSS 补丁够不着的地方。
+borderColor = "#EAEAEF"
+dataframeBorderColor = "#EAEAEF"
+codeBackgroundColor = "#F3F4F6"
+
+# 输入控件不画外框。用户提过两次（"项目里面还是存在按键的外框这个我之前说过
+# 很丑"）。在此之前是靠逐个选择器 border:none !important 盖的，每加一种新控件
+# 就漏一个；这是官方开关，一次盖全。
+# 无框之后靠背景色和留白分隔，这是这套界面本来的做法。
+showWidgetBorder = false
+
+# --fa-radius / --fa-radius-sm
+baseRadius = "10px"
+buttonRadius = "7px"
+
+font = "Inter, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif"
+
+# st.metric 的数字。app.py 里已经有一条同值的 CSS（带 letter-spacing 和颜色，
+# 主题配不了那两项），这里再配一遍不是重复——是为了首屏别先画一个 2.25rem
+# 的大数字再跳到 1.5rem。两处必须保持同一个值。
+metricValueFontSize = "1.5rem"
+metricValueFontWeight = 600
+
+# 标题字阶。Streamlit 默认 h1 是 2.75rem，放在一个信息密度这么高的页面上
+# 过大了——这类界面的层级是靠字重和留白拉开的，不是靠把标题放大一倍。
+headingFontSizes = ["1.6rem", "1.3rem", "1.02rem", "0.95rem", "0.88rem", "0.82rem"]
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+
+# st.* 原生图表（Altair/Vega-Lite/未显式配色的 Plotly）的色板。
+# charts.py 里那些图都显式指定了颜色，这组管的是没显式指定的那些——在此之前
+# 它们会用 Streamlit 默认的蓝橙紫，跟"黑白灰为主、只有涨跌用红绿"这条规矩
+# 直接冲突。改成一条灰阶，深浅表示次序。
+chartCategoricalColors = [
+    "#17181C", "#494C55", "#82858E", "#A8ABB3",
+    "#C6C9CD", "#DBDCE3", "#EAEAEF", "#F3F4F6",
+]
+chartSequentialColors = [
+    "#F7F7F9", "#EDEDF1", "#E0E1E6", "#D0D2D8", "#BDBFC7",
+    "#A5A8B1", "#8A8D96", "#6D7079", "#4E5158", "#17181C",
+]
 
 [server]
 headless = true

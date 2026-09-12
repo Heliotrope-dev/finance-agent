@@ -1,4 +1,4 @@
-"""投研顾问 —— 每个工作日收盘后扫一遍 A股/港股/美股全市场，用 Futu 的股票筛选器
+"""投研顾问 —— 每个工作日收盘后扫一遍 沪深/港股/美股全市场，用 Futu 的股票筛选器
 按市值/估值/盈利增长挑出候选，基本面为主、技术面辅助，给买卖参考。私有工具，
 不在 Streamlit 页面里，由 OpenClaw 的 stock-advisor cron 触发，走
 `venv/bin/python3 advisor.py`，结果打印到 stdout 给 agent 读了转成微信消息。
@@ -6,13 +6,13 @@
 跟 analysis.py 刻意"只讲事实不下结论"的公开页面定位不同——这里明确要给买卖
 参考，所以判断函数（judge_stock）单独新写，不改 analysis.py 里现成的那几个。
 
-第一版做过手动关注列表+A股候选池，当时用户反馈不需要这块，改成只扫港美股；
-后来（2026-08-21）又要求把 A股 候选加回来，跟港美股同一套全市场量化初筛
+第一版做过手动关注列表+沪深候选池，当时用户反馈不需要这块，改成只扫港美股；
+后来（2026-08-21）又要求把 沪深 候选加回来，跟港美股同一套全市场量化初筛
 逻辑——data_sources.py 里原有的"候选池"函数（get_index_top_movers 之类）
 靠的是人气榜/硬编码知名股名单，覆盖面完全撑不起"全市场筛选"这个目标，改用
 Futu SDK 自带的 get_stock_filter（按市值/PE/盈利增长这些真实指标在全市场
 服务端筛选，不是本地维护的名单），实测 US 市场一次筛选能命中一千多只符合
-条件的股票，HK 三百多只，是真正的全市场覆盖。A股 没有统一的 Futu 市场代码，
+条件的股票，HK 三百多只，是真正的全市场覆盖。沪深 没有统一的 Futu 市场代码，
 沪/深两个交易所分开筛选后合并成一个候选池（见 screen_candidates）。
 """
 
@@ -144,7 +144,7 @@ _ZHIPU_BASE = "https://open.bigmodel.cn/api/paas/v4"
 # 超过要分页拉（见 _futu_screen_pool）。
 _US_POOL_TARGET = 500
 _HK_POOL_TARGET = 500
-_A_POOL_TARGET = 500  # A股按沪/深两个交易所分别筛，各250凑够500
+_A_POOL_TARGET = 500  # 沪深按上交所/深交所分别筛，各250凑够500
 
 # 池子里最靠前的这些才交给AI逐一判断——控制AI调用次数和运行时长，不是对
 # 全部500只跑判断（500只全跑一遍AI单次要几十分钟，不现实也没必要）。因为
@@ -169,8 +169,8 @@ _LEADERBOARD_SIZE = 10
 
 # 2026-08-28：首页"推荐股排行榜"用的观察池——用户明确要求"不是定死，是
 # 随着热度排行榜变化的"：每天用真实的热度/涨跌幅榜重新取一遍前60美股/
-# 40港股/20A股（合计120支，2026-08-28从20/20/10=50支扩容），不是写死的
-# 名单。港股/A股用get_index_top_movers（内部已经有"热度榜挂了退回涨跌幅榜"
+# 40港股/20沪深（合计120支，2026-08-28从20/20/10=50支扩容），不是写死的
+# 名单。港股/沪深用get_index_top_movers（内部已经有"热度榜挂了退回涨跌幅榜"
 # 的兜底，见该函数docstring），美股没有真正的热度榜数据源（见
 # get_us_famous_movers的docstring），退而求其次用_US_FAMOUS_CODES这份知名
 # 股名单按当天涨跌幅重新排序，好歹能做到"名单本身不变但每天的排名会变"。
@@ -883,8 +883,8 @@ def _futu_screen_pool(market, quarter, cap_threshold: float, target_count: int) 
     走 SimpleFilter，净利润增速走 FinancialFilter——两者要分开建，混用会报
     "不支持该过滤字段"（实测确认过）。
 
-    港股和A股的FinancialFilter不支持MOST_RECENT_QUARTER这个quarter选项（实测
-    报错"港股和A股不支持最近季报选项"），只能用美股。这里quarter参数由调用方
+    港股和沪深的FinancialFilter不支持MOST_RECENT_QUARTER这个quarter选项（实测
+    报错"港股和A股不支持最近季报选项"，这是富途返回的原文），只能用美股。这里quarter参数由调用方
     按市场传对应支持的枚举。
 
     返回 (候选列表, 全市场实际符合条件总数)——后者用于_pool_summary里如实
@@ -910,8 +910,8 @@ def _futu_screen_pool(market, quarter, cap_threshold: float, target_count: int) 
     f_growth.sort = ft.SortDir.DESCEND
 
     filters = [f_cap, f_pe, f_growth]
-    # Futu的get_stock_filter market参数没有统一的"A股"选项，沪/深要分开传
-    # (ft.Market.SH/ft.Market.SZ)，但项目里A股统一用"A"这个market_code，
+    # Futu的get_stock_filter market参数没有统一的"沪深"选项，沪/深要分开传
+    # (ft.Market.SH/ft.Market.SZ)，但项目里沪深统一用"A"这个market_code，
     # 两个交易所都映射到"A"，调用方各自merge成一个候选池。
     market_code = {ft.Market.HK: "HK", ft.Market.SH: "A", ft.Market.SZ: "A"}.get(market, "US")
     page_size = 200  # 实测确认的单次请求上限，超过会报"请求个数超过限制"
@@ -960,15 +960,15 @@ def _pool_summary(pool: list[dict], all_count: int, label: str) -> str:
     """候选池的真实统计摘要——不是AI编的，直接从Futu返回的原始数据本地算，
     跟这个项目"技术面信号本地算不靠AI编"的一贯做法一致。
 
-    A股不走这套（见_a_share_candidate_pool的docstring：账号没有A股行情
+    沪深不走这套（见_a_share_candidate_pool的docstring：账号没有沪深行情
     权限，候选来源也不是市值/PE/盈利增速的数值筛选），单独给一句如实的
     说明，不能沿用下面这句"全市场符合筛选门槛"的措辞——那是港美股Futu
-    筛选的真实过程，A股照抄这句等于编了一个没发生过的筛选流程。
+    筛选的真实过程，沪深照抄这句等于编了一个没发生过的筛选流程。
     """
-    if label == "A股":
+    if label == "沪深":
         if not pool:
-            return "A股：本次没有拿到有效候选（涨停股池/热门板块数据源可能临时故障）。"
-        return f"A股：候选来自今日涨停股池+热门板块成分股（已剔除ST），共 {len(pool)} 只——不同于港美股的市值/PE/盈利增速数值预筛（Futu账号无A股行情权限），基本面判断交给AI逐支读取真实财报后给出，详见代码注释。"
+            return "沪深：本次没有拿到有效候选（涨停股池/热门板块数据源可能临时故障）。"
+        return f"沪深：候选来自今日涨停股池+热门板块成分股（已剔除ST），共 {len(pool)} 只——不同于港美股的市值/PE/盈利增速数值预筛（Futu账号无沪深行情权限），基本面判断交给AI逐支读取真实财报后给出，详见代码注释。"
     if not pool:
         return f"{label}：本次没有拿到有效候选（Futu筛选失败或无符合条件的股票）。"
     pes = sorted(p["pe_ttm"] for p in pool if p.get("pe_ttm"))
@@ -985,10 +985,10 @@ def _pool_summary(pool: list[dict], all_count: int, label: str) -> str:
 
 
 def _a_share_candidate_pool(target_count: int) -> tuple[list[dict], int]:
-    """A股候选池——不走_futu_screen_pool。2026-08-25实测发现连的Futu账号
-    没有A股行情权限（get_stock_filter对ft.Market.SH/SZ直接返回"A股市场
-    股票行情权限不足"），screen_candidates()里这部分之前一直静默失败返回
-    空池子，首页A股Top3从来没真正出过数据——跟README"值得一提的踩坑"里
+    """沪深候选池——不走_futu_screen_pool。2026-08-25实测发现连的Futu账号
+    没有沪深行情权限（get_stock_filter对ft.Market.SH/SZ直接返回"A股市场
+    股票行情权限不足"，富途返回的原文），screen_candidates()里这部分之前一直静默失败返回
+    空池子，首页沪深Top3从来没真正出过数据——跟README"值得一提的踩坑"里
     记录的"公式检索静默退化"是同一类问题，又中了一次。
 
     换用AkShare，但不是简单换个数据源做同样的市值/PE/盈利增速数值筛选：
@@ -996,7 +996,7 @@ def _a_share_candidate_pool(target_count: int) -> tuple[list[dict], int]:
     reset连接失败，而且get_index_top_movers的踩坑记录里写过这个接口
     "之前用过、实测单次要接近2分钟"，项目里早就为了这个原因弃用了它。
     改用项目里已经验证过快且稳定的两个数据源做候选发现（涨停股池+热门
-    板块成分股，跟get_index_top_movers的A股实现同源）：涨停股是今天最强
+    板块成分股，跟get_index_top_movers的沪深实现同源）：涨停股是今天最强
     的动量信号，热门板块成分股补充题材多样性，避免候选全扎堆同一题材。
     不做PE/市值预筛——基本面判断交给后面AI阶段：_judge_one会调
     _financial_summary_text读真实财报文本喂给AI，跟这份候选列表要不要
@@ -1194,9 +1194,9 @@ def screen_candidates() -> dict:
     hk_pool, hk_all = _futu_screen_pool(
         ft.Market.HK, ft.FinancialQuarter.ANNUAL, 5_000_000_000, _HK_POOL_TARGET
     )
-    # A股不走Futu——账号没有A股行情权限，见_a_share_candidate_pool的docstring。
+    # 沪深不走Futu——账号没有沪深行情权限，见_a_share_candidate_pool的docstring。
     a_pool, a_all = _a_share_candidate_pool(_TRIAGE_POOL_SIZE)
-    print(f"（候选池拉取完成：美股{len(us_pool)}/港股{len(hk_pool)}/A股{len(a_pool)}，开始初筛…）")
+    print(f"（候选池拉取完成：美股{len(us_pool)}/港股{len(hk_pool)}/沪深{len(a_pool)}，开始初筛…）")
 
     # 初筛：每个市场先从大得多的池子（_TRIAGE_POOL_SIZE）里筛掉一眼不行的，
     # 只用财务摘要、不碰Futu，筛完再截到原来的CANDIDATE_CAP，交给下面昂贵的
@@ -1500,7 +1500,7 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
      （超大单+大单）是净流入还是净流出、机构持股比例的环比变化、内部人
      （高管/董事）近期是买还是卖、空头持仓和回补天数。
      20分附近=主力持续净流入且机构在加仓，或者有内部人买入这种强信号；
-     10分附近=资金面中性，或者这类数据拿不到（港股没有空头数据、A股没有
+     10分附近=资金面中性，或者这类数据拿不到（港股没有空头数据、沪深没有
      机构持股披露，属于结构性缺失，不该按"坏"来罚分）；
      0分附近=主力大幅净流出、机构连续减持、内部人集中卖出。
      这一项有一个别的维度替代不了的作用：给其它维度做交叉验证。技术面转强
@@ -1534,7 +1534,7 @@ _JUDGE_SYSTEM = """你是一位理性、保守的投研助理，服务对象是�
      不算在这个维度里**——美股这类结构性缺分位数据的市场，"价格位置"那一项
      已经因为这个原因把上限压到了15/20分，这里不能因为同一个缺口再扣一次，
      不然同一件事被罚了两次分，跨市场比较会失真。同理，港股拿不到空头数据、
-     A股拿不到机构持股，也属于结构性缺失，不在这里重复扣分。
+     沪深拿不到机构持股，也属于结构性缺失，不在这里重复扣分。
    六项分数必须在"维度打分"里逐项列出来，综合得分原则上等于六项之和；如果
    六项加总跟你的整体判断有出入，允许再做不超过±5分的微调，但必须在"理由"
    里说明为什么调（比如"六项之和72，但新闻里有一条未被上面数据覆盖的重大
@@ -1684,7 +1684,7 @@ def _chips_summary_text(symbol: str, market: str) -> str:
     机构连续两季加仓、内部人在买，说明有基本面之外的信息在起作用。这种
     "互相印证还是互相打架"的判断，是单看任何一个维度都做不出来的。
 
-    每一段都可能取不到（港股没有空头数据、A股没有机构持仓披露、大多数股票
+    每一段都可能取不到（港股没有空头数据、沪深没有机构持仓披露、大多数股票
     近期没有内部人交易），取不到就整段不出现，不写"暂无"占位——prompt里
     塞满"暂无"会稀释真正有内容的部分。
     """
@@ -2158,7 +2158,7 @@ def _market_context_text(symbol: str, market: str) -> str:
     给三样：
       大盘近5日方向   最直接的环境判断，个股要顶着这个方向走才算强
       所属板块今日方向 个股逆板块而动是重要信号（板块跌它涨，说明有独立逻辑）
-      资金流向        港股看南向、A股看涨跌家数，都是"钱在进还是在出"
+      资金流向        港股看南向、沪深看涨跌家数，都是"钱在进还是在出"
 
     任何一块取不到就跳过。环境是加分信息，不该因为它让整支票判不出来。
     """
@@ -2213,9 +2213,9 @@ def _market_context_text(symbol: str, market: str) -> str:
     except Exception:
         pass
 
-    # 三、资金流向。港股看南向，A股看涨跌家数——两个市场的可得指标不一样，
+    # 三、资金流向。港股看南向，沪深看涨跌家数——两个市场的可得指标不一样，
     # 不强行统一成一个口径。
-    # 南向资金只有港股有——它指的是内地资金通过港股通买港股，美股A股不存在
+    # 南向资金只有港股有——它指的是内地资金通过港股通买港股，美股沪深不存在
     # 这个概念。这里按市场分支，不会给美股错误地加上这一条。
     if market == "HK":
         try:
@@ -2302,7 +2302,7 @@ def _extra_facts_text(symbol: str, market: str) -> str:
         pass
 
     # 点阵图对所有标的都一样，但对高估值成长股意义更大，所以只在美股带上——
-    # 港股A股的贴现率锚不是美联储，硬塞进去只会稀释提示词。
+    # 港股沪深的贴现率锚不是美联储，硬塞进去只会稀释提示词。
     if market == "US":
         try:
             dp = ds.get_fed_dot_plot()
@@ -2337,7 +2337,7 @@ def _web_view_text(symbol: str, market: str, name: str, *, deep: bool = False) -
                   单轮耗时顶上去，所以只在原生的分析师数据本来就是空的时候
                   才兜底——这也正是用户说的"找不到挖不到的数据才去调用"。
 
-    搜索词按市场分语言：美股用英文，港股A股用中文。不是偏好问题，是覆盖问题
+    搜索词按市场分语言：美股用英文，港股沪深用中文。不是偏好问题，是覆盖问题
     ——美股的机构观点几乎都在英文源里，用中文搜只能搜到二手转述。
     """
     try:
@@ -2883,7 +2883,7 @@ def _financial_summary_text(symbol: str, market: str) -> str:
     #   港股 6/8 错误——一律返回 HKD。腾讯/小米/安踏/三生用人民币报表、
     #        友邦和汇丰用美元报表，全被标成港币；只有长和、新鸿基这种真用
     #        港币报表的碰巧对上。
-    #   A股  没有这个字段，不声称也就不会错。
+    #   沪深  没有这个字段，不声称也就不会错。
     #
     # 后果不是"少一条信息"，是喂了一句错的事实：人民币报表被当港币读，规模
     # 低估约9%；友邦汇丰的美元报表被当港币读，差7.8倍。而下面那段"币种跟
@@ -2921,7 +2921,7 @@ def _valuation_text(symbol: str, market: str) -> str:
     要求AI回答一个它压根没被喂数据的问题——2026-08-25排查排行榜可信度时
     发现的真实数据洞。
 
-    A股/港股用百度股市通的近三年历史分位（ds.get_valuation_percentile），
+    沪深/港股用百度股市通的近三年历史分位（ds.get_valuation_percentile），
     不是只给一个孤立的当前倍数，而是回答"相对自己历史贵不贵"。美股同源接口
     实测挂了（见该函数docstring），改用Futu快照里的静态PE(TTM)/PB兜底，
     没有历史分位就如实说明，不编一个假分位数糊弄。
@@ -3033,7 +3033,7 @@ def _news_summary_text(symbol: str, market: str, name: str) -> str:
     源结构上就不含个股新闻，之前每次判断的"近期新闻"这个维度基本等于没有
     真正生效过。
 
-    改用app.py _fetch_news_items已经验证过的同一套优先级链路（A股官方
+    改用app.py _fetch_news_items已经验证过的同一套优先级链路（沪深官方
     公告 > Futu资讯搜索，真按关键词匹配、三个市场通吃 > 财新兜底），不是
     另起炉灶接一个新数据源——这条链路已经在公开详情页跑了很久，可信。
     """
@@ -3137,10 +3137,10 @@ def _price_position_text(symbol: str, market: str) -> str:
     该函数docstring里2026-08-21的真实故障记录）——跟_futu_screen_pool的
     连接是分开的，_judge_one并发调用时各自独立开关，不跨线程共享连接对象。
     """
-    # A股不走Futu——账号没有A股行情权限（跟_a_share_candidate_pool同一个
-    # 根因，2026-08-25实测确认），get_market_snapshot对A股代码必然返回
-    # 失败，之前这里静默return ""，导致A股候选的"价格位置"这一整个判断
-    # 维度长期系统性缺失：抽查当天真实judge结果发现，A股观望占比明显
+    # 沪深不走Futu——账号没有沪深行情权限（跟_a_share_candidate_pool同一个
+    # 根因，2026-08-25实测确认），get_market_snapshot对沪深代码必然返回
+    # 失败，之前这里静默return ""，导致沪深候选的"价格位置"这一整个判断
+    # 维度长期系统性缺失：抽查当天真实judge结果发现，沪深观望占比明显
     # 高于港美股（97% vs 60%左右），逐条看理由文本，AI反复提到"缺失52周
     # 高低点数据，无法判断价格位置"——不是AI瞎判，是这个数据洞客观上
     # 让它没法给出比"观望"更有把握的结论。改用AkShare一年日线历史本地
@@ -3214,7 +3214,7 @@ def _judge_one(item: dict, source: str) -> dict | None:
     news = _news_summary_text(symbol, market, name)
     position = _price_position_text(symbol, market)
     # 近期结构跟52周位置拼在一起送进去（2026-09-06）。分成两句而不是塞进
-    # _price_position_text 内部：那个函数A股和港美股各走一条取数路径，改它
+    # _price_position_text 内部：那个函数沪深和港美股各走一条取数路径，改它
     # 要改两处；近期结构是从日线自己算的，两个市场同一条路。
     _struct = _recent_structure_text(symbol, market)
     if _struct:
@@ -3407,7 +3407,7 @@ _PORTFOLIO_SYSTEM = """你是一位理性、保守的投研助理，正在给一
    落差——这是组合层面才能提供的信息，单支判断本身看不到。
 6. 如果给了"近期AI候选"数据（每日全市场初筛+判断出来的买入/持有推荐，
    不是专门为这个组合挑的），看一下里面有没有能改善这个组合健康度的
-   标的（比如组合缺A股敞口、候选里刚好有A股买入推荐；组合过度集中在
+   标的（比如组合缺沪深敞口、候选里刚好有沪深买入推荐；组合过度集中在
    科技股、候选里有其它行业的买入推荐）——如果有，具体提1-2支，给一个
    参考仓位（比如"总资产的5%"，如果设了资金上限就换算成具体金额），
    说明为什么这支能改善组合而不是单纯"它被判断为买入"（候选池的买入
@@ -3858,7 +3858,7 @@ def main():
     data = screen_candidates()
     print(_pool_summary(data["us_pool"], data["us_all_count"], "美股"))
     print(_pool_summary(data["hk_pool"], data["hk_all_count"], "港股"))
-    print(_pool_summary(data["a_pool"], data["a_all_count"], "A股"))
+    print(_pool_summary(data["a_pool"], data["a_all_count"], "沪深"))
     print()
 
     judged = data["judged"]
@@ -3907,14 +3907,14 @@ def main():
         print(_fmt_entry(e, rank=i))
 
     # 用户明确要求微信简报"不要都是港股，是港美股综合打分前五名"——之前
-    # 让负责转发微信的那个agentTurn cron自己从上面的混排榜单里现场剔除A股、
+    # 让负责转发微信的那个agentTurn cron自己从上面的混排榜单里现场剔除沪深、
     # 重新排序取前5，结果它读串了行（把上面"首页推荐股排行榜"那份不同的
     # 榜单内容也混进来了），不可靠。改成这里直接算好、单独打一段专门给
     # 微信简报用的"港美股综合得分前5"，格式跟上面一致，agentTurn那边只要
     # 原样转述这一段就行，不用自己做筛选/排序判断，从源头上排除误判空间。
     hk_us_judged = [e for e in judged if e.get("market") in ("HK", "US")]
     hk_us_board = _leaderboard(hk_us_judged, 5, market_cap=3)
-    print(f"==================== 港美股综合得分前 {len(hk_us_board)}（不含A股，微信简报用这份） ====================")
+    print(f"==================== 港美股综合得分前 {len(hk_us_board)}（不含沪深，微信简报用这份） ====================")
     if hk_us_board:
         for i, e in enumerate(hk_us_board, 1):
             print(_fmt_entry(e, rank=i))

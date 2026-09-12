@@ -38,8 +38,8 @@ _MARKET_HOURS = {
 }
 
 # 2026-09-01用户明确要求"仅需要在港美股开盘阶段思考就行"——自主决策循环
-# 只看这两个市场是否开盘，A股不参与这个每5分钟一次的自主交易（A股T+1
-# 不能当日回转，跟这个高频动量交易的节奏本来就不搭）。A股的SIMULATE账户
+# 只看这两个市场是否开盘，沪深不参与这个每5分钟一次的自主交易（沪深T+1
+# 不能当日回转，跟这个高频动量交易的节奏本来就不搭）。沪深的SIMULATE账户
 # 依然存在、依然会在快照里展示余额，只是这条自主决策链路不会主动碰它。
 _AGENT_MARKETS = ("HK", "US")
 
@@ -236,7 +236,7 @@ def _build_candidates(open_markets: list[str]) -> list[dict]:
         for it in lst:
             spot = _quotes.get((it["symbol"], market))
             if not spot:
-                # A股不走批量接口；港美股批量里漏掉的（停牌/快照没返回）退回单查。
+                # 沪深不走批量接口；港美股批量里漏掉的（停牌/快照没返回）退回单查。
                 try:
                     spot = ds.get_stock_realtime(it["symbol"], market=market)
                 except Exception:
@@ -548,7 +548,7 @@ def _history_context_lines(email: str, holdings_value_hkd: float) -> list[str]:
     return lines
 
 
-_AGENT_SYSTEM = f"""你是一个正在用虚拟资金自主管理富途模拟盘的投资agent，只交易港股和美股（A股
+_AGENT_SYSTEM = f"""你是一个正在用虚拟资金自主管理富途模拟盘的投资agent，只交易港股和美股（沪深
 不在你的操作范围内，就算候选或持仓信息里出现也不要碰）。这是一个纯测试环境，用户明确要求
 "别拿稳定的股票，要激进点，看看AI的判断能力"——目标不是追求稳健跑赢大盘，是尽可能体现出你
 自己真实的选股和择时判断力。优先在候选股里挑波动性大、题材性强、当日成交活跃（涨跌幅明显、
@@ -568,7 +568,7 @@ _AGENT_SYSTEM = f"""你是一个正在用虚拟资金自主管理富途模拟盘
 现在账户资产的实际变化。所有判断只能基于这些真实给出的数字，不能装作自己还查得到分析师
 评级、历史估值分位数、财报细节这些没给你的信息——没有的数据就是没有，不能编。
 
-关于"每手X股"这一条（只有港股/A股会出现，美股没有）：港股和A股必须按整手的
+关于"每手X股"这一条（只有港股/沪深会出现，美股没有）：港股和沪深必须按整手的
 整数倍下单，不能买零股。所以你给出的股数必须是每手股数的整数倍——开出"50股"
 但这支每手200股，系统取整之后是0手，这一单会被直接跳过、什么都不会发生，
 你这一轮就白跑了。下单前先自己算一遍：一手要多少钱、账上够不够买一手。
@@ -964,7 +964,7 @@ def _run_cycle_locked(email: str) -> dict:
             parts.append(f"PE(TTM){c['pe_ttm']:.1f}倍")
         if c.get("pb") is not None:
             parts.append(f"PB{c['pb']:.1f}倍")
-        # 港股/A股按整手交易，一手多少股、一手要多少钱，是"这支我到底买不买得起"
+        # 港股/沪深按整手交易，一手多少股、一手要多少钱，是"这支我到底买不买得起"
         # 的前提。不给这条，AI只能按"能买几股"算，开出来的股数十有八九不是整手
         # 的倍数，下单时被取整成0手直接跳过（2026-09-04连续17轮就是这么废掉的）。
         lot = c.get("lot_size") or 1
@@ -1153,7 +1153,7 @@ def _run_cycle_locked(email: str) -> dict:
         sig_idx = text.find("交易信号:")
     reasoning_text = text[:sig_idx].strip() if sig_idx != -1 else text.strip()
 
-    # 真实故障纠偏（2026-09-01）：这里原来只拦A股（market not in _AGENT_MARKETS，
+    # 真实故障纠偏（2026-09-01）：这里原来只拦沪深（market not in _AGENT_MARKETS，
     # 即不在("HK","US")里），漏了一种情况——AI手上还持有一支HK股票，但这一轮
     # 只有US开盘（HK已收盘），AI对着这支HK持仓给了"卖出"信号，因为HK本身在
     # _AGENT_MARKETS里，没被这道拦截挡住，直接送进了execute_simulated_trades，
@@ -1161,7 +1161,7 @@ def _run_cycle_locked(email: str) -> dict:
     # place_order本身返回RET_OK，代码把"下单被接受"当成"成交"处理，
     # 结果虚拟现金台账多记了一笔根本没花出去/没收回来的钱，真实持仓也没变。
     # 跟下面预算拦截同一个道理——不能只信prompt里"只交易港股和美股"这句话，
-    # 这里必须拦住"当前不在这一轮open_markets里"的市场，不能只拦A股。
+    # 这里必须拦住"当前不在这一轮open_markets里"的市场，不能只拦沪深。
     off_market_signals = [s for s in signals if s.get("market") not in open_markets and s.get("action") in ("买入", "卖出")]
     for _s in off_market_signals:
         # 跟预算/集中度拦截一样，把原因标在原始dict上，落库后页面和复盘历史

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""港股新股（IPO）认购简报：抓招股数据 + 新闻，让AI给一份"要不要打"的判断，写库供首页只读。
+"""新股（IPO）认购简报：抓招股数据 + 新闻，让AI给一份"要不要打"的判断，写库供首页只读。
+
+港股和美股各跑一轮，但不是同一套逻辑换个市场参数——两个市场的发行机制不同，
+决策依据也就不同（港股看中签率/回拨/入场费，美股看承销商/流通盘/锁定期），
+所以系统提示词、材料来源、输出段名三样都是分开的。详见 _US_SYSTEM 上方那段。
 
 跟 macro_brief.py 同一套思路，理由也一样：一次要拉数据加AI生成，放在页面渲染
 路径里等于每个访客都等一遍，还会把AI额度按访问量烧掉。预先算好落库，首页只是
@@ -26,7 +30,7 @@ import data_sources as ds
 import tracker
 import web_research
 
-_SYSTEM = """你是一位熟悉港股新股市场的分析师，服务对象是一位会自己决定要不要
+_HK_SYSTEM = """你是一位熟悉港股新股市场的分析师，服务对象是一位会自己决定要不要
 申购的个人投资者。下面会给你一只即将上市的港股新股的招股硬数据，以及搜到的
 相关资讯。请就这一只写一份简短的申购参考。
 
@@ -93,13 +97,83 @@ _SYSTEM = """你是一位熟悉港股新股市场的分析师，服务对象是�
 风险：<具体到这一只>
 """
 
+# 美股这份不是把港股那份换几个词。两个市场"要不要打新"的判断依据本来就不同，
+# 硬套港股的段名会逼AI去回答不存在的问题：
+#
+#   港股散户从公开发售认购，中签率、回拨机制、入场费是决策核心；
+#   美股 IPO 由承销商配售，散户通过券商拿到的是很小的一份配额，没有"中签率"
+#   这个数，也没有回拨。真正决定美股新股开盘走势的是另外三件事——承销商的
+#   档次（高盛/摩根士丹利领投和一家小投行领投，定价质量差一个量级）、
+#   发行规模与流通盘（发行股数占总股本的比例越小，开盘越容易被拉飞也越容易
+#   回落）、以及锁定期（一般180天，到期前后是系统性的抛压时点）。
+#
+# 所以段名换成"承销与基石""锁定期与流通盘"，而不是"市场热度""绿鞋与回拨"。
+# 结论词保持跟港股同一套（值得申购/谨慎参与/建议回避/信息不足难以判断），
+# 因为首页那段按结论词上色的代码是两个市场共用的。
+_US_SYSTEM = """你是一位熟悉美股新股（IPO）市场的分析师，服务对象是一位会自己
+决定要不要参与的个人投资者。下面会给你一只即将在美股上市的新股的发行硬数据，
+以及从公开网页搜到的资料。请就这一只写一份简短的参考。
+
+硬性要求：
+
+1. 只能用给定的材料，但要把材料用尽。绝对不要凭对这家公司或这个行业的印象
+   推测材料里没有的数字——编一个"承销商是高盛"或"发行市盈率30倍"出来，比
+   不说危险得多。材料里没提的一律写"未查到"。
+
+   区分"未查到"和"确认没有"：材料里写明"无基石投资者"是查到了结论，要写成
+   "没有基石/锚定投资者"并说明这意味着缺少大资金背书；只有材料根本没提这
+   一项，才写"未查到"。
+
+2. 美股的发行机制跟港股不同，不要套用港股的说法：
+   - 美股没有"回拨机制"，不要提。
+   - 美股几乎所有 IPO 都带 15% 的超额配售权（greenshoe / over-allotment
+     option），这是行业惯例不是亮点，只有材料明确写了行使情况或比例异常时
+     才值得单独说。
+   - 美股散户没有"中签率"这个公开数字，不要编。券商（如富途）拿到的是承销团
+     分给零售渠道的一小部分配额，能不能拿到、拿到多少取决于券商自己的分配
+     规则，我们没有这个数据。
+
+3. 要把注意力放在美股新股真正的决定性因素上：
+   - **承销商**：领投行的档次直接反映发行质量。高盛、摩根士丹利、摩根大通、
+     美银这一档领投，和小投行（如 ThinkEquity、EF Hutton、Maxim）领投，是
+     完全不同性质的发行，后者常见于小盘高波动标的。材料里有承销商名单就必须写。
+   - **发行规模与流通盘**：发行股数、募资金额、发行股份占总股本比例。流通盘
+     越小首日波动越大，这是美股小盘新股的主要特征。
+   - **基石/锚定投资者**：美股叫 cornerstone investor 或 indication of
+     interest，材料里提到某机构承诺认购多少就写出来。
+   - **锁定期**：一般 180 天，材料里如果写了具体天数或有提前解禁条款要指出来。
+
+4. 结论要给一个明确的倾向：值得申购 / 谨慎参与 / 建议回避 / 信息不足难以判断。
+   最后一个不是逃避——美股小盘新股的公开信息经常很薄，说"信息不足"比硬凑
+   一个结论诚实。给倾向时要说清楚是基于什么。
+
+5. 如果给了"近期新股市场整体表现"那段统计，它是我们自己从真实行情算出来的
+   数据，可以引用，而且在单只材料很薄的时候往往是最有价值的依据。但要说清楚
+   这是市场整体统计、不是这一只的特征。
+
+6. 风险必须写，而且要具体到这一只：比如发行价区间对应的估值明显高于同业、
+   领投行是小投行、流通盘过小、公司尚未盈利且现金消耗快、所处行业近期新股
+   普遍破发等。写不出具体的就说"公开材料里没有看到特别的风险点"，不要写
+   "股市有风险"这种废话。
+
+7. 不允许出现任何 emoji 或表情符号。
+
+严格按以下格式输出（每段以段名加中文冒号开头，段名不要改写）：
+一句话结论：<值得申购/谨慎参与/建议回避/信息不足难以判断，加一句为什么>
+公司概况：<这家公司做什么、主要股东、募资拿去干什么，几句话，材料里没有就写未查到>
+定价与门槛：<发行价区间、发行股数、募资规模，有发行市盈率就写>
+承销与基石：<领投和联席承销商、基石/锚定投资者，只写材料里有的，没有就写未查到>
+锁定期与流通盘：<锁定期天数、发行占总股本比例、流通盘大小，没有就写未查到>
+风险：<具体到这一只>
+"""
+
 
 def _ipo_news_text(name: str, limit: int = 8) -> tuple[str, list]:
     """富途新闻库里的相关资讯。
 
     对新股这几乎总是空的：富途的新闻按**已上市**股票代码索引，还没上市的
     公司搜不到任何东西（实测三只新股全是0条）。留着它是因为偶尔能命中同名
-    的A股母公司新闻，成本又只有一次接口调用。真正的材料来源是下面的
+    的沪深母公司新闻，成本又只有一次接口调用。真正的材料来源是下面的
     _web_material。
     """
     try:
@@ -193,9 +267,69 @@ def _web_material(name: str, symbol: str) -> str:
     return "\n\n".join(parts)
 
 
-def _facts_text(ipo: dict) -> str:
+def _us_web_material(name: str, symbol: str) -> str:
+    """美股新股的公开材料。跟港股那条路差别很大，不是换个搜索词的问题。
+
+    港股有两个结构化的一手/准一手来源（联交所披露易的招股章程封面、hkipox
+    的固定版式页），代码可以直接定位并做文本匹配。美股没有对应的东西：
+    SEC 的 S-1 是几百页的 HTML，招股书正文里承销商名单藏在 "Underwriting"
+    章节的中后段，靠 r.jina.ai 截前几千字根本读不到。
+
+    所以美股这条改成两次英文搜索，分别打两类信息：
+      第一次  underwriters / price range / shares offered —— 发行架构，
+              Nasdaq、Renaissance Capital、IPO Scoop 这类站点的新股页面
+              首屏就是这些字段，截断也读得到。
+      第二次  S-1 / lock-up / cornerstone —— 招股书要点和锁定期，
+              StockTitan、Business Wire 的发行公告会直接写。
+
+    搜索词用英文不是偏好问题：美股新股的中文报道只覆盖极少数知名标的，
+    绝大多数小盘 IPO 中文世界里一条都搜不到。
+    """
+    parts = []
+    a = web_research.research(
+        f"{name} {symbol} IPO underwriters price range shares offered Nasdaq",
+        read_top=2, max_chars=4000)
+    if a:
+        parts.append(a)
+    b = web_research.research(
+        f"{name} IPO S-1 prospectus lock-up period cornerstone investor use of proceeds",
+        read_top=2, max_chars=3500)
+    if b:
+        parts.append(b)
+    return "\n\n".join(parts)
+
+
+def _facts_text(ipo: dict, market: str = "HK") -> str:
     """把接口给的硬数据摆成一段。刻意逐项标注"接口数据"，让AI清楚哪些是可信的
-    事实、哪些要靠下面的新闻补。"""
+    事实、哪些要靠下面的新闻补。
+
+    美股那份能给的字段比港股少得多，这不是取数没写全：实测富途
+    get_ipo_list(US) 返回的 102 条里，lot_size / entrance_price /
+    apply_end_time / ipo_price / issue_pe_rate 全是 N/A，只有 issue_size
+    （发行股数）和 ipo_price_min/max 有值。原因是美股 IPO 没有"每手"和
+    "公开认购截止日"这两个概念，接口不是漏给，是本来就没有。
+    """
+    if market == "US":
+        parts = [f"- 代码：{ipo['symbol']}（美股）", f"- 名称：{ipo['name']}"]
+        if ipo.get("list_date"):
+            parts.append(f"- 预计上市日期：{ipo['list_date']}")
+        lo, hi = ipo.get("price_min"), ipo.get("price_max")
+        if lo and hi:
+            parts.append(f"- 发行价区间：{lo:,.2f}" + (f"-{hi:,.2f} 美元" if hi != lo else " 美元（定价已确定）"))
+        elif ipo.get("ipo_price"):
+            parts.append(f"- 发行价：{ipo['ipo_price']:,.2f} 美元")
+        if ipo.get("issue_size"):
+            parts.append(f"- 发行股数：{int(ipo['issue_size']):,} 股")
+            if lo and hi:
+                _mid = (float(lo) + float(hi)) / 2.0
+                parts.append(f"- 按区间中值估算的募资规模：约 {int(ipo['issue_size']) * _mid / 1e6:,.1f} 百万美元")
+        if ipo.get("issue_pe"):
+            parts.append(f"- 发行市盈率：{ipo['issue_pe']:.2f} 倍")
+        parts.append("（以上为交易接口提供的硬数据。美股 IPO 没有“每手股数”和“公开认购"
+                     "截止日”这两个概念，接口也拿不到承销商、基石投资者、锁定期，"
+                     "这几项只能看下面挖到的公开材料里有没有写。）")
+        return "\n".join(parts)
+
     parts = [f"- 代码：{ipo['symbol']}（港股）", f"- 名称：{ipo['name']}"]
     if ipo.get("list_date"):
         parts.append(f"- 上市日期：{ipo['list_date']}")
@@ -219,21 +353,24 @@ def _facts_text(ipo: dict) -> str:
     return "\n".join(parts)
 
 
-def build_one(ipo: dict) -> bool:
+def build_one(ipo: dict, market: str = "HK") -> bool:
     news_text, items = _ipo_news_text(ipo["name"])
-    facts = _facts_text(ipo)
-    web_text = _web_material(ipo["name"], ipo["symbol"])
+    facts = _facts_text(ipo, market)
+    web_text = (_us_web_material(ipo["name"], ipo["symbol"]) if market == "US"
+                else _web_material(ipo["name"], ipo["symbol"]))
 
     # 把近期新股整体表现一并给AI：单只的招股材料常常很薄（实测这三只新闻
     # 一条都搜不到），而"最近打新整体赚不赚钱、破发率多少"是有真实数据支撑
     # 的背景，能让结论不至于只能写"信息不足"。
+    # 按市场取各自那份——把港股的破发率拿去论证一只美股新股是硬错。
+    _mkt_label = "美股" if market == "US" else "港股"
     market_ctx = ""
     try:
-        _p = tracker.get_latest_ipo_performance()
+        _p = tracker.get_latest_ipo_performance(market)
         _s = (_p or {}).get("stats") or {}
         if _s.get("count"):
             market_ctx = (
-                f"近{_s['days']}天港股共{_s['count']}只新股上市，首日涨跌幅"
+                f"近{_s['days']}天{_mkt_label}共{_s['count']}只新股上市，首日涨跌幅"
                 f"平均{_s['avg']:+.1f}%、中位数{_s['median']:+.1f}%、"
                 f"破发率{_s['break_rate']:.0f}%（最高{_s['max']:+.0f}%、最低{_s['min']:+.0f}%）。"
                 + (f"其中{_s['up_rate']:.0f}%的新股首日收涨——注意这个占比和上面的"
@@ -245,7 +382,7 @@ def build_one(ipo: dict) -> bool:
 
     user = (
         f"新股：{ipo['name']}（{ipo['symbol']}）\n\n"
-        f"招股硬数据：\n{facts}\n\n"
+        + (f"发行硬数据：\n{facts}\n\n" if market == "US" else f"招股硬数据：\n{facts}\n\n")
         + (f"近期新股市场整体表现（真实统计，可以引用）：\n{market_ctx}\n\n" if market_ctx else "")
         + (f"公开网页挖到的招股材料（可以引用，注意标注的来源）：\n{web_text}\n\n"
            if web_text else "公开网页没有挖到招股材料。\n\n")
@@ -254,7 +391,8 @@ def build_one(ipo: dict) -> bool:
     )
 
     text = advisor.chat_with_failover(
-        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+        [{"role": "system", "content": _US_SYSTEM if market == "US" else _HK_SYSTEM},
+         {"role": "user", "content": user}],
         max_tokens=2000, temperature=0.3, timeout=120, tag=f"ipo/{ipo['symbol']}",
     ).strip()
     if not text:
@@ -265,19 +403,15 @@ def build_one(ipo: dict) -> bool:
         ipo["symbol"], ipo["name"], ipo.get("list_date", ""), ipo.get("apply_end", ""),
         text, json.dumps(ipo, ensure_ascii=False),
         json.dumps({"futu_news": items, "web": web_text}, ensure_ascii=False),
+        market=market,
     )
-    print(f"[{ipo['symbol']}] {ipo['name']} 已写入，{len(text)}字，"
+    print(f"[{_mkt_label}/{ipo['symbol']}] {ipo['name']} 已写入，{len(text)}字，"
           f"富途资讯{len(items)}条，网页材料{len(web_text)}字")
     return True
 
 
 def main() -> int:
     advisor._load_secrets_into_env()
-    try:
-        ipos = ds.get_ipo_calendar("HK", limit=8)
-    except Exception as e:
-        print(f"取新股清单失败：{e}")
-        return 1
 
     # 先算近期已上市新股的首日表现。放在最前面是因为它不依赖AI，就算后面
     # AI调用全挂了、甚至当天没有待上市新股，这块统计仍然能更新——而这块
@@ -301,23 +435,45 @@ def main() -> int:
         except Exception as e:
             print(f"[{_label}]首日表现统计失败（不影响其余部分）：{e}")
 
-    if not ipos:
-        print("当前没有待上市的港股新股")
-        return 0
-
-    ok = 0
-    for ipo in ipos:
-        # 政府债券这类不是股票打新，跳过——它没有基本面可分析，也没有绿鞋回拨
-        # 这套机制，混在新股里只会稀释真正要看的内容。
-        if "银债" in ipo["name"] or "债券" in ipo["name"]:
-            print(f"[{ipo['symbol']}] {ipo['name']} 是债券，跳过")
-            continue
+    # AI简报按市场各跑一轮（美股是2026-09-13加的，用户要求首页美股那块跟港股
+    # 一致）。两个市场分开 try，理由跟上面那段统计一样：美股这条是新加的，
+    # 挂了不能连累港股那份已经稳定跑了一个多月的简报。
+    #
+    # 美股只取"已经定了上市日、且还没上市"的前4只，不是8只：
+    #   - 富途一次返回102条，其中绝大多数连上市日都没定（list_time 是 N/A），
+    #     给一只连日期都没有的票生成简报，用户看到也无法行动；
+    #   - 每只要发两次网页搜索+两次正文抓取+一次AI调用，8只美股等于把这个
+    #     任务的耗时和token开销翻倍。港股散户能真正参与认购，值8只；美股
+    #     散户拿的是券商配额，4只覆盖最近的窗口已经够。
+    _today = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+    total_ok = 0
+    for _mkt, _label in (("HK", "港股"), ("US", "美股")):
         try:
-            if build_one(ipo):
-                ok += 1
+            ipos = ds.get_ipo_calendar(_mkt, limit=8 if _mkt == "HK" else 60)
         except Exception as e:
-            print(f"[{ipo['symbol']}] 失败：{e}")
-    print(f"完成 {ok} 只")
+            print(f"[{_label}]取新股清单失败：{e}")
+            continue
+        if _mkt == "US":
+            ipos = [ip for ip in ipos if (ip.get("list_date") or "") > _today][:4]
+        if not ipos:
+            print(f"[{_label}]当前没有待上市的新股")
+            continue
+
+        ok = 0
+        for ipo in ipos:
+            # 政府债券这类不是股票打新，跳过——它没有基本面可分析，也没有绿鞋回拨
+            # 这套机制，混在新股里只会稀释真正要看的内容。
+            if "银债" in ipo["name"] or "债券" in ipo["name"]:
+                print(f"[{ipo['symbol']}] {ipo['name']} 是债券，跳过")
+                continue
+            try:
+                if build_one(ipo, _mkt):
+                    ok += 1
+            except Exception as e:
+                print(f"[{_label}/{ipo['symbol']}] 失败：{e}")
+        print(f"[{_label}]完成 {ok} 只")
+        total_ok += ok
+    print(f"合计完成 {total_ok} 只")
     return 0
 
 
