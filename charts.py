@@ -1346,3 +1346,64 @@ def build_correlation_heatmap(corr: pd.DataFrame, labels: dict[str, str] | None 
     fig.update_yaxes(autorange="reversed")
     fig.update_xaxes(side="top", tickangle=0)
     return fig
+
+
+def build_sim_vs_benchmark(points: list[dict], bench: pd.DataFrame,
+                           bench_name: str = "标普500") -> go.Figure | None:
+    """AI模拟盘 vs 基准，两条线都归一到100（升级路线图第7条）。
+
+    归一是必须的：AI的净值是一万美元量级，标普500是七千点量级，直接画在
+    同一个y轴上，指数那条线会把净值那条压成一条贴着底的直线。归一到100之后
+    两条线比的是"同样投100块，现在各自变成多少"，这才是"谁跑赢"该有的读法。
+
+    基准按"AI起跑那天的收盘"对齐，不是按自然月初：比较的前提是同一个起点，
+    用别的起点等于凭空给某一方一段先手。
+
+    只画AI有快照的那些交易日——基准在AI还没开始跑的日子里的涨跌跟这场比较
+    无关，画进来会让基准那条线凭空多出一段。
+    """
+    if not points:
+        return None
+    df = pd.DataFrame(points)
+    if "run_at" not in df.columns or "assets_hkd" not in df.columns or df.empty:
+        return None
+    df = df.dropna(subset=["run_at", "assets_hkd"]).sort_values("run_at")
+    if len(df) < 2:
+        return None
+
+    base = float(df["assets_hkd"].iloc[0])
+    if base <= 0:
+        return None
+    ai_x = list(df["run_at"])
+    ai_y = [float(v) / base * 100.0 for v in df["assets_hkd"]]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=ai_x, y=ai_y, mode="lines", name="AI模拟盘",
+        line=dict(width=1.8, color=_CHART_INK),
+        hovertemplate="AI %{y:.2f}<extra></extra>",
+    ))
+
+    if bench is not None and not bench.empty and {"日期", "收盘"} <= set(bench.columns):
+        b = bench.dropna(subset=["日期", "收盘"]).copy()
+        b["日期"] = pd.to_datetime(b["日期"], errors="coerce")
+        b = b.dropna(subset=["日期"]).sort_values("日期")
+        # 截到AI的时间窗内，并且用窗内第一根作为基准的100
+        start = pd.Timestamp(ai_x[0]).tz_localize(None) if pd.Timestamp(ai_x[0]).tzinfo else pd.Timestamp(ai_x[0])
+        end = pd.Timestamp(ai_x[-1]).tz_localize(None) if pd.Timestamp(ai_x[-1]).tzinfo else pd.Timestamp(ai_x[-1])
+        b = b[(b["日期"] >= start.normalize()) & (b["日期"] <= end + pd.Timedelta(days=1))]
+        if len(b) >= 2:
+            bbase = float(b["收盘"].iloc[0])
+            if bbase > 0:
+                fig.add_trace(go.Scatter(
+                    x=list(b["日期"]), y=[float(v) / bbase * 100.0 for v in b["收盘"]],
+                    mode="lines", name=bench_name,
+                    line=dict(width=1.4, color=_AUX_SOFT, dash="dot"),
+                    hovertemplate=bench_name + " %{y:.2f}<extra></extra>",
+                ))
+
+    # 100那条水平线就是"不赚不亏"，两条线在它上面还是下面一眼就分得出来。
+    fig.add_hline(y=100, line=dict(width=1, color=_CHART_GRID), layer="below")
+    _apply_chart_theme(fig, height=300, legend=True, hovermode="x unified")
+    fig.update_yaxes(ticksuffix="")
+    return fig

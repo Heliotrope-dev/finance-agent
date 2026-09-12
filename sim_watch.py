@@ -107,6 +107,19 @@ def check() -> dict:
     if not open_markets:
         return {"status": "跳过", "note": "当前没有市场开盘"}
 
+    # 回填成交均价（升级路线图第7条的指标要用）。挂在这里而不是下单路径上：
+    # 下的是市价单，place_order 返回时还没成交、拿不到价格；而下单路径上每多
+    # 一次网络往返就多一个真实下单的失败点。这个函数只在有缺价订单时才真的
+    # 连富途，平时是一次空查询，放在这个每2分钟一跑的循环里代价可以忽略。
+    try:
+        import sim_trader
+        _n = sim_trader.backfill_fill_prices(email)
+        if _n:
+            print(f"回填成交价：{_n}笔")
+    except Exception as _e:
+        # 回填失败绝不能影响盯盘本身——它只是给事后统计用的，不参与任何决策。
+        print(f"回填成交价失败（忽略）：{_e}")
+
     state = _load_state()
     last_prices: dict = state.get("prices") or {}
     last_cycle = float(state.get("last_cycle_ts") or 0)

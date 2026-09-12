@@ -1,11 +1,24 @@
 # 盘中盯盘（intraday_watch.py）的定时任务 —— 目前【未安装】，等用户决定开启。
 #
-# 2026-09-12 查证：这个脚本在 crontab / systemd timer / OpenClaw commitments
-# 里都没有任何调度，data/intraday_watch_state.json 停在 9月9日。也就是说
-# 止损/目标价/急涨急跌/回到买点/到价提醒这几类推送目前全都不会触发。
+# 2026-09-12 查证：这个脚本在系统 crontab、systemd timer、以及 OpenClaw 自己的
+# 调度表 /root/.openclaw/state/openclaw.sqlite 的 cron_jobs 里都没有任何条目
+# （26个 OpenClaw 定时任务逐条查过 payload_message，没有一条提到 intraday_watch），
+# data/intraday_watch_state.json 停在 9月9日。也就是说止损/目标价/急涨急跌/
+# 回到买点/到价提醒这几类推送目前全都不会触发。
+#
+# ⚠️ 这个项目有两套调度器并存，改之前先搞清楚东西在哪一套里：
+#   - 系统 crontab：warm_home_cache / advisor / expectancy / macro_brief /
+#     ipo_brief / market_recommendation
+#   - OpenClaw cron（openclaw.sqlite 的 cron_jobs 表）：ai-sim-agent、
+#     ai-sim-snapshot、sim-agent-* 、hk/us-mentor-scan、stock-advisor-* 等
+#   光看 `crontab -l` 会以为一堆任务没在跑，实际是在 OpenClaw 那边。
 #
 # 安装方法（服务器上执行，crontab 顶部已有 CRON_TZ=Asia/Shanghai）：
 #   crontab -l > /tmp/ct && cat ops/intraday_watch.cron >> /tmp/ct && crontab /tmp/ct
+#
+# 旁证：OpenClaw 那边的 ai-sim-agent 用的时间表达式是 */2 0-5,9-16,21-23，
+# 跟下面这三行的小时段完全一致——这个窗口划分是这个项目已经验证过的口径，
+# 不是这次拍的。
 #
 # 时间窗按北京时间划，只覆盖真正有市场在交易的时段——用户要求"不开盘不用看"：
 #   09-16  周一至周五   A股(09:30-15:00) + 港股(09:30-16:10)

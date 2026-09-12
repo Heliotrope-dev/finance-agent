@@ -571,3 +571,71 @@ def get_ledger_reconciled_holdings(email: str, snapshot: dict | None = None) -> 
         "ai_value_hkd": ai_value_hkd, "foreign_value_hkd": foreign_value_hkd,
         "ai_positions": ai_positions, "foreign_positions": foreign_positions,
     }
+
+
+def backfill_fill_prices(email: str) -> int:
+    """把成交均价回填进 simulated_orders.fill_price，返回回填了几条。
+
+    2026-09-12新增（升级路线图第7条）。为什么要事后回填而不是下单时记：下的是
+    市价单，place_order 返回的那一刻订单还没成交，`dealt_avg_price` 是空的。
+    实测富途的 order_list_query 在成交后会带上这个字段（US.SLV 58.23、
+    US.GLD 400.19 这种），所以按 order_id 对回去就行。
+
+    刻意做成独立函数、由调用方决定什么时候跑（sim_watch 每轮开头调一次），
+    不塞进 _execute_one：下单路径上多一次网络往返，等于给每一笔真实下单增加
+    一个新的失败点，而回填晚几分钟没有任何影响。
+
+    查不到价格的订单原样留着不动（fill_price 保持 NULL），下一轮会再试；
+    不写 0 占位——0 会被下游当成"成交价是0"参与算术。
+    """
+    pending = tracker.get_orders_missing_fill_price(email)
+    if not pending:
+        return 0
+
+    by_market: dict[str, list[dict]] = {}
+    for o in pending:
+        by_market.setdefault(o.get("market") or "", []).append(o)
+
+    filled = 0
+    for market, rows in by_market.items():
+        trd_market = _MARKET_TRD.get(market)
+        if not trd_market:
+            continue
+        try:
+            trd = ft.OpenSecTradeContext(filter_trdmarket=trd_market, host=_HOST, port=_PORT)
+        except Exception:
+            continue
+        try:
+            acc_id = _get_sim_acc_id(trd)
+            if not acc_id:
+                continue
+            price_by_order: dict[str, float] = {}
+            # 先查当日订单，再查历史订单。当日那个够覆盖刚成交的；跨天没回填
+            # 成功的（比如那几分钟 OpenD 连不上）只能靠历史接口捞回来。
+            for fn in ("order_list_query", "history_order_list_query"):
+                try:
+                    ret, df = getattr(trd, fn)(trd_env=ft.TrdEnv.SIMULATE, acc_id=int(acc_id))
+                except Exception:
+                    continue
+                if ret != ft.RET_OK or df is None or df.empty:
+                    continue
+                if "order_id" not in df.columns or "dealt_avg_price" not in df.columns:
+                    continue
+                for _, r in df.iterrows():
+                    try:
+                        px = float(r["dealt_avg_price"])
+                    except (TypeError, ValueError):
+                        continue
+                    if px > 0:
+                        price_by_order.setdefault(str(r["order_id"]), px)
+            for o in rows:
+                px = price_by_order.get(str(o.get("order_id") or ""))
+                if px:
+                    tracker.set_order_fill_price(int(o["id"]), px)
+                    filled += 1
+        finally:
+            try:
+                trd.close()
+            except Exception:
+                pass
+    return filled

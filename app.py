@@ -103,8 +103,10 @@ from charts import (
     build_benchmark_comparison, build_return_histogram, build_multi_comparison, build_position_donut,
     build_fed_watch_chart, build_macro_series_chart,
     build_sim_equity_curve, build_sector_treemap, build_correlation_heatmap,
+    build_sim_vs_benchmark,
 )
 import portfolio_risk
+import sim_metrics
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
     _invalidate_token, _hash_pw, _user_exists,
@@ -6522,6 +6524,88 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
         st.caption("当前空仓。")
 
 
+def _render_sim_manager_stats(email: str, equity_points: list[dict]):
+    """AI基金经理：基准对比 + 专业指标（升级路线图第7条）。
+
+    这一块的设计原则是**数据不够就不给数字**，数学在 sim_metrics.py。
+
+    为什么要专门强调：写这段时这个盘刚重置成1万美金，数据库里只有1个交易日的
+    净值快照。年化收益、夏普比率这类指标照公式硬算全都算得出来，而且看起来很
+    专业——把1天的涨跌按252个交易日外推，+0.5%的一天会变成"年化+250%"。这个
+    项目的定位是"亏的也放在里面，没有挑过"，在指标上编数字比不显示指标伤害
+    大得多。所以样本不够的指标一律不显示，并且明说还差多少个交易日。
+    """
+    if not equity_points:
+        return
+    start_capital = sim_agent._VIRTUAL_BUDGET_HKD / sim_trader.USD_HKD_RATE
+    try:
+        orders = get_simulated_orders(email, limit=500)
+    except Exception:
+        orders = []
+    try:
+        res = sim_metrics.compute(equity_points, start_capital, orders)
+    except Exception:
+        return
+    if not res:
+        return
+
+    st.divider()
+    st.markdown("**AI基金经理**")
+
+    # ── 基准对比 ────────────────────────────────────────────────────
+    # 跑赢没跑赢是这一块最该先回答的问题，放在指标之前。
+    bench_df, bench_name = None, "标普500"
+    try:
+        _start = min(p["run_at"] for p in equity_points).strftime("%Y%m%d")
+        _end = cn_now().strftime("%Y%m%d")
+        bench_df = get_benchmark_history(_start, _end, market="US")
+    except Exception:
+        bench_df = None
+    fig = build_sim_vs_benchmark(equity_points, bench_df, bench_name)
+    if fig is not None:
+        st.caption(f"AI净值 vs {bench_name}，两条线都归一到100（同样投100块，"
+                   f"现在各自变成多少）。基准按AI起跑那天对齐。")
+        st.plotly_chart(fig, use_container_width=True, config=_PLOTLY_CONFIG,
+                        key="_sim_vs_bench")
+
+    # ── 指标 ────────────────────────────────────────────────────────
+    def _pct(v):
+        return f"{v:+.2%}" if v is not None else "—"
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("区间收益", _pct(res.get("total_return")))
+    c2.metric("最大回撤", f"{res['max_drawdown']:.2%}" if "max_drawdown" in res else "—")
+    c3.metric("年化收益", _pct(res.get("annual_return")) if "annual_return" in res else "—")
+    c4.metric("夏普比率", f"{res['sharpe']:.2f}" if "sharpe" in res else "—")
+
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("成交笔数", str(res.get("n_trades", 0)))
+    c6.metric("平仓回合", str(res.get("round_trips", 0)))
+    c7.metric("胜率", f"{res['win_rate']:.0%}" if "win_rate" in res else "—")
+    c8.metric("平均持仓", f"{res['avg_holding_days']:.1f}天" if "avg_holding_days" in res else "—")
+
+    notes = []
+    if not res.get("enough_for_annual"):
+        need = res.get("min_days_for_annual", 20) - res.get("n_days", 0)
+        notes.append(
+            f"年化收益和夏普比率暂时不显示：只有 {res.get('n_days', 0)} 个交易日的净值，"
+            f"还差 {max(need, 0)} 天。把一两天的涨跌按252个交易日外推出来的"
+            f"「年化」不是收益率，是放大后的噪声。"
+        )
+    if res.get("round_trips", 0) == 0:
+        notes.append("还没有完成的平仓回合（买入后尚未卖出），所以胜率和平均持仓天数暂时算不出来。")
+    elif "win_rate" not in res:
+        notes.append("有平仓回合但缺成交价，胜率暂时算不出来——成交价由系统在盘中自动回填，稍后会补上。")
+    if "turnover" in res:
+        notes.append(f"区间换手率 {res['turnover']:.2f} 倍（累计成交金额 ÷ 当前净值），未年化。")
+    if "sharpe" in res:
+        notes.append("夏普比率按无风险利率为0计算；当前美债10年期约5%，因此这个数偏乐观。")
+    notes.append(f"最大回撤用的是全部盘中快照（共{res.get('n_points', 0)}个点），"
+                 f"不是日线——回撤问的是最难受的时候有多难受，压成日线会把日内的坑抹平。")
+    for n in notes:
+        st.caption(n)
+
+
 def _render_ai_sim_dashboard():
     """AI模拟炒股页——2026-09-01用户明确要求"回看页全部改成AI模拟炒股，我需要
     看到它的持仓、收益和相关的所有交易记录"，完全取代原来的AI判断准确率
@@ -6626,6 +6710,8 @@ def _render_ai_sim_dashboard():
             st.caption(f"「{view}」这个范围内数据点还不够画线——换个更大的范围看看，或者等AI多跑几轮。")
     else:
         st.caption("数据点还不够，多跑几轮后这里会出现走势图")
+
+    _render_sim_manager_stats(email, equity_points)
 
     # 2026-09-03用户明确要求"折线图下面做两个饼状图，一个港股/美股/剩余资金
     # 各占比例，一个持仓股票比例"——这里单独再查一次实时快照，跟上面

@@ -364,6 +364,17 @@ def init_db():
         _so_cols = [r[1] for r in c.execute("PRAGMA table_info(simulated_orders)").fetchall()]
         if "notified_at" not in _so_cols:
             c.execute("ALTER TABLE simulated_orders ADD COLUMN notified_at TEXT NOT NULL DEFAULT ''")
+        # fill_price：成交均价（升级路线图第7条"AI基金经理"的指标要用）。
+        #
+        # 下单走的是市价单，place_order 返回的时候还没成交，那一刻拿不到价格
+        # ——所以这一列不是下单时写的，是事后由 sim_trader.backfill_fill_prices()
+        # 从富途的 order_list_query（字段 dealt_avg_price）回填的。
+        #
+        # 没有这一列的话，胜率和换手率都算不出来：胜率要一买一卖的差价，换手率
+        # 要成交金额。用股数代替金额算换手是错的——3股SPY和32股SLV金额差一个
+        # 量级，按股数加总等于把便宜的票算得比贵的票更"换手"。
+        if "fill_price" not in _so_cols:
+            c.execute("ALTER TABLE simulated_orders ADD COLUMN fill_price REAL")
 
         # sim_agent_runs：AI模拟盘"自主决策"每次运行的完整记录——2026-09-01
         # 用户要求"全自动、自己学习试错"，这是每15分钟一次的独立决策循环
@@ -2440,4 +2451,25 @@ def delete_price_alert(email: str, alert_id: int) -> None:
     init_db()
     with closing(_conn()) as c:
         c.execute("DELETE FROM price_alerts WHERE id = ? AND email = ?", (int(alert_id), email))
+        c.commit()
+
+
+def get_orders_missing_fill_price(email: str, limit: int = 200) -> list[dict]:
+    """成功成交但还没回填成交价的订单，给 sim_trader.backfill_fill_prices 用。"""
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM simulated_orders WHERE email = ? AND status = '成功' "
+            "AND (fill_price IS NULL OR fill_price <= 0) AND order_id != '' "
+            "ORDER BY created_at DESC LIMIT ?",
+            (email, limit),
+        ).fetchall()]
+
+
+def set_order_fill_price(order_row_id: int, price: float) -> None:
+    init_db()
+    with closing(_conn()) as c:
+        c.execute("UPDATE simulated_orders SET fill_price = ? WHERE id = ?",
+                  (float(price), int(order_row_id)))
         c.commit()
