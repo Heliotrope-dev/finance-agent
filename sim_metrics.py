@@ -92,7 +92,18 @@ def compute(points: list[dict], start_capital: float,
         return out
 
     # ── 区间收益：任何时候都能算，也不涉及外推 ──────────────────────
+    #
+    # ⚠️ 必须先按时间排序再取首尾。tracker.get_equity_snapshots 是
+    # `ORDER BY snapshot_at DESC`（最新在前），直接 .iloc[-1] 取到的是**最老**
+    # 的那条。2026-09-12 就是这么错的：页面上"区间收益"显示 -0.07%，而同一页
+    # 的"累计收益率"是 -0.31%，两个本该一致的数字自相矛盾。
+    # 对账：最老快照 77948.36 HKD/7.8 = 9993.38 → -0.066%（显示成 -0.07%）；
+    #       最新快照 77745.39 HKD/7.8 = 9967.36 → -0.326%（对上 -0.31%）。
+    # 最大回撤受害更隐蔽——在倒序序列上跑 cummax，算出来的是"倒着看的最大涨
+    # 幅"，不是回撤，而且照样输出一个像模像样的负数，不会报错。
     raw = pd.DataFrame(points)
+    if "run_at" in raw.columns:
+        raw = raw.sort_values("run_at").reset_index(drop=True)
     if "assets_hkd" in raw.columns and len(raw) >= 1:
         last_val = float(raw["assets_hkd"].iloc[-1])
         out["current_value"] = last_val

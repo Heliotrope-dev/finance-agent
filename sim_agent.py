@@ -833,10 +833,6 @@ def _run_cycle_locked(email: str) -> dict:
     _reconciled = sim_trader.get_ledger_reconciled_holdings(email, snapshot)
     holdings_value_hkd = _reconciled["ai_value_hkd"]
     if _reconciled["foreign_positions"]:
-        _foreign_desc = "、".join(
-            f"{p.get('name') or p.get('code')}(¥{(p.get('market_val_hkd') or 0):,.0f})"
-            for p in _reconciled["foreign_positions"]
-        )
         # 用户2026-09-12要求"让模拟盘重新按一万美金跑起来"，最后一步是把这些
         # 遗留仓位真的平掉，让账户状态跟账本状态完全一致。挂在这里而不是另开
         # 一条cron：这个循环本来就只在有市场开盘时才被唤醒（见上面
@@ -850,8 +846,6 @@ def _run_cycle_locked(email: str) -> dict:
             _cleanup.main(write=True, email=email)
         except Exception as _e:
             print(f"[sim_agent] 遗留仓位清理失败（不影响本轮决策）：{_e}")
-    else:
-        _foreign_desc = ""
     # 这次决策"开始前"的净值快照——必须在AI调用/下单之前就固定下来，不能
     # 等这次交易执行完再算。之前的bug：交易执行完之后拿"决策前的持仓市值"
     # (这时还不包含刚买的这笔)去加"结算后的现金"(已经扣了这笔买入的钱)，
@@ -1253,15 +1247,28 @@ def _run_cycle_locked(email: str) -> dict:
         # 执行成功0条，1条超预算被拦截"，同一句话里"0条信号"和"1条被拦截"
         # 直接打架。信号数就该是AI这一轮给出的买卖指令总数，跟后面执行与否
         # 无关，执行结果另外用"执行成功N条"表达。
-        f"{sum(1 for s in signals if s.get('action') in ('买入', '卖出'))}条信号，"
-        f"其中执行成功{sum(1 for r in exec_results if r.get('status') == '成功')}条"
+        # 摘要要能自己解释"为什么是这个结果"，尤其是 0 条信号的时候。
+        # 2026-09-12 审计原话：连续24次"0条信号，其中执行成功0条"，状态一律
+        # "完成"——"这可能完全正常（就是没机会），也可能是取数挂了静默返回空，
+        # 界面上没法区分"。所以 0 信号时把候选池大小带出来：候选池有N只而AI
+        # 一条不开，是"看过了没机会"；候选池本身就是0，那是取数环节出了问题。
+        (
+            f"候选池{len(candidates)}只，AI未给出买卖指令"
+            if not any(s.get("action") in ("买入", "卖出") for s in signals)
+            else f"{sum(1 for s in signals if s.get('action') in ('买入', '卖出'))}条信号，"
+                 f"其中执行成功{sum(1 for r in exec_results if r.get('status') == '成功')}条"
+        )
         + (f"，{len(dropped_signals)}条超预算被拦截" if dropped_signals else "")
         + (f"，{len(_trimmed)}条按额度上限削减后执行" if _trimmed else "")
         + (f"，本轮手续费共HK${total_fee_hkd:,.2f}" if total_fee_hkd > 0 else "")
         # 账户里其他来源的仓位如实带出来，不能悄悄从holdings_value_hkd里
-        # 拿掉就当没这回事——用户去富途App对账时应该能在这里查到解释，
-        # 而不是自己去猜"净值算法是不是有bug"。
-        + (f"，账户内另有非AI仓位未计入净值：{_foreign_desc}" if _foreign_desc else ""),
+        # 拿掉就当没这回事——用户去富途App对账时应该能在这里查到解释。
+        # 但只写只数、不再逐笔列名字和金额：那串"新奥能源(HK$9,628)、滨化股份
+        # (HK$6,170)"每轮都一模一样地重复一遍，把摘要撑满之后真正要看的
+        # "这轮为什么没动作"被挤到省略号后面去了（审计第6条）。明细在
+        # 「当前持仓」里本来就压灰标注着，不需要在每条决策记录里再抄一遍。
+        + (f"，另有{len(_reconciled['foreign_positions'])}笔非AI仓位未计入净值"
+           if _reconciled["foreign_positions"] else ""),
     )
     return {"status": "完成", "reasoning": reasoning_text, "signals": signals, "dropped": dropped_signals, "executed": exec_results}
 

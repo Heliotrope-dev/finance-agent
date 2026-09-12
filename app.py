@@ -416,20 +416,25 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
    一种：表单提交键、弹层触发键各自是独立的 testid，只写 .stButton button 会
    漏掉它们，于是页面上就会出现"大部分按钮是新样式、个别还是旧样式"的割裂。
    全部并到同一组选择器上，样式只此一份，以后加新按钮也自动继承。 */
+/* 2026-09-12：连那条描边也去掉。用户第二次提这件事——"项目里面还是存在按键
+   的外框，这个我之前说过很丑，做成跟我们现在项目一样透明无框的那种风格"。
+   上一版只把底色改透明、留了 1px 描边，页面上仍然是一个个小方框。
+   现在改成纯文字按钮：常态只有文字，悬停时才浮出一块浅灰底作为可点反馈。
+   为了不让它退化成"看不出能点"，文字用正文墨色 + 500 字重（比周围的说明
+   文字重一档），左右 padding 保留，让悬停时那块底色是个规整的圆角块。 */
 .stButton button,
 [data-testid="stFormSubmitButton"] button,
 [data-testid="stPopover"] button {
-    background: transparent !important; border: 1px solid var(--fa-border) !important;
-    color: var(--fa-text-2) !important; border-radius: var(--fa-radius-sm) !important;
-    font-size: 0.845rem !important; font-weight: 500 !important; padding: 6px 14px !important;
+    background: transparent !important; border: none !important;
+    color: var(--fa-text) !important; border-radius: var(--fa-radius-sm) !important;
+    font-size: 0.845rem !important; font-weight: 500 !important; padding: 6px 12px !important;
     box-shadow: none !important;
-    transition: background .15s ease, border-color .15s ease, color .15s ease;
+    transition: background .15s ease, color .15s ease;
 }
 .stButton button:hover,
 [data-testid="stFormSubmitButton"] button:hover,
 [data-testid="stPopover"] button:hover {
-    background: var(--fa-fill) !important; border-color: var(--fa-border-2) !important;
-    color: var(--fa-text) !important;
+    background: var(--fa-fill) !important; color: var(--fa-text) !important;
 }
 .stButton button:active,
 [data-testid="stFormSubmitButton"] button:active { background: #E9EAEE !important; }
@@ -440,7 +445,7 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 [data-testid="stPopover"] button:focus-visible { box-shadow: none !important; outline: none !important; }
 .stButton button:disabled,
 [data-testid="stFormSubmitButton"] button:disabled {
-    background: transparent !important; border-color: var(--fa-border) !important;
+    background: transparent !important; border: none !important;
     color: var(--fa-faint) !important;
 }
 
@@ -3362,17 +3367,26 @@ def _render_home_map():
     </style>
     <div id="home-map" style="height:420px;border-radius:8px;overflow:hidden"></div>
     <script>
-    // 用户反馈缩放功能容易误触，干脆整个禁掉——不止滚轮缩放，双击/触摸
-    // 双指缩放/框选缩放/键盘+-缩放、缩放按钮全部关掉，固定在一个能看到
-    // 所有图标的世界视角，不会被不小心手滑放大/缩小。保留拖拽平移，
-    // 纯粹"缩放"这个动作不再存在。
+    // 这张图是"一张会自己刷新数字的静态图"，不是可操作的地图——所有交互
+    // 全部关掉。用户2026-09-12原话："那个图片我们就定死不要放大缩小移动，
+    // 就是一张图上面实时刷新数据，不然我误触的话很难受。"
+    //
+    // 上一版只关了缩放、留着 dragging:true，结果在触屏和触控板上滑动页面时
+    // 很容易把整张图拖偏，而且没有任何"复位"的入口——拖歪了就一直歪着。
+    // 现在连拖拽和惯性都关掉，地图永远停在同一个视角；标记上的数字照常
+    // 每3秒更新（那条链路在 iframe 内部的 JS 里，跟交互无关，不受影响）。
     var map = L.map('home-map', {{
         scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false,
-        boxZoom: false, keyboard: false, zoomControl: false, dragging: true,
+        boxZoom: false, keyboard: false, zoomControl: false,
+        dragging: false, inertia: false, tap: false,
         // zoomSnap:0 允许小数级缩放。默认Leaflet只按整数档缩放，而手机上
         // "整数档2太大、整数档1又太小"，中间没有可选值，只能二选一将就。
+        // 缩放交互虽然关了，fitBounds 仍然要按容器宽度算出小数级的缩放。
         zoomSnap: 0, zoomDelta: 0.25,
     }}).setView([12, 25], 2);
+    // 光标也改回默认箭头——Leaflet 默认给地图容器挂 grab 手型，暗示"可以拖"，
+    // 而现在拖不动，手型会变成一个假承诺。
+    map.getContainer().style.cursor = 'default';
     // 底图仍然用免费的 OpenStreetMap 瓦片，但在前端把它整体转成灰阶。
     //
     // 标准 OSM 是蓝海+米黄陆地+彩色路网的全彩底图，跟这套灰白黑的界面撞得很
@@ -5017,7 +5031,20 @@ def _render_ipo_briefs():
             is_stale = (datetime.now(timezone.utc) - updated.astimezone(timezone.utc)) > timedelta(hours=24)
         except (TypeError, ValueError):
             pass
-    if is_stale:
+    # "超过24小时没更新"要分两种情况说，不能都当故障报。
+    # ipo_brief.py 的定时任务是 `25 7 * * 1-5`，周末根本不跑——所以每到周六
+    # 周日，这里必然超过24小时，然后弹一条"刷新任务恢复前请以券商页面为准"
+    # 的黄色警告。用户2026-09-13（周日）截图问"这个没刷新不知道咋回事"，
+    # 就是被这句话误导了：任务没坏，是周末不开市、本来就不刷新。
+    # 把"计划内的不刷新"降级成普通说明，"计划外的过期"才保留警告。
+    _today_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
+    _no_refresh_today = _today_cn.weekday() >= 5  # 5=周六 6=周日
+    if is_stale and _no_refresh_today:
+        st.caption(
+            f"周末不更新新股数据（刷新任务只在交易日 07:25 跑一次）。"
+            f"以下是最近一次更新的结果：{updated_text}（北京时间）。"
+        )
+    elif is_stale:
         st.warning(
             "港股新股数据超过24小时未更新；以下结果不应视为当前认购清单。"
             "刷新任务恢复前，请以券商认购页面为准。"
@@ -5026,7 +5053,8 @@ def _render_ipo_briefs():
         st.caption(f"数据更新：{updated_text}（北京时间）")
     if not briefs:
         st.caption(
-            ("当前未发现处于认购期、且尚未上市的港股新股。" if not is_stale
+            ("当前未发现处于认购期、且尚未上市的港股新股。"
+             if (not is_stale or _no_refresh_today)
              else "新股数据未及时更新，无法确认当前是否有处于认购期的港股新股。")
             + (f" 最近一次数据更新：{updated_text}。" if updated_text else "")
         )
@@ -6862,16 +6890,24 @@ def _render_ai_sim_dashboard():
     # 传"$"——这个页面2026-09-02已经全部改成美元展示，不能沿用那边默认的¥。
     try:
         _donut_snapshot = sim_trader.get_agent_snapshot()
+        # ⚠️ 必须用账本核对过的 ai_positions，不能用 snapshot["positions"]。
+        # 2026-09-12 审计实测：同一个页面顶部写着"账户里还有2笔非AI下单的持仓…
+        # 不计入上面的净值/收益率"（净值走 get_ledger_reconciled_holdings 过滤过），
+        # 而这两个饼图直接用了账户原始持仓，于是"总资产 $11,995"比顶部的
+        # "总额 $9,969"多出 $2,026，饼里还明明白白列着新奥能源、滨化股份，
+        # "港股持仓 16.9%"整块都来自这两笔非AI仓——同一屏两个自相矛盾的口径。
+        _donut_positions = sim_trader.get_ledger_reconciled_holdings(
+            email, _donut_snapshot)["ai_positions"]
         _donut_cash = get_sim_virtual_cash(email)
         if _donut_cash is None:
             _donut_cash = sim_agent._VIRTUAL_BUDGET_HKD
         _usd_rate = sim_trader.USD_HKD_RATE
         _hk_value = sum(
-            p["market_val_hkd"] for p in _donut_snapshot["positions"]
+            p["market_val_hkd"] for p in _donut_positions
             if p["market"] == "HK" and p.get("market_val_hkd") is not None
         )
         _us_value = sum(
-            p["market_val_hkd"] for p in _donut_snapshot["positions"]
+            p["market_val_hkd"] for p in _donut_positions
             if p["market"] == "US" and p.get("market_val_hkd") is not None
         )
         _total_usd = (_hk_value + _us_value + _donut_cash) / _usd_rate
@@ -6899,7 +6935,7 @@ def _render_ai_sim_dashboard():
             position_rows = sorted(
                 (
                     {"label": f"{p['name']}（{p['code']}）", "value_cny": p["market_val_hkd"] / _usd_rate}
-                    for p in _donut_snapshot["positions"]
+                    for p in _donut_positions
                     if p.get("market_val_hkd")
                 ),
                 key=lambda r: r["value_cny"], reverse=True,
