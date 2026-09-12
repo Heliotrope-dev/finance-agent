@@ -8,6 +8,7 @@ from datetime import datetime
 from datetime import time as dtime
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -1269,4 +1270,55 @@ def build_sector_treemap(df: pd.DataFrame) -> go.Figure | None:
         ),
         showlegend=False,
     )
+    return fig
+
+
+def build_correlation_heatmap(corr: pd.DataFrame, labels: dict[str, str] | None = None) -> go.Figure | None:
+    """持仓两两相关性热力图。灰度：越深越同涨同跌。
+
+    2026-09-12新增（升级路线图第4条 组合风险体检）。
+
+    配色跟板块热力图同一套黑白灰，理由也一样：这是一大片色块，用红绿会跟
+    全站"黑白灰为主"的调子打架。这里的灰度方向是有明确含义的——深 = 相关性
+    高 = 这两只其实是同一个押注，正好对上这张图要提醒的风险。负相关（真正的
+    对冲）落在最浅那一端，看上去最"干净"，也符合直觉。
+
+    色阶跨 -1 到 1 而不是 0 到 1：股票之间负相关很少见但一旦出现是很有价值
+    的信息（说明组合里真的有对冲），压到 0 那一端会把它和"完全不相关"混为
+    一谈。
+    """
+    if corr is None or corr.empty or len(corr) < 2:
+        return None
+    names = labels or {}
+    ticks = [names.get(c, c) for c in corr.columns]
+
+    # 对角线永远是1，画出来就是一条最深的黑线横穿整张图，抢掉所有注意力，
+    # 而它不携带任何信息。挖成空值让它留白。
+    z = corr.values.astype(float).copy()
+    np.fill_diagonal(z, np.nan)
+
+    fig = go.Figure(go.Heatmap(
+        z=z,
+        x=ticks, y=ticks,
+        zmin=-1, zmax=1,
+        colorscale=[
+            [0.0, "#FFFFFF"],    # -1 完全反向
+            [0.5, "#E8EAEC"],    #  0 不相关
+            [0.78, "#9AA0A8"],
+            [1.0, "#2E3138"],    # +1 完全同步
+        ],
+        showscale=False,
+        xgap=2, ygap=2,
+        hovertemplate="%{y} × %{x}<br>相关系数 %{z:.2f}<extra></extra>",
+        hoverongaps=False,
+        text=[[("" if np.isnan(v) else f"{v:.2f}") for v in row] for row in z],
+        texttemplate="%{text}",
+        textfont=dict(family=_CHART_FONT, size=10),
+    ))
+    n = len(ticks)
+    _apply_chart_theme(fig, height=max(220, 46 * n + 80), grid="none",
+                       margin=dict(l=4, r=4, t=4, b=4))
+    # y轴反向，让矩阵从左上角开始读，跟一般看表格的习惯一致。
+    fig.update_yaxes(autorange="reversed")
+    fig.update_xaxes(side="top", tickangle=0)
     return fig

@@ -101,8 +101,9 @@ from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
     build_benchmark_comparison, build_return_histogram, build_multi_comparison, build_position_donut,
     build_fed_watch_chart, build_macro_series_chart,
-    build_sim_equity_curve, build_sector_treemap,
+    build_sim_equity_curve, build_sector_treemap, build_correlation_heatmap,
 )
+import portfolio_risk
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
     _invalidate_token, _hash_pw, _user_exists,
@@ -6537,6 +6538,184 @@ def _render_positions_donut(positions: list):
         st.caption(f"有 {skipped} 支持仓因行情/汇率暂时获取不到，未计入本图。")
 
 
+def _render_portfolio_risk(positions: list):
+    """组合风险体检（升级路线图第4条）。
+
+    路线图里的原话：普通散户最大的问题往往不是选错了某一只股票，而是整个
+    组合押在同一个方向上——自选里的美光、英伟达、台积电、海力士、闪迪，
+    其实全是同一个押注（存储和AI芯片）。这种风险券商App不会主动提醒。
+
+    这一块全部是本地算的（numpy/pandas），不经过AI，跟AI那段文字判断是两条
+    独立的证据链——跟 charts.compute_stats 的定位一样。数学在 portfolio_risk.py，
+    这里只负责取数和渲染。
+
+    刻意放在AI组合分析之前：先看客观结构（你实际押在什么上面），再看AI的
+    主观解读。反过来的话，读者会带着AI的结论去看数字。
+    """
+    holding_items = [w for w in positions if (w.get("shares") or 0) > 0]
+    if len(holding_items) < 2:
+        # 一只股票谈不上"组合风险"，相关性/分散度全部无意义。
+        return
+
+    end = cn_now().strftime("%Y%m%d")
+    # 取180个自然日≈120个交易日。路线图给的就是120天：再短相关系数不稳，
+    # 再长会把早就变了的市场状态(比如上一轮加息周期)混进来当成当下的结构。
+    start = (cn_now() - timedelta(days=180)).strftime("%Y%m%d")
+
+    def _fetch(item):
+        symbol, market = item["symbol"], item.get("market", "A")
+        price, hist = None, None
+        try:
+            spot = get_stock_realtime(symbol, market=market)
+            price = spot.get("最新价") if spot else None
+        except Exception:
+            price = None
+        try:
+            hist = get_stock_history(symbol, start, end, market=market)
+        except Exception:
+            hist = None
+        return price, hist
+
+    results = _run_concurrent_with_deadline(holding_items, _fetch, timeout=12)
+
+    holdings, hist_by_symbol, name_by_symbol = [], {}, {}
+    for i, item in enumerate(holding_items):
+        got = results.get(i)
+        if not got:
+            continue
+        price, hist = got
+        if not price:
+            continue
+        value_cny, _note = to_cny(item["shares"] * price, item.get("currency", "CNY"))
+        if value_cny is None:
+            continue
+        sym = item["symbol"]
+        holdings.append({
+            "symbol": sym, "name": item.get("name", sym),
+            "market": item.get("market", "A"),
+            "currency": item.get("currency", "CNY"),
+            "value": value_cny,
+        })
+        name_by_symbol[sym] = item.get("name", sym)
+        if hist is not None and not hist.empty and "收盘" in hist.columns and "日期" in hist.columns:
+            s = pd.Series(
+                pd.to_numeric(hist["收盘"], errors="coerce").values,
+                index=pd.to_datetime(hist["日期"]),
+            ).dropna()
+            # 只保留日期(丢掉时分秒)。各数据源给的时间戳粒度不一样——有的带
+            # 收盘时刻、有的是零点，不归一的话两只股票的"同一天"对不上，
+            # inner join 之后会直接空掉。
+            s.index = s.index.normalize()
+            if len(s) >= 2:
+                hist_by_symbol[sym] = s
+
+    if len(holdings) < 2:
+        return
+
+    # 基准选权重最大的那个市场的指数，并且把名字显示出来。混合组合没有
+    # "唯一正确"的基准，与其偷偷选一个不如明说这次是拿谁比的。
+    mkt_weight: dict[str, float] = {}
+    for h in holdings:
+        mkt_weight[h["market"]] = mkt_weight.get(h["market"], 0.0) + h["value"]
+    main_market = max(mkt_weight.items(), key=lambda kv: kv[1])[0]
+    bench_name = _BENCHMARK_NAMES.get(main_market, "")
+    bench_close = None
+    if bench_name:
+        try:
+            bdf = get_benchmark_history(start, end, market=main_market)
+            if bdf is not None and not bdf.empty:
+                # 注意是 .dt.normalize() 不是 .normalize()：pd.to_datetime 作用在
+                # Series 上返回的还是 Series，归一化要走 .dt 访问器。写成
+                # .normalize() 会抛 AttributeError，而这里外面包着 try/except，
+                # 结果是基准被静默丢掉、Beta 和压力测试一起消失还不报错。
+                bench_close = pd.Series(
+                    pd.to_numeric(bdf["收盘"], errors="coerce").values,
+                    index=pd.DatetimeIndex(pd.to_datetime(bdf["日期"])).normalize(),
+                ).dropna()
+        except Exception:
+            bench_close = None
+
+    try:
+        res = portfolio_risk.analyze(holdings, hist_by_symbol, bench_close, bench_name)
+    except Exception:
+        return
+    if not res:
+        return
+
+    st.markdown("**组合体检**")
+
+    if res.get("insufficient_history"):
+        st.caption(
+            f"历史数据只够 {res.get('n_days', 0)} 个交易日，算不出可信的相关性和波动率。"
+            "新建仓的标的过一段时间再看。"
+        )
+        return
+
+    # ── 数字区 ────────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("年化波动率", f"{res['port_vol_annual']:.1%}" if "port_vol_annual" in res else "—")
+    with c2:
+        st.metric(
+            f"对{res.get('benchmark_name','基准')} Beta",
+            f"{res['port_beta']:.2f}" if "port_beta" in res else "—",
+        )
+    with c3:
+        st.metric("单日风险(VaR95)", f"{abs(res['var95_pct']):.2%}" if "var95_pct" in res else "—")
+    with c4:
+        st.metric("有效分散度", f"{res['concentration']['effective_n']:.1f} 只")
+
+    st.caption(
+        f"基于最近 {res['n_days']} 个交易日、覆盖 {res.get('coverage', 1):.0%} 的仓位。"
+        "波动率和 Beta 都是历史统计量，描述的是过去这段时间的结构，不是对未来的预测。"
+    )
+
+    # ── 暴露度 ────────────────────────────────────────────────────
+    def _exposure_line(title: str, data: dict[str, float]) -> str:
+        if not data:
+            return ""
+        parts = " · ".join(f"{k} {v:.0%}" for k, v in data.items())
+        return (
+            f"<div style='padding:6px 0;border-bottom:1px solid var(--fa-border)'>"
+            f"<span style='color:var(--fa-faint);font-size:0.78rem'>{_esc(title)}</span>"
+            f"<span style='float:right;font-size:0.82rem;font-variant-numeric:tabular-nums'>"
+            f"{_esc(parts)}</span></div>"
+        )
+
+    rows_html = _exposure_line("市场暴露", res.get("market_exposure", {}))
+    rows_html += _exposure_line("币种暴露", res.get("currency_exposure", {}))
+    if res.get("sector_exposure"):
+        rows_html += _exposure_line("行业暴露", res["sector_exposure"])
+    if rows_html:
+        st.markdown(rows_html, unsafe_allow_html=True)
+
+    # ── 相关性矩阵 ────────────────────────────────────────────────
+    corr = res.get("corr_matrix")
+    if corr is not None and len(corr) >= 2:
+        st.markdown("**两两相关性**")
+        st.caption("颜色越深表示两只越同涨同跌——深色格子意味着它们其实是同一个押注。")
+        fig = build_correlation_heatmap(corr, name_by_symbol)
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True, config=_PLOTLY_CONFIG,
+                            key="_portfolio_corr")
+
+    # ── 提示 ──────────────────────────────────────────────────────
+    tips = portfolio_risk.build_warnings(res, name_by_symbol)
+    if tips:
+        st.markdown("**体检提示**")
+        for t in tips:
+            st.markdown(
+                f"<div style='padding:5px 0;font-size:0.84rem;color:var(--fa-text-2);"
+                f"line-height:1.6'>· {_esc(t)}</div>",
+                unsafe_allow_html=True,
+            )
+        st.caption(
+            "这些只是对组合结构的客观描述，不是买卖建议——集中本身不等于错，"
+            "很多人就是有意识地押注某个方向；这里的作用是确保它是想清楚之后的"
+            "选择，而不是不知不觉变成这样。"
+        )
+
+
 _PORTFOLIO_REANALYZE_COOLDOWN = 300  # 5分钟节流——组合分析是1次真实AI调用，不是纯本地计算，不能让用户点着玩
 
 
@@ -7956,6 +8135,12 @@ else:
                         _render_max_capital_input(_email)
                     with ai_col:
                         _render_portfolio_advice(_email, holding_items)
+
+                    # 组合体检放在AI组合分析之后、整页最下面：它是本地算的客观
+                    # 结构（暴露/相关性/波动率/VaR），通栏展示——相关性矩阵塞进
+                    # 半宽列里会挤成一团。
+                    st.divider()
+                    _render_portfolio_risk(holding_items)
 
         elif active_section == "自选":
             if not st.session_state.get("logged_in"):
