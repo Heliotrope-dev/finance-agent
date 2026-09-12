@@ -60,18 +60,27 @@
        在 #FAFAFB 底上对比度只有 **2.19:1**，WCAG AA 的下限是 4.5:1 ——
        不是"有点淡"，是实测读不清。
 
-       四档从深到浅，语义固定：
-         primary    正文、数字本身
-         strong     次要正文（说明段落）
-         secondary  标签、caption           4.9:1  ← 顶掉原来的 #82858E
-         tertiary   时间戳、股票代码这类附注 3.7:1  ← 顶掉原来的 #A8ABB3
+       三档从深到浅，语义固定：
+         primary    正文、数字本身              16:1
+         strong     次要正文（说明段落）         7.5:1
+         secondary  标签、时间戳、代码、caption   4.9:1
 
-       为什么 tertiary 用 3.7:1 而不是规范里写的"统一换成 secondary"：
-       这一档在本项目里承载的全是 12px 的附注（"09-11 22:18取价"、"06181"、
-       "非AI持仓·不计入净值"），正是规范自己给 tertiary 划定的用途
-       （"只给 12px+ 的辅助说明，不给正文"）。如果连它也提到 4.9:1，就跟
-       secondary 挤在同一个明度上，四档塌成三档，附注和标签再也分不开。
-       真正要消灭的是 2.19:1 那一档，这一点做到了：全站不再有 #A8ABB3。 */
+       第一版做成了四档，把原来的 --fa-faint 映射到一个 3.7:1 的 tertiary，
+       理由是"这一档全是 12px 的附注，正好是规范给 tertiary 划的用途"。
+       上线后拿 getComputedStyle 扫了一遍真实页面，这个判断是错的：
+       **tertiary 命中 564 个节点，secondary 只有 42 个** —— 所谓"少量附注"
+       其实是全站最高频的文字色，等于把最该读清楚的那一档留在了 3.7:1。
+       规范原话正是冲着这个来的："这是 55 处，是最高频的文字色。"
+
+       所以合并成三档，原来 --fa-faint 的位置直接用 secondary。
+       层次不靠把字调淡，靠字号和字重——规范里也写了这一条：
+       "如果替换后某处显得太重，不要退回浅灰，用降字号或降字重来拉层级。"
+       项目本来就是这么排的：附注 0.76rem / 400，标签 0.79rem / 500，
+       正文 0.88rem，光靠字号就已经分得开。
+
+       --text-tertiary 保留但**只给两个地方**：首屏加载遮罩（在 CSS 生效之前
+       画，只能写字面量）和地图 iframe 里的署名（在 iframe 文档里取不到页面
+       变量）。正文里不要再用它。 */
     --text-primary:   #17181C;
     --text-strong:    #494C55;
     --text-secondary: #6B6F7A;
@@ -114,7 +123,7 @@
     --fa-text:      var(--text-primary);
     --fa-text-2:    var(--text-strong);
     --fa-muted:     var(--text-secondary);
-    --fa-faint:     var(--text-tertiary);
+    --fa-faint:     var(--text-secondary);
     --fa-ink:       var(--ink);
     --fa-radius:    var(--r-base);
     --fa-radius-sm: var(--r-base);
@@ -437,7 +446,7 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 .stButton button:disabled,
 [data-testid="stFormSubmitButton"] button:disabled {
     background: transparent !important; border: none !important;
-    color: var(--text-tertiary) !important;
+    color: var(--text-secondary) !important;
 }
 
 /* "展开/更多/收起"这类按钮不是动作，是一个揭示更多内容的入口。它们大多是
@@ -619,7 +628,7 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 [class*="st-key-pos_row_"] [data-testid="stExpander"] summary p,
 [class*="st-key-lb_row_"] [data-testid="stExpander"] summary p,
 [class*="st-key-macro_"] [data-testid="stExpander"] summary p {
-    font-size: var(--fs-xs) !important; color: var(--text-tertiary) !important; font-weight: var(--fw-normal) !important;
+    font-size: var(--fs-xs) !important; color: var(--text-secondary) !important; font-weight: var(--fw-normal) !important;
 }
 [class*="st-key-sim_run_"] [data-testid="stExpander"] summary p,
 [class*="st-key-my_about_"] [data-testid="stExpander"] summary p {
