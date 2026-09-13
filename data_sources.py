@@ -95,6 +95,17 @@ def _throttle():
         _last_call_ts = time.time()
 
 
+# 这几类异常重试没有意义：它们说明"拿回来的东西解析不了"，不是"没拿回来"。
+# 同一个坏掉的接口再请求一次，返回的还是同一份解析不了的内容。
+#
+# 2026-09-13 真实故障：同花顺的板块接口挂掉之后稳定抛
+# AttributeError("'NoneType' object has no attribute 'text'")，1.5秒就失败，
+# 但 _with_retry 照着"网络抖动"的剧本睡了 5 秒又睡 10 秒，于是**每一次打开
+# 行情页都要在这里同步空等 19 秒**，最后还是显示"暂时获取不到"。
+# 区分开之后，同类故障的代价从 19 秒降到 1.5 秒。
+_DETERMINISTIC_ERRORS = (AttributeError, KeyError, IndexError, TypeError, ValueError)
+
+
 def _with_retry(fn, retries=2, backoff=5, throttle=True):
     """throttle=True时，两次调用之间强制留至少_MIN_INTERVAL_SEC秒——这是专门
     针对东财接口的保护（东财对高频请求会临时封IP），但这个函数被BaoStock/新浪/
@@ -103,6 +114,8 @@ def _with_retry(fn, retries=2, backoff=5, throttle=True):
     全局3秒间隔拖成"一个一个蹦出来"——实测这是今天好几次"页面好慢"反馈的
     真正原因。现在只有明确传throttle=True（东财相关调用）才会真的限流，
     其它数据源传throttle=False直接跳过等待。
+
+    解析类异常直接抛，不重试也不睡（见上面 _DETERMINISTIC_ERRORS）。
     """
     last_err = None
     for attempt in range(retries + 1):
@@ -110,7 +123,11 @@ def _with_retry(fn, retries=2, backoff=5, throttle=True):
             if throttle:
                 _throttle()
             return fn()
-        except Exception as e:  # noqa: BLE001 — 数据源异常统一兜底重试
+        except _DETERMINISTIC_ERRORS:
+            # 接口坏了，不是网不好。立刻抛，把失败的代价还给调用方去兜底，
+            # 而不是让用户对着一个永远不会成功的重试链干等。
+            raise
+        except Exception as e:  # noqa: BLE001 — 网络类异常才值得重试
             last_err = e
             if attempt < retries:
                 time.sleep(backoff * (attempt + 1))
@@ -468,7 +485,7 @@ def save_home_map_cache(snaps: dict[str, list[dict]], global_idx: dict) -> None:
     写），职责更单纯。
     """
     payload = {"fetched_at": time.time(), "snaps": snaps, "global_idx": global_idx}
-    _HOME_MAP_CACHE_PATH.write_text(json.dumps(payload))
+    _HOME_MAP_CACHE_PATH.write_text(json.dumps(payload, default=str))
 
 
 def load_home_map_cache(max_age_sec: float = 90) -> dict | None:
@@ -1050,13 +1067,28 @@ def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
     比"点了多少次"更能说明这个板块今天是不是真的热，是个合理的替代指标，
     页面上会如实标注这不是官方热度指数。
 
-    沪深：同花顺的行业板块汇总接口（stock_board_industry_summary_ths），
-    不依赖东财——今晚测试的时候东财的板块接口（stock_board_industry_name_em）
-    连续多次连接失败，同花顺这条线稳定。
+    沪深：东财的行业板块行情（stock_sector_spot）。
     港股/美股：Futu的板块快照——get_plate_list拿到这个市场全部行业板块，
     再用get_market_snapshot批量查这些板块自己的价格快照（Futu把板块当成
     一个可以查快照的"标的"，last_price/prev_close_price算出板块涨跌幅，
     turnover就是板块成交额）。
+
+    ── 2026-09-13 换源，这是全站最贵的一次修复 ───────────────────────────
+
+    原来沪深走同花顺的 stock_board_industry_summary_ths。那个接口现在**已经
+    彻底坏了**——不是网络抖动，是 akshare 的抓取解析不了对方的页面了，实测
+    稳定抛 AttributeError("'NoneType' object has no attribute 'text'")，
+    1.5 秒就失败，重试多少次都是同一个结果。
+
+    坏了本身不致命，致命的是它跟 _with_retry 的默认参数（retries=2,
+    backoff=5）撞在一起：失败1.5s → 睡5s → 失败1.5s → 睡10s → 失败1.5s，
+    **每一次打开行情页都要在这里同步空等 19 秒**，然后页面显示"暂时获取
+    不到板块数据"。实测行情页冷加载 15 秒，几乎全是这一处。
+
+    换成东财的 stock_sector_spot(indicator="行业")：实测 0.38 秒返回 84 行，
+    自带 板块/涨跌幅/总成交额 三列，正好是这里要的。
+    （同一轮里也测了东财的 stock_board_industry_name_em，6.85 秒
+    ConnectionError，不能用——注意它跟 stock_sector_spot 不是一个接口。）
     """
     if market == "A":
         # 这里故意不 try/except 吞掉异常——get_hot_sectors 被 @st.cache_data(ttl=180)
@@ -1065,11 +1097,20 @@ def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
         # 期间所有用户都看到同样的失败提示，即便数据源早就恢复了。让异常
         # 正常抛出，st.cache_data 不会缓存抛异常的调用，下次访问会重新请求；
         # 调用方 _render_hot_sectors 已经有 try/except 兜底展示。
+        #
+        # retries=1：这条路径在页面渲染里同步执行，重试次数直接变成用户的等待
+        # 时间。一次网络抖动值得重来一次，第二次还不行就该让页面先出来。
         with _akshare_js_lock:
-            df = _with_retry(ak.stock_board_industry_summary_ths, throttle=False)
+            df = _with_retry(
+                lambda: ak.stock_sector_spot(indicator="行业"),
+                retries=1, backoff=2, throttle=False,
+            )
         if df is None or df.empty or "板块" not in df.columns:
             return pd.DataFrame()
         df = df.rename(columns={"总成交额": "热度"})
+        # 东财这个接口把板块名里的空格留着了（"电子 元件"这种），去掉——
+        # 板块名会被拿去当成分股查询的参数，多一个空格就查不到。
+        df["板块"] = df["板块"].astype(str).str.strip()
         df = df.sort_values("热度", ascending=False).head(limit)
         return df[["板块", "涨跌幅", "热度"]].reset_index(drop=True)
 
@@ -1078,9 +1119,25 @@ def get_hot_sectors(market: str, limit: int = 30) -> pd.DataFrame:
     if ret != ft.RET_OK or plates is None or plates.empty:
         return pd.DataFrame()
     codes = plates["code"].tolist()
-    ret2, snap = _futu_call(lambda ctx: ctx.get_market_snapshot(codes), default=(None, None))
-    if ret2 != ft.RET_OK or snap is None or snap.empty:
+
+    # 分批查，一批挂掉不连累其余。
+    # 2026-09-13 实测：港股 get_plate_list 返回 113 个板块，其中有一个
+    # LIST24340 是 get_market_snapshot 认不出来的（报"未知股票 LIST24340"），
+    # 而 Futu 的批量快照是**整批失败**语义——一个坏代码让另外 112 个板块
+    # 一起查不到。结果就是港股"热门板块"长期空着显示"暂时获取不到板块数据"，
+    # 而美股（板块列表里没有这种坏代码）一切正常，所以从表现上看像是
+    # "港股不支持"，其实是一个脏数据把整批拖垮了。
+    # 分批之后最多损失坏代码所在的那一批，其余照常返回。
+    _CHUNK = 40
+    frames = []
+    for i in range(0, len(codes), _CHUNK):
+        chunk = codes[i:i + _CHUNK]
+        r2, sn = _futu_call(lambda ctx, _c=chunk: ctx.get_market_snapshot(_c), default=(None, None))
+        if r2 == ft.RET_OK and sn is not None and not sn.empty:
+            frames.append(sn)
+    if not frames:
         return pd.DataFrame()
+    snap = pd.concat(frames, ignore_index=True)
 
     snap = snap[snap["prev_close_price"] > 0].copy()
     snap["涨跌幅"] = (snap["last_price"] - snap["prev_close_price"]) / snap["prev_close_price"] * 100
@@ -1095,14 +1152,21 @@ def get_sector_constituents(market: str, sector_name: str, limit: int = 30) -> p
     跟_render_stock_movers_cards期望的格式一致，成分股本身直接复用已有的
     个股详情页（走势+AI分析），不用给"板块"这个概念单独再造一套。
 
-    沪深：get_hot_sectors用的是同花顺板块名(stock_board_industry_summary_ths)，
-    但同花顺没有对应的"成分股"接口(akshare里只有_em版本)，这里改用东财的
-    stock_board_industry_cons_em——实测过东财的板块类接口这几天连续失败过
-    (见get_hot_sectors的说明)，且东财自己的板块命名和同花顺不是同一套分类，
-    传同花顺的板块名过去有一定概率查不到(接口内部按名称精确匹配东财自己的
-    板块列表，查不到会抛KeyError/IndexError，不是网络异常)。两种失败都用
-    try/except统一按“获取不到”处理，加熔断避免频繁重试拖慢页面，不假装
-    这条路径和港股/美股一样可靠。
+    沪深：跟 get_hot_sectors 同一套体系（stock_sector_spot / stock_sector_detail），
+    靠板块的 label（形如 hangye_ZA01）精确定位，不靠名字跨数据源匹配。
+
+    2026-09-13 换掉了老做法。老做法是拿同花顺的板块名去查东财的
+    stock_board_industry_cons_em——**两套不同的行业分类**，名字对不上是常态
+    不是意外，查不到会抛 KeyError/IndexError。换源之后这个问题变得更明显：
+    新的板块名是"有色金属冶炼和压延加工业"这种国民经济行业分类，东财那边
+    根本没有同名板块，实测点进任何一个板块都是 0 只成分股、还要等 16 秒
+    （那 16 秒是东财接口自己在重试）。
+
+    现在改成同源：列表和成分股都来自 stock_sector_spot 那一套，中间用
+    label 串起来。label 是稳定 ID，不受两边中文名写法差异影响。
+    额外的好处是这个接口直接带价格和涨跌幅——富途那条路对沪深个股是没有
+    行情权限的（见 get_hot_sectors 上方关于权限的说明），换成这条之后
+    沪深板块的成分股反而比之前多了实时价。
 
     港股/美股：Futu的板块体系是自洽的一整套(get_plate_list查到的板块名
     就是get_hot_sectors展示给用户看的那个名字)，plate_name精确匹配后
@@ -1115,20 +1179,43 @@ def get_sector_constituents(market: str, sector_name: str, limit: int = 30) -> p
             return pd.DataFrame()
         try:
             with _akshare_js_lock:
+                spot = _with_retry(
+                    lambda: ak.stock_sector_spot(indicator="行业"), retries=1, backoff=2, throttle=False,
+                )
+                if spot is None or spot.empty or "label" not in spot.columns:
+                    _breaker_trip(breaker_key)
+                    return pd.DataFrame()
+                # 按名字反查 label。名字是我们自己在 get_hot_sectors 里 strip 过的，
+                # 这里也 strip 一次再比，两边口径一致。
+                spot = spot.copy()
+                spot["_n"] = spot["板块"].astype(str).str.strip()
+                hit = spot[spot["_n"] == str(sector_name).strip()]
+                if hit.empty:
+                    return pd.DataFrame()
                 df = _with_retry(
-                    lambda: ak.stock_board_industry_cons_em(symbol=sector_name), retries=1, backoff=2, throttle=True,
+                    lambda: ak.stock_sector_detail(sector=hit["label"].iloc[0]),
+                    retries=1, backoff=2, throttle=False,
                 )
         except Exception:
             _breaker_trip(breaker_key)
             return pd.DataFrame()
-        if df is None or df.empty or "代码" not in df.columns:
+        if df is None or df.empty or "code" not in df.columns:
             _breaker_trip(breaker_key)
             return pd.DataFrame()
+        # 这个接口的列名是英文的，转成站内统一的中文列名
+        # （_render_stock_movers_cards 认的是 代码/名称/最新价/涨跌幅）。
+        df = df.rename(columns={
+            "code": "代码", "name": "名称", "trade": "最新价",
+            "changepercent": "涨跌幅", "amount": "成交额",
+        })
+        for _c in ("最新价", "涨跌幅", "成交额"):
+            if _c in df.columns:
+                df[_c] = pd.to_numeric(df[_c], errors="coerce")
         if "成交额" in df.columns:
             df = df.sort_values("成交额", ascending=False)
         df = df.head(limit)
         keep = [c for c in ("代码", "名称", "最新价", "涨跌幅") if c in df.columns]
-        return df[keep].reset_index(drop=True)
+        return df[keep].dropna(subset=["代码"]).reset_index(drop=True)
 
     # HK/US：板块列表 -> 成分股代码 -> 价格快照，三步都走Futu
     ret, plates = _futu_call(lambda ctx: ctx.get_plate_list(market, ft.Plate.INDUSTRY), default=(None, None))
