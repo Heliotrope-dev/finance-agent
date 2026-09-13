@@ -1742,8 +1742,16 @@ def get_advice_accuracy(email: str) -> dict:
     init_db()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
+        # 跟战绩墙同一套口径：去重 + 只取回看窗口一致的样本。
+        # 注意「按来源」那一维在去重之后语义变了：同一次判断会同时写成
+        # screen 和 watchlist 两条，去重只留 id 最小的那条（screen 先写），
+        # 所以 watchlist 那一档现在只剩真正只属于热门股候选池的判断。
+        # 这正是想要的——之前 watchlist 的样本里混着一半 screen 的副本，
+        # "推荐股排行榜准不准"这个问题被另一条链路的结果稀释了。
         rows = c.execute(
-            "SELECT * FROM advice WHERE email = ? AND review_price IS NOT NULL",
+            "SELECT * FROM advice WHERE email = ? AND review_price IS NOT NULL "
+            "AND price_at_advice IS NOT NULL AND price_at_advice > 0 "
+            f"AND {_DEDUP_ADVICE_SQL} AND {_WINDOW_SQL}",
             (email,),
         ).fetchall()
     rows = [dict(r) for r in rows]
@@ -2039,6 +2047,42 @@ def get_position_advice(email: str) -> dict:
         return {r["symbol"]: dict(r) for r in rows}
 
 
+# ── 战绩统计的两条公共口径 ────────────────────────────────────────────────
+#
+# 2026-09-13 查"AI说错的概率怎么这么高"时挖出来的两个问题。原始数字是
+# 131 条里说对 48 条（37%），拆开之后发现这 131 条根本不是 131 次独立判断。
+#
+# 一、同一次判断被记了两遍。advisor.py 的 main() 把同一份 judged 结果
+#     **故意**写两次：一次 source='screen'、一次 source='watchlist'
+#     （理由见那边的注释——让首页排行榜同时看到"今日热门股"和"全市场
+#     筛出来的潜力股"，是有意为之，不是 bug）。但没人算到战绩统计会把
+#     两份都算进分母：同一只票、同一时刻、同一个价格、同一个判断，在胜率
+#     里占两票。用户在战绩墙上看到 Veracyte 连着出现两行、数字一模一样，
+#     就是这么来的。实测全表 5581 行里有 2883 行是这类重复。
+#     判重的键是"同一天 + 同一只 + 同一个入场价 + 同一个动作"——不用
+#     created_at 全等，因为两次写入差了一两秒。
+#
+# 二、回看窗口不一致。实测：
+#       watchlist 回看1天  n=51  说对37%
+#       watchlist 回看2天  n=12  说对42%
+#       watchlist 回看7天  n=22  说对14%
+#       position  回看7天  n=11  说对82%
+#     watchlist 的窗口 2026-09-04 才从 0.9 天改成 6.9 天（见 advisor.py 里
+#     _WATCHLIST_REVIEW_MIN_AGE_DAYS 的注释），之前那批 1-2 天的记录留在
+#     库里，跟 7 天的混在一个分母里汇总。README 的"值得一提的踩坑"里写过
+#     这件事——"用一天的价格噪音去检验一个按周起作用的信号，测到的不是
+#     信号质量"——当时修了写入端，没清理已经污染的统计口径。
+#     这里统一只取 >= 5 天的样本；不够 5 天的不是"差一点"，是在回答另一个
+#     问题，不该混进同一个百分比。
+_REVIEW_MIN_DAYS = 5
+_DEDUP_ADVICE_SQL = (
+    "id IN (SELECT MIN(id) FROM advice "
+    "WHERE review_price IS NOT NULL AND price_at_advice IS NOT NULL AND price_at_advice > 0 "
+    "GROUP BY substr(created_at, 1, 10), symbol, price_at_advice, action)"
+)
+_WINDOW_SQL = f"julianday(review_at) - julianday(created_at) >= {_REVIEW_MIN_DAYS}"
+
+
 def get_recent_advice_outcomes(limit: int = 20, source: str | None = None,
                                directional_only: bool = False) -> list[dict]:
     """最近N条"已经能对照事后价格"的AI判断，给"AI战绩墙"用。
@@ -2058,7 +2102,9 @@ def get_recent_advice_outcomes(limit: int = 20, source: str | None = None,
             "SELECT symbol, name, market, source, action, score, price_at_advice, "
             "review_price, created_at, review_at FROM advice "
             "WHERE review_price IS NOT NULL AND price_at_advice IS NOT NULL "
-            "AND price_at_advice > 0"
+            "AND price_at_advice > 0 "
+            # 去重 + 统一回看窗口，两条口径见上面那段注释。
+            f"AND {_DEDUP_ADVICE_SQL} AND {_WINDOW_SQL}"
         )
         params: list = []
         if source:
@@ -2114,11 +2160,13 @@ def get_advice_outcome_summary() -> dict:
             "          OR (action = '卖出' AND review_price <= price_at_advice) "
             "         THEN 1 ELSE 0 END) AS hits "
             "FROM advice WHERE review_price IS NOT NULL AND price_at_advice IS NOT NULL "
-            "AND price_at_advice > 0 AND action IN ('买入', '卖出')"
+            "AND price_at_advice > 0 AND action IN ('买入', '卖出') "
+            f"AND {_DEDUP_ADVICE_SQL} AND {_WINDOW_SQL}"
         ).fetchone()
         total_reviewed = c.execute(
             "SELECT COUNT(*) FROM advice WHERE review_price IS NOT NULL "
-            "AND price_at_advice IS NOT NULL AND price_at_advice > 0"
+            "AND price_at_advice IS NOT NULL AND price_at_advice > 0 "
+            f"AND {_DEDUP_ADVICE_SQL} AND {_WINDOW_SQL}"
         ).fetchone()[0]
 
     n = (row["n"] or 0) if row else 0
