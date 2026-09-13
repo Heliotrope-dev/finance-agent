@@ -6139,8 +6139,15 @@ def _render_stock_detail(symbol: str, market: str, name: str):
         st.session_state[expand_key] = False
         st.rerun()
 
-    _stock_name_for_news = get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
-    _render_news_section(_stock_name_for_news, symbol=symbol, market=market)
+    # 用 _display_name，不要在这里再抄一遍那套规则。
+    # 2026-09-13：这一行原来是 `get_stock_name(symbol) if market == "A" else
+    # spot.get("名称", symbol)`——跟 _display_name 的函数体**一字不差**的副本。
+    # 于是修比特币资讯那个 bug 时（富途给虚拟货币的"名称"是 'BTC/USD' 这种
+    # 交易对标签，拿去搜新闻只能命中半年前的旧文）我改了 _display_name，
+    # AI 模块那两处生效了，而真正渲染「最新资讯」列表的这一行还走着副本，
+    # 页面上照旧是七个月前的新闻。同一条规则在两个地方各写一遍，改一处漏
+    # 一处是迟早的事。
+    _render_news_section(_display_name(symbol, market, spot), symbol=symbol, market=market)
 
     # 资金筹码放在新闻之后、AI分析之前：它跟新闻一样是"事实材料"，而AI分析是
     # 基于所有材料的结论，材料该排在结论前面。
