@@ -4388,6 +4388,17 @@ _CRYPTO_CN = {
 }
 
 
+def crypto_cn_name(base: str) -> str:
+    """币种代码 → 中文名（BTC → 比特币）。查不到返回空串，调用方自己兜底。
+
+    2026-09-13 从 _CRYPTO_CN 上开的一个公开入口。app.py 的详情页要拿币名去搜
+    新闻——富途"名称"字段给的是 'BTC/USD' 这种交易对标签，搜出来全是旧文
+    （见 _display_name 里的说明）。与其在 app.py 再抄一份币名表，不如把这份
+    本来就在维护的表开出去，两边永远一致。
+    """
+    return _CRYPTO_CN.get(str(base).upper(), "")
+
+
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_crypto_universe() -> set:
     """富途实际支持的虚拟货币代码集合（USD计价）。

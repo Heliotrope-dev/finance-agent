@@ -45,6 +45,7 @@ from data_sources import (
     get_financial_abstract,
     get_stock_news,
     get_stock_notices,
+    crypto_cn_name,
     get_benchmark_history,
     get_stock_name,
     get_index_news,
@@ -1233,7 +1234,22 @@ def _display_name(symbol: str, market: str, spot: dict) -> str:
     只是历史记录里的展示标签，不需要为了新闻命中率特地查BaoStock规范名，
     直接用spot快照里的名称即可，两处刻意保留了不同的计算，不是遗漏。
     """
-    return get_stock_name(symbol) if market == "A" else spot.get("名称", symbol)
+    if market == "A":
+        return get_stock_name(symbol)
+    # 虚拟货币要用中文币名，不能用富途给的"名称"。
+    #
+    # 2026-09-13 用户反馈"比特币的最新资讯没有，这不可能"。根因就在这一行：
+    # 富途对 CC.BTCUSD 的"名称"字段返回的是 **'BTC/USD'**——那是个交易对
+    # 标签，不是名字。拿它去搜新闻，只能命中标题里正好写了 "BTC/USD" 的文章，
+    # 实测最新一条是七个月前的（2026-02-02）；换成"比特币"搜，最新是当天的。
+    # 这比"搜不到"更坏：页面上摆着一屏半年前的新闻，看起来却像是最新的。
+    #
+    # _CRYPTO_CN 是 data_sources 里本来就在维护的那份币种中文名表（虚拟货币
+    # 板块的列表就用它），这里复用，不另起一份会漂移的副本。
+    if market == "CC":
+        base = str(symbol).upper().replace("USDT", "").replace("USD", "")
+        return crypto_cn_name(base) or spot.get("名称", symbol)
+    return spot.get("名称", symbol)
 
 
 def _stream_ai_text(gen, raise_on_error: bool = True) -> str:
