@@ -1471,10 +1471,19 @@ def _render_module(module: str, symbol: str, market: str, hist, spot: dict):
             st.caption("暂无财务数据。")
 
     elif module == "benchmark":
+        # 2026-09-13 修真实崩溃：比特币详情页整页报 KeyError: 'CC'。
+        # _BENCHMARK_NAMES 只有 A/HK/US 三个市场，而虚拟货币（CC）也走同一套
+        # 详情页、同一份模块清单，取基准名时直接下标访问就炸了。
+        # 下面的模块清单已经按市场过滤掉了这一栏（见 module_defs 那里），
+        # 这里再用 .get 兜一层：这个函数除了详情页还可能被别处调到，
+        # 不能指望调用方都记得先过滤。
+        bm_name = _BENCHMARK_NAMES.get(market)
+        if not bm_name:
+            st.caption("这个市场没有可对照的大盘指数。")
+            return
         end = cn_now().strftime("%Y%m%d")
         start = (cn_now() - timedelta(days=90)).strftime("%Y%m%d")
         benchmark = get_benchmark_history(start, end, market=market)
-        bm_name = _BENCHMARK_NAMES[market]
         if benchmark is not None and not benchmark.empty:
             st.plotly_chart(
                 build_benchmark_comparison(hist, benchmark, benchmark_name=bm_name),
@@ -6102,7 +6111,13 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     st.divider()
     _head_col, _refresh_col = st.columns([5, 1])
     _head_col.subheader("AI 深度分析")
+    # 模块清单按市场过滤。虚拟货币没有"财务摘要"（币没有财报）也没有
+    # "对比大盘"（没有对应的指数，_BENCHMARK_NAMES 里就只有 A/HK/US）——
+    # 摆在那里要么是空栏，要么直接报错（2026-09-13 用户截图：比特币详情页
+    # 整页 KeyError: 'CC'）。不适用的东西不该先摆出来再解释为什么是空的。
     module_defs = (
+        ("news", "资讯解读"), ("cross", "综合数据分析（交叉验证）"),
+    ) if market == "CC" else (
         ("news", "资讯解读"), ("financial", "财务摘要"), ("benchmark", "对比大盘"), ("cross", "综合数据分析（交叉验证）"),
     )
     summary_key = f"_detail_summary_{symbol}_{market}"

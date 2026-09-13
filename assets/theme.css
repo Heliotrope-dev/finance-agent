@@ -955,12 +955,30 @@ a.macro-card-link:hover { background: rgba(23, 24, 28, 0.045); }
    太短又变成硬闪。
    注意 fragment 的局部重跑不会挂起 stStatusWidget 的全局态，所以自选列表
    每 3 秒的自动刷新不会触发这层压暗——那正是我们要的，它本来就该无感。 */
-[data-testid="stAppViewContainer"]:has([data-testid="stStatusWidget"]) [data-testid="stMainBlockContainer"] {
-    opacity: 0.4;
-    pointer-events: none;
-    transition: opacity 120ms ease;
+/* 2026-09-13 推翻重做。第一版是把正文整体压到 40% 不透明度 + 禁用点击，
+   出发点是"宁可显示正在变，也不要让用户盯着上一页发呆"。上线后用户反馈
+   "网页现在一次性吐出，我要之前的流式输出"——这一版是**错的**，而且错得
+   很隐蔽：
+   Streamlit 本来就是一块一块把内容推给浏览器的（脚本从上往下跑，跑到哪
+   推到哪），压暗并没有阻止这个过程，但它把整个逐块出现的过程盖在了 40%
+   的灰底下，等脚本跑完才整体亮起来。于是"内容在陆续到达"这个最有效的
+   进度反馈被我自己遮掉了，观感反而从"在动"变成"卡住然后一次性蹦出来"。
+
+   进度反馈换成顶部一条 2px 的细线：它在视口最上沿、不覆盖任何内容，
+   正文该怎么逐块出现就怎么出现。也不再禁用点击——逐块渲染时上半部分
+   已经是新内容了，本来就该能点。 */
+@keyframes _fa_progress {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
 }
-[data-testid="stMainBlockContainer"] { transition: opacity 120ms ease; }
+[data-testid="stAppViewContainer"]:has([data-testid="stStatusWidget"])::before {
+    content: "";
+    position: fixed; top: 0; left: 0; right: 0; height: 2px;
+    z-index: 999;
+    background: linear-gradient(90deg, transparent, var(--ink), transparent);
+    animation: _fa_progress 1.1s ease-in-out infinite;
+    pointer-events: none;
+}
 
 /* ── 窄屏 ─────────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {

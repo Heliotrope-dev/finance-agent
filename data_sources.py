@@ -355,7 +355,14 @@ def get_benchmark_history(start_date: str, end_date: str, market: str = "A") -> 
             df["日期"] = pd.to_datetime(df["日期"])
             start, end = pd.to_datetime(start_date), pd.to_datetime(end_date)
             return df[(df["日期"] >= start) & (df["日期"] <= end)][["日期", "收盘"]]
-        return _benchmark_history_a(start_date, end_date, "sh.000300")
+        if market == "A":
+            return _benchmark_history_a(start_date, end_date, "sh.000300")
+        # 认不出来的市场返回空，而不是默默给一份沪深300。
+        # 2026-09-13：原来最后一行是无条件 return 沪深300，于是任何非 HK/US
+        # 的 market（比如虚拟货币的 "CC"）都会拿到沪深300 当基准——图能画出来、
+        # 数字看着也正常，只是拿比特币在跟沪深300比。这种"悄悄给错数据"比
+        # 直接报错难发现得多。空 DataFrame 正好命中调用方已有的 empty 判断。
+        return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
