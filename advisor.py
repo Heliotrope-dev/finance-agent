@@ -543,11 +543,8 @@ def _client_free() -> OpenAI:
 # 思考链跟正文抢 max_tokens 的问题，这个项目为智谱把好几处预算提了2到4倍，
 # 换到V3上那些预算是绰绰有余的；而且这个项目最早就是基于DeepSeek写的提示词，
 # 天然适配。
-_SF_MODEL = "deepseek-ai/DeepSeek-V3"
-_SF_BASE = "https://api.siliconflow.cn/v1"
 
 
-_ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3"
 # 火山方舟上的 GLM-5.2。2026-09-07 接入，起因是三家供应商同一天全部欠费：
 # 千问周套餐烧穿（09-08 22:43 才恢复）、智谱余额不足、SiliconFlow 402。
 # 整条判断链停摆，当天的清单只能用前一天的评分。
@@ -558,27 +555,6 @@ _ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3"
 #
 # 具体选 glm-5-2-260617：用户在方舟的"协作者奖励计划"里已授权它，每天
 # 200 万 tokens 免费额度，够跑一轮完整观察池（136支约需200万）。
-_ARK_MODEL = "glm-5-2-260617"
-
-
-def _ark_client() -> OpenAI | None:
-    key = os.environ.get("ARK_API_KEY", "")
-    if not key:
-        return None
-    try:
-        return OpenAI(api_key=key, base_url=_ARK_BASE, max_retries=1, timeout=60)
-    except Exception:
-        return None
-
-
-def _siliconflow_client() -> OpenAI | None:
-    key = os.environ.get("SILICONFLOW_API_KEY", "")
-    if not key:
-        return None
-    try:
-        return OpenAI(api_key=key, base_url=_SF_BASE, max_retries=1, timeout=60)
-    except Exception:
-        return None
 
 
 def _zhipu_client() -> OpenAI | None:

@@ -6845,9 +6845,9 @@ def _render_sim_manager_stats(email: str, equity_points: list[dict]):
 def _render_ai_sim_dashboard():
     """AI模拟炒股页——2026-09-01用户明确要求"回看页全部改成AI模拟炒股，我需要
     看到它的持仓、收益和相关的所有交易记录"，完全取代原来的AI判断准确率
-    追踪（_render_accuracy_dashboard函数还留着，只是导航不再调用它——
-    用户是要"完全替换"这个入口，不是要删掉底层历史数据，函数和数据表都
-    保留，只是不在这个入口展示）。
+    追踪（那个入口是用户要求"完全替换"掉的；底层的 analyses 表和统计口径
+    都还在，现在由"我的"页那张三行准确率表呈现，2026-09-13 把那个
+    已经没有任何入口的 204 行渲染函数删了）。
 
     展示的是sim_agent.py那条每5分钟一次的自主决策链路（只交易港股/美股，
     沪深不参与，起始本金1万美金，2026-09-02从十万港币改的——内部记账仍按
@@ -8022,210 +8022,6 @@ def _wall_benchmark_return(day_key: str) -> float | None:
     return (acc / total_w) if total_w else None
 
 
-def _render_accuracy_dashboard(email: str):
-    """"回看"页——把原来塞在侧边栏折叠面板里的方向一致率统计，提升成
-    主内容区的独立页面。数据和统计口径完全复用tracker.py已有的
-    get_accuracy_stats/get_accuracy_trend（没有新造轮子），新增的是这个
-    页面本身的呈现方式：把"一个孤零零的百分比"变成一个真正像"过往战绩
-    公开可查"的仪表盘——这是finance-agent"不做黑箱荐股，拿数据说话"这个
-    产品定位最该被看见的地方，不该被折叠面板埋起来。
-
-    新增的日历热力图故意不用红涨绿跌那套配色（UP_COLOR/DOWN_COLOR在这个
-    App里全局代表"价格涨/跌"，这里如果借用会让用户以为热力图在讲价格
-    涨跌，而这里讲的是完全不同的"预测准不准"）。改用同一个UP_COLOR的
-    单一色相、只调深浅（浅→深表示当天有判断且一致率从低到高），跟品牌色
-    保持同源但语义不冲突。
-    """
-    if not st.session_state.get("logged_in"):
-        st.write("")
-        _, mid_empty, _ = st.columns([1, 2, 1])
-        with mid_empty:
-            st.markdown(
-                "<div style='text-align:center;color:var(--fa-muted);padding:40px 0 10px'>"
-                "回看是个人功能，需要登录后使用<br>"
-                "<span style='font-size:var(--fs-sm)'>行情/详情页/AI分析等其它功能无需登录即可查看</span>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-            if st.button("登录 / 注册", use_container_width=True, key="_review_page_login_btn"):
-                st.session_state["guest_mode"] = False
-                st.rerun()
-        return
-
-    _backfill_due_reviews(email)
-
-    stats = get_accuracy_stats(email)
-    if stats["总数"] == 0:
-        st.caption("还没有满7天可回看的记录")
-        return
-
-    # ── 头条卡片：先给一句人话结论，细节留到下面 ──────────────────────────
-    # 用户反馈"一致率""滑动窗口"这些词看着费劲——不是不懂百分比，是这套
-    # 统计学黑话本身就没在"讲人话"。改成"先说结论、再摆证据"的顺序：
-    # 大字号的总体准确率 + 一句自动生成的人话点评（哪个方向/哪个市场判断
-    # 更准），剩下细分数字降级成小字辅助信息，不再是一排并列的st.metric
-    # 让人自己去比大小。
-    _market_label = {"A": "沪深", "HK": "港股", "US": "美股"}
-    _dir_bull = stats.get("按方向", {}).get("偏多", {})
-    _dir_bear = stats.get("按方向", {}).get("偏空", {})
-    _mkt_stats = stats.get("按市场", {})
-
-    _insight = ""
-    if _dir_bull.get("总数", 0) >= 3 and _dir_bear.get("总数", 0) >= 3:
-        _diff = _dir_bull["一致率"] - _dir_bear["一致率"]
-        if abs(_diff) >= 10:
-            _better = "看涨" if _diff > 0 else "看跌"
-            _worse = "看跌" if _diff > 0 else "看涨"
-            _insight = f"AI「{_better}」的判断比「{_worse}」更准一些。"
-    if not _insight and len(_mkt_stats) >= 2:
-        _qualified = {m: s for m, s in _mkt_stats.items() if s["总数"] >= 3}
-        if len(_qualified) >= 2:
-            _best_m = max(_qualified, key=lambda m: _qualified[m]["一致率"])
-            _worst_m = min(_qualified, key=lambda m: _qualified[m]["一致率"])
-            if _best_m != _worst_m and _qualified[_best_m]["一致率"] - _qualified[_worst_m]["一致率"] >= 10:
-                _insight = (
-                    f"在「{_market_label.get(_best_m, _best_m)}」判断得最准，"
-                    f"「{_market_label.get(_worst_m, _worst_m)}」相对差一些。"
-                )
-    if not _insight:
-        _insight = "各个方向/市场的准确率暂时看不出明显差别，样本还不算多。"
-
-    with st.container(border=True):
-        st.markdown(
-            f"<div style='text-align:center;padding:8px 0'>"
-            f"<div style='font-size:var(--fs-sm);color:var(--fa-muted)'>AI说对的比例</div>"
-            f"<div style='font-size:var(--fs-2xl);font-weight:600;color:{UP_COLOR};line-height:1.1'>{stats['一致率']:.0f}%</div>"
-            f"<div style='font-size:var(--fs-sm);color:var(--fa-muted)'>"
-            f"过去 {stats['总数']} 次「涨/跌」判断里，对了 {stats['一致数']} 次</div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f"<div style='text-align:center;font-size:var(--fs-md);margin-top:4px'>{_insight}</div>",
-            unsafe_allow_html=True,
-        )
-
-    st.write("")
-    st.markdown("<div style='color:var(--fa-muted);font-size:var(--fs-sm)'>细分数据</div>", unsafe_allow_html=True)
-    d1, d2, d3, d4, d5 = st.columns(5)
-    _pairs = [
-        (d1, "看涨判断", _dir_bull),
-        (d2, "看跌判断", _dir_bear),
-    ] + [
-        (col, _market_label.get(m, m), _mkt_stats.get(m, {}))
-        for col, m in zip([d3, d4, d5], ["A", "HK", "US"])
-    ]
-    for _col, _label, _s in _pairs:
-        with _col:
-            if _s.get("总数", 0) >= 3:
-                st.metric(_label, f"{_s['一致率']:.0f}%", help=f"{_s['总数']} 次判断")
-            else:
-                st.metric(_label, "还太少", help=f"目前只有 {_s.get('总数', 0)} 次，攒够3次才统计")
-
-    st.divider()
-
-    _trend = get_accuracy_trend(email, window=5)
-    if _trend:
-        st.markdown("**最近是变准了还是变不准了**")
-        _trend_df = pd.DataFrame(_trend).set_index("日期")[["一致率"]]
-        st.line_chart(_trend_df, height=200)
-
-    st.markdown("**每天判断得准不准**")
-    _daily = get_daily_accuracy(email, days=91)
-    if not _daily:
-        st.caption("暂无足够的每日数据。")
-    else:
-        _by_date = {d["日期"]: d for d in _daily}
-        _today = datetime.now(timezone.utc).date()
-        _start = _today - timedelta(days=90)
-        _start -= timedelta(days=_start.weekday())  # 对齐到那一周的周一，格子排布整齐
-
-        _dates, _weeks_idx, _weekdays, _rates, _hover = [], [], [], [], []
-        _cursor = _start
-        _week_i = 0
-        while _cursor <= _today:
-            entry = _by_date.get(_cursor.isoformat())
-            _dates.append(_cursor)
-            _weeks_idx.append(_week_i)
-            _weekdays.append(_cursor.weekday())
-            _rates.append(entry["一致率"] if entry else None)
-            _hover.append(
-                f"{_cursor.isoformat()}<br>{entry['一致数']}/{entry['总数']} 一致（{entry['一致率']:.0f}%）"
-                if entry else f"{_cursor.isoformat()}<br>无记录"
-            )
-            if _cursor.weekday() == 6:
-                _week_i += 1
-            _cursor += timedelta(days=1)
-
-        import plotly.graph_objects as go
-
-        _z = [[None] * (_week_i + 1) for _ in range(7)]
-        _text = [[""] * (_week_i + 1) for _ in range(7)]
-        for wi, wd, rate, hv in zip(_weeks_idx, _weekdays, _rates, _hover):
-            _z[wd][wi] = rate if rate is not None else -1
-            _text[wd][wi] = hv
-
-        _fig = go.Figure(
-            go.Heatmap(
-                z=_z, text=_text, hoverinfo="text",
-                colorscale=[
-                    [0.0, "#eee"], [0.001, "#fbe1df"], [0.5, UP_COLOR], [1.0, "#7a0f0f"],
-                ],
-                zmin=-1, zmax=100, showscale=False,
-                xgap=3, ygap=3,
-            )
-        )
-        _fig.update_layout(
-            height=170, margin=dict(l=30, r=10, t=10, b=10),
-            yaxis=dict(
-                tickmode="array", tickvals=[0, 2, 4, 6], ticktext=["一", "三", "五", "日"],
-                autorange="reversed", showgrid=False,
-            ),
-            xaxis=dict(showgrid=False, showticklabels=False),
-            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        )
-        st.plotly_chart(_fig, use_container_width=True, config=_PLOTLY_CONFIG, key="_accuracy_calendar_heatmap")
-
-    st.divider()
-    st.markdown("**最近这些判断，一条条看**")
-    # 之前这里只列"当时X → 现在Y"，要用户自己心算"这算涨了还是跌了、
-    # 跟判断对不对得上"——现在直接算好、直接说结论，不用用户再动脑子。
-    _verdict_label = {"偏多": "看涨", "偏空": "看跌", "中性": "没明确方向"}
-    history = get_history(email, limit=20)
-    for h in history:
-        verdict_color = {"偏多": UP_COLOR, "偏空": DOWN_COLOR, "中性": NEUTRAL_COLOR}.get(h["verdict"], NEUTRAL_COLOR)
-        verdict_text = _verdict_label.get(h["verdict"], h["verdict"])
-        name_line = f"{_esc(h.get('name') or h['symbol'])}（{_esc(h['symbol'])}）"
-
-        if h.get("review_price") and h["verdict"] != "中性":
-            went_up = h["review_price"] > h["price_at_analysis"]
-            correct = (h["verdict"] == "偏多" and went_up) or (h["verdict"] == "偏空" and not went_up)
-            result_badge = (
-                f"<span style='color:{UP_COLOR};font-weight:600'>✓ 说对了</span>" if correct
-                else f"<span style='color:{DOWN_COLOR};font-weight:600'>✗ 说反了</span>"
-            )
-            detail = f"当时 {h['price_at_analysis']:.2f} → 一周后 {h['review_price']:.2f}"
-        elif h.get("review_price"):
-            result_badge = "<span style='color:var(--fa-muted)'>不算方向判断，不参与对错统计</span>"
-            detail = f"当时 {h['price_at_analysis']:.2f} → 一周后 {h['review_price']:.2f}"
-        else:
-            result_badge = "<span style='color:var(--fa-muted)'>还没到一周，等着看结果</span>"
-            detail = f"当时 {h['price_at_analysis']:.2f}"
-
-        with st.container(border=True):
-            st.markdown(
-                f"<div style='display:flex;justify-content:space-between;align-items:center;font-size:var(--fs-sm)'>"
-                f"<span>{name_line}　"
-                f"<span style='color:{verdict_color}'>AI说：{verdict_text}</span></span>"
-                f"<span style='color:var(--fa-muted);font-size:var(--fs-xs)'>{h['created_at'][:10]}</span>"
-                f"</div>"
-                f"<div style='font-size:var(--fs-sm);margin-top:4px;display:flex;justify-content:space-between'>"
-                f"<span style='color:var(--fa-muted)'>{detail}</span>{result_badge}"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-
-
 @st.dialog("卖出确认")
 def _confirm_sell_dialog(email: str, item: dict, market: str, cur_price: float | None):
     """shares=0（纯关注，没有真实持仓）走原来的简单确认删除；shares>0是真的
@@ -8979,8 +8775,9 @@ else:
         elif active_section == "AI模拟炒股":
             # 2026-09-01用户明确要求"回看那边全部改成AI模拟炒股"，分区
             # 名字本身也在同一天改成"AI模拟炒股"——完全替换掉原来的AI判断
-            # 准确率追踪入口，_render_accuracy_dashboard函数本身和它依赖
-            # 的历史数据都还在，只是不再从这个入口调用。
+            # 准确率追踪入口。底层的 analyses 表和统计口径都还在，现在由
+            # "我的"页那张三行准确率表呈现；那个已经没有任何入口的 204 行
+            # 渲染函数 2026-09-13 删掉了。
             _render_ai_sim_dashboard()
 
         elif active_section == "我的":

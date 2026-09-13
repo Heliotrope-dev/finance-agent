@@ -155,7 +155,7 @@ Beta 1.19/1.12），`sim_metrics` 是拿"30个交易日每天恰好+1%"的构造
 ## 技术栈
 
 - **数据源**：[Futu OpenAPI](https://openapi.futunn.com)（港美股实时行情/财报/筹码/新股，需本地跑 OpenD 网关）+ [AkShare](https://akshare.akfamily.xyz) + [BaoStock](http://baostock.com)（沪深）+ 东财 + 新浪；接口拿不到的走 `web_research.py`（DuckDuckGo + r.jina.ai，都免密钥）
-- **AI**：三家故障转移链 —— 千问 → 智谱 → SiliconFlow(DeepSeek-V3)，统一走 `chat_with_failover`。**任何调用点都不该自己复刻供应商选择逻辑**，这条是踩了三次才立的规矩：额度预检查、多空辩论、最终裁决三处各自维护了一份"供应商清单"，加第三家时全部漏掉，前两家欠费时功能整个失效却够不到第三家
+- **AI**：故障转移链 —— Gemini 免费档 → Gemini 付费档，统一走 `chat_with_failover`；多空辩论里空头单独从智谱起步（`prefer` 只调整起点、不裁剪链条），免得两方退化成同一个模型的左右手互搏。**任何调用点都不该自己复刻供应商选择逻辑**，这条是踩了三次才立的规矩：额度预检查、多空辩论、最终裁决三处各自维护了一份"供应商清单"，加第三家时全部漏掉，前两家欠费时功能整个失效却够不到第三家
 - **前端**：Streamlit（`@st.fragment` 拆分刷新粒度）。视觉走一套 CSS 设计 token（间距 6 档 / 字号 6 档 / 字重 3 档 / 文字色 3 档 / 圆角 2 种），全部定义在 `assets/theme.css` 的 `:root` 里，`.streamlit/config.toml` 的主题配置跟它一一对应——那边管 Streamlit 自己渲染的控件（含 CSS 够不着的下拉弹层、tooltip、dataframe 网格线），并且在首屏绘制前就生效，两边同步才不会闪一下。文字色最低 4.9:1（改造前最高频的那档是 2.19:1，AA 下限 4.5）
 - **调度**：**两套并存，改之前先确认东西在哪一套里**。系统 crontab（`CRON_TZ=Asia/Shanghai`）跑 `warm_home_cache`/`advisor`/`expectancy`/`macro_brief`/`ipo_brief`/`market_recommendation`/`intraday_watch`；OpenClaw 自己的调度表（`~/.openclaw/state/openclaw.sqlite` 的 `cron_jobs`）跑 `ai-sim-agent`/`ai-sim-snapshot`/`sim-agent-*`/`hk|us-mentor-scan`/`stock-advisor-*` 等 20 多个任务。只看 `crontab -l` 会以为一堆任务没在跑。市场时段类任务的统一口径是 `*/N 0-5,9-16,21-23`（北京时间，对应港股沪深 09-16、美股 21-23 和次日 00-05）。服务器时区已设为 Asia/Shanghai，所有面向用户的时间统一北京时间，数据库存储仍用 UTC
 - **部署**：VPS + Nginx + systemd，GitHub Actions 自动部署
@@ -165,8 +165,10 @@ Beta 1.19/1.12），`sim_metrics` 是拿"30个交易日每天恰好+1%"的构造
 ```bash
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-# .streamlit/secrets.toml 填 QWEN_API_KEY / ZHIPU_API_KEY / SILICONFLOW_API_KEY
-#                            SUPABASE_URL / SUPABASE_KEY
+# .streamlit/secrets.toml 填 GEMINI_API_KEY / GEMINI_FREE_API_KEY（AI 主链）
+#                            SUPABASE_URL / SUPABASE_KEY（登录）
+#                            SERPER_API_KEY（网页检索，可选，没有就退回 DuckDuckGo）
+#                            ZHIPU_API_KEY（可选，多空辩论让空头从独立供应商起步）
 streamlit run app.py
 ```
 

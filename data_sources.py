@@ -3263,10 +3263,50 @@ def get_stock_notices(symbol: str) -> pd.DataFrame:
     比新闻评论类内容更"一手"（财报、分红、股东会决议这些直接是公司自己发的）。
     只支持沪深，港股/美股没有对应的免费公告聚合源，那两个市场还是走 get_stock_news。
     """
-    df = _with_retry(lambda: ak.stock_individual_notice_report(security=symbol, symbol="全部"))
-    if df is None or df.empty:
+    # 直接打东财那个接口的**第一页**，不走 akshare 的 stock_individual_notice_report。
+    #
+    # 2026-09-13 实测：那个函数会把这只票**十年的公告全部翻页拉下来**
+    # ——贵州茅台 11 页 1074 条 20.06 秒，平安银行 22 页 1850 条 33.04 秒，
+    # 中国平安 22 页 1809 条 46.67 秒，每页约 1.5 秒。而这里只 head(10)。
+    # 也就是说为了显示 10 条最新公告，下载了一千八百条历史公告、让用户在
+    # 沪深个股详情页干等半分钟（这条在 _fetch_news_items 里是第一优先级，
+    # 不是可选项，缓存没命中时就是真等）。
+    #
+    # 它内部的参数里 sr=-1 是倒序，也就是**第一页就是最新的**，后面那些页
+    # 一条都用不上。page_size 直接要 20，一次请求搞定。
+    # 端点和参数照抄 akshare 的实现（见 stock_individual_notice_report 的
+    # 内层 _stock_notice_report），不是我自己猜的。
+    try:
+        r = requests.get(
+            "https://np-anotice-stock.eastmoney.com/api/security/ann",
+            params={
+                "sr": "-1", "page_size": "20", "page_index": "1",
+                "ann_type": "A", "client_source": "web",
+                "f_node": "0", "s_node": "0", "stock_list": symbol,
+            },
+            timeout=10,
+        )
+        rows = ((r.json() or {}).get("data") or {}).get("list") or []
+    except Exception:
         return pd.DataFrame()
-    df = df.rename(columns={"公告标题": "新闻标题", "公告日期": "日期", "公告类型": "分类", "网址": "url"})
+    if not rows:
+        return pd.DataFrame()
+
+    out = []
+    for it in rows:
+        # 公告类型在 columns 里是个列表，取第一个就够（页面上只显示一个分类）。
+        _cols = it.get("columns") or []
+        _cat = (_cols[0] or {}).get("column_name", "") if _cols else ""
+        _code = ((it.get("codes") or [{}])[0] or {}).get("stock_code", symbol)
+        out.append({
+            "日期": str(it.get("notice_date") or "")[:10],
+            "新闻标题": it.get("title") or "",
+            "分类": _cat,
+            "url": f"https://data.eastmoney.com/notices/detail/{_code}/{it.get('art_code')}.html",
+        })
+    df = pd.DataFrame(out)
+    if df.empty:
+        return df
     df = df.sort_values("日期", ascending=False)
     return df[["日期", "新闻标题", "分类", "url"]].head(10)
 
@@ -4169,28 +4209,6 @@ def get_sector_heatmap(market: str = "US", limit: int = 30) -> pd.DataFrame:
     if "涨跌幅" not in keep:
         return pd.DataFrame()
     return df[keep].sort_values("涨跌幅", ascending=False).head(limit).reset_index(drop=True)
-
-
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def get_ark_holdings(limit: int = 20) -> pd.DataFrame:
-    """ARK 基金持仓及变动。
-
-    2026-09-06新增。ARK 的持仓是公开且每日披露的，这在主动基金里很罕见——
-    绝大多数基金要等季报。它的价值不在于"跟着买"，而在于它是一个仓位变化
-    可以被逐日观察的成长股风向标：某只票被连续加仓还是在被清，比它的静态
-    持仓占比有意义。
-    """
-    r = _futu_call(lambda c: c.get_ark_fund_holding(), timeout=30, default=None)
-    df = _unwrap_futu(r)
-    if df is None or df.empty:
-        return pd.DataFrame()
-    ren = {"security": "代码", "name": "名称", "shares": "持股数",
-           "shares_change": "持股变动", "market_value": "市值",
-           "weight": "权重", "weight_change": "权重变动"}
-    df = df.rename(columns={k: v for k, v in ren.items() if k in df.columns})
-    keep = [c for c in ("代码", "名称", "持股数", "持股变动", "市值", "权重", "权重变动")
-            if c in df.columns]
-    return df[keep].head(limit).reset_index(drop=True)
 
 
 @st.cache_data(ttl=12 * 3600, show_spinner=False)

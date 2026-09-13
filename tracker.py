@@ -734,35 +734,11 @@ def get_max_capital(email: str) -> float | None:
         return row[0] if row else None
 
 
-def set_ai_sim_trading(email: str, enabled: bool):
-    init_db()
-    with closing(_conn()) as c:
-        c.execute(
-            "INSERT INTO user_settings (email, ai_sim_trading, updated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(email) DO UPDATE SET ai_sim_trading = excluded.ai_sim_trading, updated_at = excluded.updated_at",
-            (email, int(enabled), datetime.now(timezone.utc).isoformat()),
-        )
-        c.commit()
-
-
 def get_ai_sim_trading(email: str) -> bool:
     init_db()
     with closing(_conn()) as c:
         row = c.execute("SELECT ai_sim_trading FROM user_settings WHERE email = ?", (email,)).fetchone()
         return bool(row[0]) if row else False
-
-
-def set_sim_agent_enabled(email: str, enabled: bool):
-    """AI模拟炒股页"AI自主模拟交易"开关的真正落地——跟上面ai_sim_trading
-    是两个独立字段，见user_settings建表那段注释，不要合并成一个。"""
-    init_db()
-    with closing(_conn()) as c:
-        c.execute(
-            "INSERT INTO user_settings (email, sim_agent_enabled, updated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(email) DO UPDATE SET sim_agent_enabled = excluded.sim_agent_enabled, updated_at = excluded.updated_at",
-            (email, int(enabled), datetime.now(timezone.utc).isoformat()),
-        )
-        c.commit()
 
 
 def get_sim_agent_enabled(email: str) -> bool:
