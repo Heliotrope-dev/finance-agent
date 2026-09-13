@@ -34,8 +34,33 @@ def main():
     except Exception:
         global_idx = {}
 
-    ds.save_home_map_cache(snaps, global_idx)
-    print(f"预热完成：{sum(len(v) for v in snaps.values())}条市场指数 + {len(global_idx)}条国际指数")
+    # 2026-09-13 多预热两样：宏观仪表盘和首页头条。
+    # 判据跟指数快照完全一样——全站共享、跟访客是谁无关、分钟级才变一次。
+    # 实测这两样在渲染路径上分别要 0.66 秒和 0.97 秒，加起来 1.6 秒是**每个
+    # 访客每次打开首页都要付**的。挪到这里之后对访客变成读一次本地文件。
+    # 每样各自 try：任何一样挂了都不该连累其余，也不该让整个预热轮次白跑。
+    try:
+        macro = ds.get_macro_dashboard()
+    except Exception:
+        macro = {}
+    # 资讯要跟页面走**同一套两级逻辑**，不能只预热第一级：
+    # get_hot_market_news 是拿当天真实异动股名当关键词去富途搜，周末/休市日
+    # 没有异动就没有关键词，自然返回 0 条（实测周日就是 0），这时页面会退到
+    # get_market_news（财新）——也就是说真正显示在页面上的经常是第二级。
+    # 只预热第一级等于预热了一个空结果，页面照样要自己去查第二级，白忙。
+    news = []
+    for _fn in (ds.get_hot_market_news, ds.get_market_news):
+        try:
+            _df = _fn()
+        except Exception:
+            continue
+        if _df is not None and not _df.empty:
+            news = _df.to_dict("records")
+            break
+
+    ds.save_home_map_cache(snaps, global_idx, macro=macro, news=news)
+    print(f"预热完成：{sum(len(v) for v in snaps.values())}条市场指数 + "
+          f"{len(global_idx)}条国际指数 + {len(macro)}项宏观 + {len(news)}条资讯")
 
 
 if __name__ == "__main__":

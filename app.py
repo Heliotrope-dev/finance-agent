@@ -56,6 +56,8 @@ from data_sources import (
     get_multi_index_snapshot,
     get_multi_index_snapshot_slow,
     load_home_map_cache,
+    load_warm_macro,
+    load_warm_news,
     get_market_breadth,
     get_limit_pool,
     get_hk_famous_movers,
@@ -2355,8 +2357,12 @@ def _render_macro_strip():
     放在市场单选之上：这一条跟选沪深/港股/美股无关，它是全球共用的背景板。
     挂在某个市场下面会让人误以为"这是美股的VIX"。
     """
+    # 先读预热缓存（warm_home_cache.py 每分钟写一次）。这六项是全站共享、
+    # 跟访客是谁无关的数据，实时查要 0.66 秒，没有理由让每个访客各付一遍。
+    # 预热文件缺失/太旧才退回实时查。
+    rows = load_warm_macro()
     try:
-        rows = get_macro_dashboard()
+        rows = rows or get_macro_dashboard()
     except Exception:
         rows = None
     if not rows:
@@ -5551,18 +5557,34 @@ def _render_home_page():
     # 行情权限，取不到历史新股的首日K线，所以算不出首日表现统计，改成用富途
     # 直接给的发行PE/行业PE，那也是沪深打新判断贵贱的通行口径。
     st.markdown("**新股**")
-    _ipo_tab_hk, _ipo_tab_a, _ipo_tab_us = st.tabs(["港股", "沪深", "美股"])
-    with _ipo_tab_hk:
+    # 用 radio 而不是 st.tabs——2026-09-13 改，为了不做无用功。
+    #
+    # st.tabs 会把**三个标签页的内容全部渲染出来**（不是点到哪个才渲染哪个），
+    # 于是每次打开首页都要取三个市场的新股数据，而你只会看其中一个。实测这
+    # 一块占首页取数 0.98 秒（沪深 0.64 + 美股 0.34），三分之二是白花的。
+    # radio 只跑选中的那一支。
+    #
+    # 外观不变：全站的横向 radio 早就被 theme.css 渲染成下划线标签页了
+    # （见 [data-testid="stRadioOption"] 那一段），跟 st.tabs 长得一样。
+    # 顶部主导航本来也是这么做的，理由在那边写着——st.tabs 选中哪个是纯前端
+    # 状态、代码控制不了。这里顺带也拿到了同一个好处。
+    _ipo_mkt = st.radio(
+        "新股市场", ["港股", "沪深", "美股"], horizontal=True,
+        label_visibility="collapsed", key="_home_ipo_market",
+    )
+    if _ipo_mkt == "港股":
         _render_ipo_briefs()
-    with _ipo_tab_a:
+    elif _ipo_mkt == "沪深":
         _render_a_ipo_briefs()
-    with _ipo_tab_us:
+    else:
         _render_us_ipo_briefs()
 
     st.divider()
     st.markdown("**今日重磅消息**")
+    # 同上，头条也走预热缓存——实时查 0.97 秒，而它比行情更没有秒级意义。
+    news = load_warm_news()
     try:
-        news = get_hot_market_news()
+        news = news if news is not None else get_hot_market_news()
     except Exception:
         news = None
     if news is None or news.empty:

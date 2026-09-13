@@ -103,7 +103,14 @@ def _throttle():
 # 但 _with_retry 照着"网络抖动"的剧本睡了 5 秒又睡 10 秒，于是**每一次打开
 # 行情页都要在这里同步空等 19 秒**，最后还是显示"暂时获取不到"。
 # 区分开之后，同类故障的代价从 19 秒降到 1.5 秒。
-_DETERMINISTIC_ERRORS = (AttributeError, KeyError, IndexError, TypeError, ValueError)
+#
+# 刻意**不**包含 ValueError：json.JSONDecodeError 是 ValueError 的子类，而
+# "响应体是空的" 恰恰是典型的瞬时故障（东财的港股人气榜就是这样，注释里写着
+# "有时候整个响应体是空的"），那种情况重试是有用的。把 ValueError 划进来会
+# 让一批本来重试就能好的接口直接放弃——比原来的毛病更隐蔽。
+# TypeError 同理排除：它既可能是解析结构变了，也可能是某次返回 None 引起的，
+# 分不清就不划进来。只留三个含义明确的"结构对不上"。
+_DETERMINISTIC_ERRORS = (AttributeError, KeyError, IndexError)
 
 
 def _with_retry(fn, retries=2, backoff=5, throttle=True):
@@ -477,15 +484,56 @@ def get_multi_index_snapshot_slow(market: str) -> list[dict]:
 _HOME_MAP_CACHE_PATH = Path(__file__).parent / "data" / "home_map_cache.json"
 
 
-def save_home_map_cache(snaps: dict[str, list[dict]], global_idx: dict) -> None:
+def save_home_map_cache(snaps: dict[str, list[dict]], global_idx: dict,
+                        macro: dict | None = None, news: list | None = None) -> None:
     """写入warm_home_cache.py预热的A/HK/US指数快照+国际指数，供首页地图/
     "行情"tab指数卡片/AI咨询窗三处共用同一份数据，不用各自另开一条查询
     路径。跟fx_rate_cache同一个"独立小文件"套路（见_FX_CACHE_PATH），
     只是这个文件的写入方只有warm_home_cache.py这一个（那三个读取方都不
     写），职责更单纯。
+
+    macro / news：2026-09-13 加。判据跟指数快照完全一样——**全站共享、跟
+    访客是谁无关、分钟级才变一次**。既然如此就没有理由让每个访客各自去查
+    一遍：实测宏观仪表盘 0.66 秒、财新头条 0.97 秒，加起来 1.6 秒，是每个人
+    打开首页都要付的。挪到预热脚本里以后这 1.6 秒对访客变成读一次本地文件。
+
+    代价跟这个文件本来就承认的那条一样（见 warm_home_cache.py 的 docstring）：
+    不管有没有人在看，都按固定频率去查这几个免费接口。
     """
-    payload = {"fetched_at": time.time(), "snaps": snaps, "global_idx": global_idx}
+    payload = {
+        "fetched_at": time.time(), "snaps": snaps, "global_idx": global_idx,
+        "macro": macro or {},
+        # DataFrame 不能直接进 JSON，存成 records 列表，读的时候再拼回去。
+        "news": news or [],
+    }
     _HOME_MAP_CACHE_PATH.write_text(json.dumps(payload, default=str))
+
+
+def load_warm_macro(max_age_sec: float = 180) -> dict | None:
+    """读预热好的宏观仪表盘。取不到返回 None，调用方退回实时查。
+
+    max_age_sec 给 180（预热脚本每分钟跑一次，容忍连挂两轮）：这六个品种是
+    跨资产背景板，三分钟的新鲜度绰绰有余，没必要为了秒级精度让每个访客都
+    等 0.66 秒。
+    """
+    payload = load_home_map_cache(max_age_sec=max_age_sec)
+    return (payload or {}).get("macro") or None
+
+
+def load_warm_news(max_age_sec: float = 300) -> pd.DataFrame | None:
+    """读预热好的头条。存的是 records 列表，这里拼回 DataFrame。
+
+    新闻给 300 秒：它比行情更没有秒级意义，而且预热脚本那边一次要并发搜
+    十几个关键词，偶尔跑慢一轮很正常，窗口开大点免得频繁退回实时查。
+    """
+    payload = load_home_map_cache(max_age_sec=max_age_sec)
+    rows = (payload or {}).get("news")
+    if not rows:
+        return None
+    try:
+        return pd.DataFrame(rows)
+    except Exception:
+        return None
 
 
 def load_home_map_cache(max_age_sec: float = 90) -> dict | None:
