@@ -82,6 +82,7 @@ from assistant import build_context as build_assistant_context, stream_reply as 
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
     get_advice_accuracy, get_recent_advice_outcomes, get_advice_outcome_summary,
+    get_advice_outcome_windows,
     extract_score_breakdown,
     get_accuracy_trend, get_daily_accuracy, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_leaderboard, get_user_overview,
@@ -4274,12 +4275,30 @@ def _render_my_page():
         #
         # 只有"平均事后涨跌"上面那张表放不下（它不是一个百分比口径），留在这。
         if _summary.get("avg_return_pct") is not None and _summary.get("directional_count"):
-            _avg_c = UP_COLOR if _summary["avg_return_pct"] >= 0 else DOWN_COLOR
+            _avg = _summary["avg_return_pct"]
+            _avg_c = UP_COLOR if _avg >= 0 else DOWN_COLOR
+            # 并排给同期大盘。绝对涨跌单独摆出来是读不了的——大盘同期跌 4%
+            # 的话"平均跌 3%"其实是跑赢，大盘涨 2% 才是真的差。
+            _bench = _wall_benchmark_return(cn_now().strftime("%Y%m%d"))
+            _bench_html = ""
+            if _bench is not None:
+                _bc = UP_COLOR if _bench >= 0 else DOWN_COLOR
+                _excess = _avg - _bench
+                _ec = UP_COLOR if _excess >= 0 else DOWN_COLOR
+                _bench_html = (
+                    f"　同期大盘 <span style='color:{_bc};font-weight:600'>{_bench:+.2f}%</span>"
+                    f"　超额 <span style='color:{_ec};font-weight:600'>{_excess:+.2f}%</span>"
+                )
             st.markdown(
                 f"<div style='font-size:var(--fs-xs);color:var(--fa-muted);margin:-4px 0 6px'>"
                 f"这 {_summary['directional_count']} 条判断的平均事后涨跌 "
-                f"<span style='color:{_avg_c};font-weight:600'>{_summary['avg_return_pct']:+.2f}%</span>"
-                f"　亏的那几条一样列在下面，不藏。</div>",
+                f"<span style='color:{_avg_c};font-weight:600'>{_avg:+.2f}%</span>"
+                f"{_bench_html}"
+                f"　亏的那几条一样列在下面，不藏。</div>"
+                + ("<div style='font-size:var(--fs-xs);color:var(--fa-muted);margin:0 0 6px'>"
+                   "大盘按每条判断自己的市场和时间窗口分别取（港股恒指 / 美股标普500 / "
+                   "沪深上证），再按条数加权——不是拿一个笼统的指数涨跌来对照。</div>"
+                   if _bench is not None else ""),
                 unsafe_allow_html=True,
             )
         # 默认只看带方向的判断。已回填的绝大多数是"持有/观望"，不筛的话一屏
@@ -7893,6 +7912,67 @@ def _backfill_due_reviews(email: str):
                 except Exception:
                     continue
     st.session_state["_review_checked_at"] = time.time()
+
+
+_WALL_BENCHMARK = {"HK": ("HSI", "恒生指数"), "US": (".INX", "标普500"), "A": ("sh.000001", "上证指数")}
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _wall_benchmark_return(day_key: str) -> float | None:
+    """战绩墙那批判断的**同期大盘平均涨跌**，按样本条数加权。
+
+    为什么要有这个数：绝对涨跌是读不了的。"买入之后平均跌 3.09%" 在大盘同期
+    跌 4% 的情况下其实是跑赢，在大盘同期涨 2% 的情况下才是真的差。战绩墙是
+    整个项目最强调"诚实"的地方，只报绝对涨跌等于把判断留给读者的印象——而
+    大多数人的印象里大盘是不动的。
+
+    实现上按 (市场, 建议日, 回看日) 分组，每组只查一次基准区间，再按组内
+    样本数加权平均。实测 55 条样本只落在十几个分组里，比逐条查省一个数量级。
+
+    day_key 传当天日期做缓存键：这批历史样本一天之内不会变，6 小时 ttl 再
+    加一天一个键，等于每天最多真算一次。
+    """
+    try:
+        windows = get_advice_outcome_windows()
+    except Exception:
+        return None
+    if not windows:
+        return None
+
+    closes: dict[str, dict] = {}
+    total_w = 0.0
+    acc = 0.0
+    for w in windows:
+        mkt = w.get("market") or "A"
+        meta = _WALL_BENCHMARK.get(mkt)
+        if not meta:
+            continue
+        if mkt not in closes:
+            try:
+                h = get_index_history(meta[0], mkt)
+                if h is None or h.empty:
+                    closes[mkt] = {}
+                else:
+                    _d = h["日期"].astype(str).str[:10]
+                    closes[mkt] = dict(zip(_d, h["收盘"].astype(float)))
+            except Exception:
+                closes[mkt] = {}
+        cl = closes.get(mkt) or {}
+        if not cl:
+            continue
+        keys = sorted(cl)
+
+        def _near(d, _keys=keys, _cl=cl):
+            # 建议日/回看日不一定是交易日（周末回填），往前找最近的一个收盘。
+            prev = [k for k in _keys if k <= d]
+            return _cl[prev[-1]] if prev else None
+
+        a, b = _near(w["d0"]), _near(w["d1"])
+        if not a or not b or a <= 0:
+            continue
+        acc += (b - a) / a * 100 * w["n"]
+        total_w += w["n"]
+    return (acc / total_w) if total_w else None
 
 
 def _render_accuracy_dashboard(email: str):

@@ -2180,6 +2180,32 @@ def get_advice_outcome_summary() -> dict:
     }
 
 
+def get_advice_outcome_windows() -> list[dict]:
+    """战绩样本涉及到的 (市场, 建议日, 回看日) 组合，给基准对照用。
+
+    2026-09-13 加。"买入之后平均跌了 3.09%" 这句话单独拿出来是**读不了**的：
+    同期大盘跌 4% 的话它其实跑赢了，同期大盘涨 2% 才是真的差。战绩墙是整个
+    项目最强调"诚实"的地方，只给绝对涨跌等于把判断留给读者的印象，而大多数
+    人的印象里大盘是不动的。
+
+    这里只返回需要查哪些基准区间，不在 tracker 里取行情——tracker 是纯
+    SQLite 层，不碰网络，这条边界从项目一开始就是这么划的。真正取数和
+    加权在调用方（app.py）做。
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT market, substr(created_at, 1, 10) AS d0, substr(review_at, 1, 10) AS d1, "
+            "COUNT(*) AS n FROM advice "
+            "WHERE review_price IS NOT NULL AND price_at_advice IS NOT NULL "
+            "AND price_at_advice > 0 AND action IN ('买入', '卖出') "
+            f"AND {_DEDUP_ADVICE_SQL} AND {_WINDOW_SQL} "
+            "GROUP BY market, d0, d1"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_score_evidence_text(source: str = "watchlist") -> str:
     """把打分体系的事后回测结论整理成一段可以直接塞进prompt的实证文字。
 
