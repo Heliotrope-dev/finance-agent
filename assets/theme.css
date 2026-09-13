@@ -24,7 +24,23 @@
    原样能用，而所有绕开 Streamlit DOM 的 !important 都留不下。
    ============================================================================ */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+/* ── 字体 ─────────────────────────────────────────────────────────────────
+   西文/数字走 Inter 的可变字体轴（opsz 14-32）。可变轴不是为了炫技：Inter 的
+   光学尺寸会在大字号收紧字距、缩小字腔，在小字号反过来放开——这正是"同一套
+   字在标题和附注上都合适"的原因，写死一个静态字重做不到。
+
+   中文这一条是这次真正的改动。改造前是 'PingFang SC','Hiragino Sans GB',
+   'Microsoft YaHei' 一串系统字体，意味着**同一个页面在不同电脑上是两种长相**：
+   Mac 拿到苹方（细、字距匀、现代），Windows 拿到微软雅黑（明显更重、更"办公
+   文档"）。做了一晚上视觉系统，结果一半访客看到的根本不是这一套。
+
+   补一个 Noto Sans SC 网络字体兜底。顺序是刻意的——苹方排在网络字体**前面**：
+   它在 Mac 上比 Noto Sans SC 好看，本机有就用本机的，一个字节都不用下；
+   没有苹方的机器（Windows/Linux/Android）才去取 Noto，那些机器原本的备选是
+   雅黑，换成 Noto 是明确的提升。也就是说这一条只会让人变好，不会让人变差。
+   Google Fonts 把中文按 unicode-range 切成上百个子集，只下载真正用到的那几段，
+   这个页面实测是几十 KB 级别，不是整包几 M。 */
+@import url('https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600&family=Noto+Sans+SC:wght@400;500;700&display=swap');
 
 :root {
     /* ── 间距阶 ───────────────────────────────────────────────────────────
@@ -40,20 +56,48 @@
 
     /* ── 字号 ─────────────────────────────────────────────────────────────
        改造前是 11.52 / 11.84 / 12.48 / 14.72 / 15.68 / 16 / 16.32 / 17.6 px
-       这样的碎数——全都是 rem 相乘出来的，不是选出来的。其中三个小号字肉眼
-       根本分不出差别，等于占着三档却只起一档的作用。
-       全部改成整数，只留六档。 */
-    --fs-xs:  12px;  /* 标签、单位、时间戳 */
-    --fs-sm:  13px;  /* 次要说明 */
-    --fs-md:  15px;  /* 正文 */
-    --fs-lg:  18px;  /* 卡片标题 */
-    --fs-xl:  24px;  /* 区块标题 */
-    --fs-2xl: 34px;  /* 核心数值：净值、价格 */
+       这样的碎数——全都是 rem 相乘出来的，不是选出来的。
 
-    /* ── 字重：只留三档（改造前有 400/500/600/650，650 是手滑打出来的） ── */
+       第一版收成 12/13/15/18/24/34 之后上线实测，发现 12px 用了 591 处、
+       13px 用了 315 处——**两档差 1px，是全站用得最多的两档**。1px 的差别
+       肉眼分不出来，等于两档在做一档的事，"三个小号字肉眼无差别"这个毛病
+       只是从八档降到两档，没有真的解决。
+
+       这一版把台阶拉开，每一级都看得出来：
+         12 → 14   标签 vs 正文，2px 的差 + 字重差，一眼分得开
+         14 → 16   正文 vs 长文
+         16 → 20 → 26 → 36   约 1.25-1.3 的比例，标准的模块化字阶
+       正文从 13 涨到 14，行高会长一两像素；这是有意换的——一个"高级"的界面
+       靠层级清楚，不靠把字挤小。 */
+    --fs-xs:  12px;  /* 标签、单位、时间戳、股票代码 */
+    --fs-sm:  14px;  /* 正文：列表行、看多看空、caption */
+    --fs-md:  16px;  /* 长文：AI 回复、项目说明 */
+    --fs-lg:  20px;  /* 卡片标题、强调数字 */
+    --fs-xl:  26px;  /* 区块数字 */
+    --fs-2xl: 36px;  /* 核心数值：净值、价格 */
+
+    /* ── 字重：只留三档（改造前有 400/500/600/650/700/800，650 是手滑打的） ──
+       600 已经足够"重"了。700/800 在 Inter 这种偏中性的字面上会显得发胖，
+       跟"简约"是反的——层级用字号和颜色拉，不靠再加粗一档。 */
     --fw-normal: 400;
     --fw-medium: 500;
     --fw-bold:   600;
+
+    /* ── 字距 ─────────────────────────────────────────────────────────────
+       改造前有 10 种散落的 letter-spacing（-.022em / .03em / .08em …），
+       全是当场估的。归成三档，规则很简单：
+         字越大越要收紧——大字号下字母之间的空隙会被放大，不收就显得松散；
+         全大写/小号标签反过来要放开，不然字母会糊在一起。 */
+    --ls-tight:  -0.022em;  /* 20px 以上的数字和标题 */
+    --ls-normal: 0;         /* 正文 */
+    --ls-label:  0.03em;    /* 12px 的标签、单位 */
+
+    /* ── 行高 ─────────────────────────────────────────────────────────────
+       数字要紧（一列数据行高越均匀越像仪表盘），中文长句要松（中文没有词间
+       空格，行距不够会糊成一片）。 */
+    --lh-tight: 1.25;
+    --lh-body:  1.6;
+    --lh-loose: 1.75;
 
     /* ── 文字色 ───────────────────────────────────────────────────────────
        这是这次改造里最硬的一处修复。改造前用得最多的文字色是 #A8ABB3（55 处），
@@ -132,20 +176,30 @@
 /* ── 排版基线 ─────────────────────────────────────────────────────────── */
 html, body, .stApp, [data-testid="stAppViewContainer"] {
     background: var(--bg-page) !important;
+    /* 顺序有讲究，见文件顶部 @import 那段：苹方在网络字体之前，本机有好字
+       就不下载；没有的机器才落到 Noto Sans SC，而不是落到微软雅黑。 */
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
-                 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif !important;
+                 'Noto Sans SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+                 system-ui, sans-serif !important;
     color: var(--text-primary);
+    font-synthesis-weight: none;   /* 缺字重时宁可回退，不要浏览器自己描粗 */
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }
-/* 等宽数字。比例字体里 1 比 8 窄一截，一列价格的小数点上下对不齐，扫下来是
-   锯齿状的。tabular-nums 只改数字的字形宽度，不影响中英文排版，所以全局开。
-   这是这类页面"看着专业"里最省力的一条。 */
+/* 等宽数字 + 光学尺寸。
+   tabular-nums：比例字体里 1 比 8 窄一截，一列价格的小数点上下对不齐，扫下来
+   是锯齿状的。只改数字的字形宽度，不影响中英文排版，所以全局开。这是这类
+   页面"看着专业"里最省力的一条。
+   case：让括号、连字符、加减号跟着大写字母和数字抬高对齐——页面上到处是
+   "（09-11 22:18取价）""+75.9%"这种数字夹标点，不开的话标点是按小写字母的
+   高度摆的，贴着数字看总觉得偏低。
+   optical-sizing：Inter 可变字体的 opsz 轴，大字号自动收字腔、小字号放开。 */
 .stApp, .stApp *,
 html, body, [data-testid="stAppViewContainer"],
 [data-testid="stMetricValue"], [data-testid="stTable"] td {
     font-variant-numeric: tabular-nums;
-    font-feature-settings: 'tnum' 1;
+    font-feature-settings: 'tnum' 1, 'case' 1;
+    font-optical-sizing: auto;
 }
 
 [data-testid="stMain"], [data-testid="stMainBlockContainer"],
@@ -211,15 +265,15 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
 /* ── 标题层级 ─────────────────────────────────────────────────────────── */
 [data-testid="stMarkdownContainer"] h1 {
     font-size: var(--fs-xl); font-weight: var(--fw-bold);
-    letter-spacing: -0.018em; color: var(--text-primary); margin: 0 0 14px;
+    letter-spacing: var(--ls-tight); color: var(--text-primary); margin: 0 0 14px;
 }
 [data-testid="stMarkdownContainer"] h2 {
     font-size: var(--fs-lg); font-weight: var(--fw-bold);
-    letter-spacing: -0.012em; color: var(--text-primary); margin: var(--sp-6) 0 var(--sp-3);
+    letter-spacing: var(--ls-tight); color: var(--text-primary); margin: var(--sp-6) 0 var(--sp-3);
 }
 [data-testid="stMarkdownContainer"] h3 {
     font-size: 16px; font-weight: var(--fw-bold);
-    letter-spacing: -0.008em; color: var(--text-primary); margin: 26px 0 10px;
+    letter-spacing: var(--ls-normal); color: var(--text-primary); margin: 26px 0 10px;
 }
 /* markdown 渲染出来的文字要跟手写 HTML 的正文一个字号。
    2026-09-13 用户反馈"首页所有像这样的展开的字体跟上面主体字体保持一致"。
@@ -233,7 +287,7 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
    h1/h2/h3 和小节标题都有自己的显式字号，不受这一条影响。 */
 [data-testid="stMarkdownContainer"] { font-size: var(--fs-sm); }
 [data-testid="stMarkdownContainer"] p {
-    color: var(--text-strong) !important; font-size: var(--fs-sm); line-height: 1.68;
+    color: var(--text-strong) !important; font-size: var(--fs-sm); line-height: var(--lh-body);
 }
 /* 长文两处例外：AI 咨询的回复和「我的」页的项目说明，是真的要一段段读下去的
    连续文字，不是列表里的附注。13px 读一屏会累，给到正文档 15px。 */
@@ -253,7 +307,7 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
    主要依据，必须明显大于卡片内的 --sp-3。 */
 [data-testid="stMarkdownContainer"] p > strong:only-child {
     display: block; font-size: var(--fs-lg); font-weight: var(--fw-bold);
-    letter-spacing: -0.01em; color: var(--text-primary);
+    letter-spacing: var(--ls-normal); color: var(--text-primary);
     margin: var(--sp-6) 0 var(--sp-3);
 }
 /* 只给正文里真正的行内链接加下划线，并明确排除各种整卡可点的<a>。
@@ -270,7 +324,7 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
 }
 
 [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * {
-    color: var(--text-secondary) !important; font-size: var(--fs-sm) !important; line-height: 1.6 !important;
+    color: var(--text-secondary) !important; font-size: var(--fs-sm) !important; line-height: var(--lh-body) !important;
 }
 [data-testid="stWidgetLabel"] p {
     color: var(--text-strong) !important; font-size: var(--fs-sm) !important; font-weight: var(--fw-medium) !important;
@@ -318,9 +372,9 @@ hr, [data-testid="stDivider"] hr {
     display: none !important;
 }
 .st-key-fa_nav [data-testid="stRadioOption"] p {
-    font-size: var(--fs-md) !important; font-weight: var(--fw-medium) !important;
+    font-size: var(--fs-sm) !important; font-weight: var(--fw-medium) !important;
     color: var(--text-secondary) !important;
-    letter-spacing: 0.005em; transition: color .16s ease;
+    letter-spacing: var(--ls-normal); transition: color .16s ease;
 }
 .st-key-fa_nav [data-testid="stRadioOption"]:hover p { color: var(--text-strong) !important; }
 .st-key-fa_nav [data-testid="stRadioOption"]:has(input:checked) { border-bottom-color: var(--ink) !important; }
@@ -408,7 +462,7 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 [data-testid="stMetric"] { background: transparent !important; padding: 0 !important; }
 [data-testid="stMetricLabel"] p {
     font-size: var(--fs-xs) !important; font-weight: var(--fw-medium) !important;
-    color: var(--text-secondary) !important; letter-spacing: 0.035em;
+    color: var(--text-secondary) !important; letter-spacing: var(--ls-label);
 }
 [data-testid="stMetricValue"] {
     /* 2026-09-12：从 1.85rem 收到 1.5rem。实机看个股详情页，"最高/最低/今开"
@@ -419,8 +473,8 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
        那边是为了首屏不闪一下：主题配置在首次绘制前就生效，CSS 要等渲染到
        这一步，不同步的话数字会先大后小跳一下。 */
     font-size: var(--fs-xl) !important; font-weight: var(--fw-bold) !important;
-    letter-spacing: -0.028em !important;
-    color: var(--text-primary) !important; line-height: 1.24 !important;
+    letter-spacing: var(--ls-tight) !important;
+    color: var(--text-primary) !important; line-height: var(--lh-tight) !important;
 }
 /* Streamlit 新版给 delta 加了一个带底色的圆角小胶囊，粉底/浅绿底在这套
    近乎无色的界面里显得很突兀，而且底色本身不传递任何额外信息——箭头和
@@ -770,10 +824,10 @@ a.macro-card-link:hover { background: rgba(23, 24, 28, 0.045); }
     border-radius: var(--r-base); padding: 18px 20px;
 }
 .fa-eyebrow {
-    font-size: var(--fs-xs); font-weight: var(--fw-bold); letter-spacing: 0.055em; text-transform: uppercase;
+    font-size: var(--fs-xs); font-weight: var(--fw-bold); letter-spacing: var(--ls-label); text-transform: uppercase;
     color: var(--text-secondary); margin: 0 0 var(--sp-3);
 }
-.fa-num { font-weight: var(--fw-bold); letter-spacing: -0.02em; }
+.fa-num { font-weight: var(--fw-bold); letter-spacing: var(--ls-tight); }
 
 /* 首页宏观条 / 个股关键指标 / 新股首日统计，三个都是"一排并列的数字"，
    改造前各自内联了一份几乎相同的 grid。合并到这里。 */

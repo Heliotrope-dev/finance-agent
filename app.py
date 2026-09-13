@@ -968,7 +968,7 @@ def _render_market_clock():
             _bits.append(f"下次开盘 {_name} {_d:%m-%d %H:%M}")
     st.markdown(
         "<div style='font-size:var(--fs-xs);color:var(--fa-muted);"
-        "padding:2px 2px 10px;letter-spacing:.01em'>"
+        "padding:2px 2px 10px;letter-spacing:var(--ls-label)'>"
         + _esc(" · ".join(_bits)) + "</div>",
         unsafe_allow_html=True,
     )
@@ -1177,7 +1177,7 @@ def _render_overall_summary(raw_text: str):
         st.markdown(
             f"<div style='margin-bottom:14px'>"
             + f"<div style='display:flex;align-items:baseline;gap:8px;margin-bottom:6px'>"
-            + f"<span style='font-size:var(--fs-xl);font-weight:700;color:{color}'>{score}</span>"
+            + f"<span style='font-size:var(--fs-xl);font-weight:600;color:{color}'>{score}</span>"
             + f"<span style='font-size:var(--fs-sm);color:var(--fa-muted)'>/ 100 "
             + f"<span style='color:{color};font-weight:600'>{zone}</span></span>"
             + "</div>"
@@ -1706,7 +1706,7 @@ def _render_price_header(symbol: str, market: str):
 
     st.markdown(
         f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:2px'>"
-        + f"<span style='font-size:var(--fs-2xl);font-weight:700;color:{color}'>{spot['最新价']:.2f}</span>&nbsp;&nbsp;"
+        + f"<span style='font-size:var(--fs-2xl);font-weight:600;color:{color}'>{spot['最新价']:.2f}</span>&nbsp;&nbsp;"
         + f"<span style='font-size:var(--fs-lg);color:{color}'>{change:+.2f} ({change_pct:+.2f}%)</span>"
         + "</div>",
         unsafe_allow_html=True,
@@ -1753,7 +1753,7 @@ def _render_index_price_header(name: str, market: str):
 
     st.markdown(
         f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:2px'>"
-        + f"<span style='font-size:var(--fs-2xl);font-weight:700;color:{color}'>{idx_snap['最新']:,.2f}</span>&nbsp;&nbsp;"
+        + f"<span style='font-size:var(--fs-2xl);font-weight:600;color:{color}'>{idx_snap['最新']:,.2f}</span>&nbsp;&nbsp;"
         + f"<span style='font-size:var(--fs-lg);color:{color}'>{idx_snap['涨跌']:+.2f} ({idx_snap['涨跌幅']:+.2f}%)</span>"
         + "</div>",
         unsafe_allow_html=True,
@@ -2113,7 +2113,7 @@ def _render_hk_overview():
         _s_color = UP_COLOR if south["净买额"] >= 0 else DOWN_COLOR
         st.markdown(
             f"<div style='margin:4px 0 12px'>南向资金净买额　"
-            f"<span style='color:{_s_color};font-weight:700;font-size:var(--fs-lg)'>"
+            f"<span style='color:{_s_color};font-weight:600;font-size:var(--fs-lg)'>"
             f"{south['净买额']:+.2f}亿</span></div>",
             unsafe_allow_html=True,
         )
@@ -2475,10 +2475,10 @@ def _render_macro_detail(name: str):
     st.markdown(
         f"""
         <div style='padding:2px 0 14px;border-bottom:1px solid var(--fa-border);margin-bottom:20px'>
-            <div style='font-size:var(--fs-xl);font-weight:650;letter-spacing:-.022em;
+            <div style='font-size:var(--fs-xl);font-weight:600;letter-spacing:var(--ls-tight);
                         color:var(--fa-text);line-height:1.3'>{_esc(name)}</div>
             <div style='font-size:var(--fs-xs);color:var(--fa-faint);margin-top:4px;
-                        letter-spacing:.03em'>{_esc(group)}{(' · ' + _esc(unit)) if unit else ''}</div>
+                        letter-spacing:var(--ls-label)'>{_esc(group)}{(' · ' + _esc(unit)) if unit else ''}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -2495,7 +2495,7 @@ def _render_macro_detail(name: str):
             delta_txt = f"{chg:+,.2f}（{snap['涨跌幅']:+.2f}%）"
         st.markdown(
             f"<div style='display:flex;align-items:baseline;gap:14px;margin-bottom:6px'>"
-            f"<span style='font-size:var(--fs-2xl);font-weight:650;letter-spacing:-.02em;"
+            f"<span style='font-size:var(--fs-2xl);font-weight:600;letter-spacing:var(--ls-tight);"
             f"color:{color};font-variant-numeric:tabular-nums'>{value_txt}</span>"
             f"<span style='font-size:var(--fs-lg);color:{color};"
             f"font-variant-numeric:tabular-nums'>{delta_txt}</span></div>",
@@ -2659,10 +2659,10 @@ def _render_sector_detail(name: str, market: str):
     st.markdown(
         f"""
         <div style='padding:2px 0 14px;border-bottom:1px solid var(--fa-border);margin-bottom:20px'>
-            <div style='font-size:var(--fs-xl);font-weight:650;letter-spacing:-.022em;
+            <div style='font-size:var(--fs-xl);font-weight:600;letter-spacing:var(--ls-tight);
                         color:var(--fa-text);line-height:1.3'>{_esc(name)}</div>
             <div style='font-size:var(--fs-xs);color:var(--fa-faint);margin-top:4px;
-                        letter-spacing:.03em'>{market}股 · 行业板块</div>
+                        letter-spacing:var(--ls-label)'>{market}股 · 行业板块</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -3731,14 +3731,14 @@ def _render_advice_section():
                     # 字重加粗、用正文墨色（低分压灰）。可见性来自字本身，
                     # 不靠色块。
                     + (
-                        f"<span style='font-size:var(--fs-md);font-weight:650;letter-spacing:-.02em;"
+                        f"<span style='font-size:var(--fs-md);font-weight:600;letter-spacing:var(--ls-tight);"
                         f"font-variant-numeric:tabular-nums;"
                         f"color:{'var(--fa-text)' if score >= 60 else 'var(--fa-muted)'}'>{score}</span>"
                         if score is not None else ""
                     )
                     + f"<span style='color:var(--fa-muted);margin-left:10px;"
-                    f"font-size:var(--fs-xs);font-weight:600;letter-spacing:.02em'>研究观点：{_esc(action)}</span></span>"
-                    f"<span style='font-weight:600;letter-spacing:-.01em'>"
+                    f"font-size:var(--fs-xs);font-weight:600;letter-spacing:var(--ls-label)'>研究观点：{_esc(action)}</span></span>"
+                    f"<span style='font-weight:600'>"
                     f"<span style='color:var(--fa-faint);font-weight:500'>{rank}</span>&nbsp;&nbsp;{_esc(row.get('name',''))}"
                     f"<span style='font-weight:400;color:var(--fa-faint);font-size:var(--fs-xs)'> · {_market_label.get(market_key, market_key)}</span></span></div>"
                     f"<div style='font-size:var(--fs-xs);color:var(--fa-faint);margin-top:3px'>{_esc(row.get('symbol',''))} · 现价{price_text}{_esc(price_time)}"
@@ -4075,7 +4075,7 @@ def _render_my_page():
                 since_txt = f"自 {_t.strftime('%Y-%m-%d')} 起使用"
         acc_col, btn_col = st.columns([6, 1], vertical_alignment="center")
         acc_col.markdown(
-            f"<div style='font-size:var(--fs-md);font-weight:600;color:var(--fa-text);letter-spacing:-.01em'>"
+            f"<div style='font-size:var(--fs-md);font-weight:600;color:var(--fa-text)'>"
             f"{_esc(email)}</div>"
             + (f"<div style='font-size:var(--fs-xs);color:var(--fa-faint);margin-top:3px'>{since_txt}</div>"
                if since_txt else ""),
@@ -5919,10 +5919,10 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     st.markdown(
         f"""
         <div style='padding:2px 0 14px;border-bottom:1px solid var(--fa-border);margin-bottom:20px'>
-            <div style='font-size:var(--fs-xl);font-weight:650;letter-spacing:-.022em;
+            <div style='font-size:var(--fs-xl);font-weight:600;letter-spacing:var(--ls-tight);
                         color:var(--fa-text);line-height:1.3'>{_esc(name)}</div>
             <div style='font-size:var(--fs-xs);color:var(--fa-faint);margin-top:4px;
-                        letter-spacing:.03em'>{_esc(symbol)} · {_esc(market)}</div>
+                        letter-spacing:var(--ls-label)'>{_esc(symbol)} · {_esc(market)}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -6088,10 +6088,10 @@ def _render_index_detail(name: str, code: str, market: str):
     st.markdown(
         f"""
         <div style='padding:2px 0 14px;border-bottom:1px solid var(--fa-border);margin-bottom:20px'>
-            <div style='font-size:var(--fs-xl);font-weight:650;letter-spacing:-.022em;
+            <div style='font-size:var(--fs-xl);font-weight:600;letter-spacing:var(--ls-tight);
                         color:var(--fa-text);line-height:1.3'>{_esc(name)}</div>
             <div style='font-size:var(--fs-xs);color:var(--fa-faint);margin-top:4px;
-                        letter-spacing:.03em'>{_esc(code)} · {_esc(market)}指数</div>
+                        letter-spacing:var(--ls-label)'>{_esc(code)} · {_esc(market)}指数</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -6342,7 +6342,7 @@ def _render_positions_today_pnl(positions: list):
     pnl_color = UP_COLOR if total_pnl >= 0 else DOWN_COLOR
     st.markdown(
         f"<div style='font-size:var(--fs-sm);color:var(--fa-muted)'>今日收益</div>"
-        f"<div style='font-size:var(--fs-xl);font-weight:700;color:{pnl_color}'>"
+        f"<div style='font-size:var(--fs-xl);font-weight:600;color:{pnl_color}'>"
         f"{total_pnl:+,.0f} <span style='font-size:var(--fs-md)'>（{pnl_pct:+.2f}%）</span></div>",
         unsafe_allow_html=True,
     )
@@ -6598,8 +6598,8 @@ def _render_ai_sim_live_snapshot(email: str, equity_points: list):
             )
         _cum_c = UP_COLOR if _cum_pct >= 0 else DOWN_COLOR
         st.markdown(
-            f"<div style='font-size:var(--fs-xs);color:var(--fa-muted);letter-spacing:.04em'>总资产</div>"
-            f"<div style='font-size:var(--fs-2xl);font-weight:600;letter-spacing:-.03em;"
+            f"<div style='font-size:var(--fs-xs);color:var(--fa-muted);letter-spacing:var(--ls-label)'>总资产</div>"
+            f"<div style='font-size:var(--fs-2xl);font-weight:600;letter-spacing:var(--ls-tight);"
             f"color:var(--fa-text);line-height:1.15;margin:2px 0 6px'>${_net_usd:,.0f}</div>"
             f"<div style='font-size:var(--fs-sm)'>{_today_html}"
             f"<span style='color:var(--fa-muted);margin:0 8px'>·</span>"
@@ -7309,7 +7309,7 @@ def _render_bold_as_red(text: str) -> str:
     html_parts = []
     for part in parts:
         if part.startswith("**") and part.endswith("**") and len(part) > 4:
-            html_parts.append(f"<span style='color:{UP_COLOR};font-weight:700'>{_esc(part[2:-2])}</span>")
+            html_parts.append(f"<span style='color:{UP_COLOR};font-weight:600'>{_esc(part[2:-2])}</span>")
         else:
             html_parts.append(_esc(part).replace("\n", "<br>"))
     return "".join(html_parts)
@@ -7340,7 +7340,7 @@ def _render_trade_signals(signals_json: str):
             f"<div style='display:flex;justify-content:space-between;align-items:center;"
             f"padding:6px 10px;margin:4px 0;border-radius:6px;background:var(--fa-card-bg,rgba(0,0,0,.03))'>"
             f"<span>{_esc(s['name'])}（{_esc(s['symbol'])}·{_esc(s['market'])}）</span>"
-            f"<span style='color:{color};font-weight:700'>"
+            f"<span style='color:{color};font-weight:600'>"
             f"{_esc(s['action'])} {s['shares']:g}股 · 约¥{s['amount_cny']:,.0f}</span></div>",
             unsafe_allow_html=True,
         )
@@ -7391,7 +7391,7 @@ def _render_portfolio_advice(email: str, positions: list):
                 if not _body:
                     continue
                 st.markdown(
-                    f"<div style='font-size:var(--fs-xs);letter-spacing:.08em;color:var(--fa-faint);"
+                    f"<div style='font-size:var(--fs-xs);letter-spacing:var(--ls-label);color:var(--fa-muted);"
                     f"text-transform:none;margin:16px 0 6px'>{_name}</div>",
                     unsafe_allow_html=True,
                 )
@@ -7691,7 +7691,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
             # 色块是消费级 App 的做法，纯文字着色+右对齐是专业终端的做法。
             badge_html = (
                 f"<div style='text-align:right;color:{color};font-weight:600;"
-                f"letter-spacing:.01em'>{wchange_pct:+.2f}%</div>"
+                f"'>{wchange_pct:+.2f}%</div>"
             )
 
             # 真正持仓(shares>0)才算市值/浮盈——纯关注(shares=0)不显示这一行，
@@ -7828,7 +7828,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                 with st.expander(_label):
                     st.markdown(
                         f"<span style='background:{adv_color};color:#fff;border-radius:2px;padding:1px 8px;"
-                        f"font-size:var(--fs-sm);font-weight:700'>{_esc(adv_action)}</span> "
+                        f"font-size:var(--fs-sm);font-weight:600'>{_esc(adv_action)}</span> "
                         f"<span style='font-size:var(--fs-xs);color:var(--fa-muted)'>置信度：{_esc(adv_parts.get('置信度','—'))}</span>",
                         unsafe_allow_html=True,
                     )
@@ -7967,7 +7967,7 @@ def _render_accuracy_dashboard(email: str):
         st.markdown(
             f"<div style='text-align:center;padding:8px 0'>"
             f"<div style='font-size:var(--fs-sm);color:var(--fa-muted)'>AI说对的比例</div>"
-            f"<div style='font-size:var(--fs-2xl);font-weight:800;color:{UP_COLOR};line-height:1.1'>{stats['一致率']:.0f}%</div>"
+            f"<div style='font-size:var(--fs-2xl);font-weight:600;color:{UP_COLOR};line-height:1.1'>{stats['一致率']:.0f}%</div>"
             f"<div style='font-size:var(--fs-sm);color:var(--fa-muted)'>"
             f"过去 {stats['总数']} 次「涨/跌」判断里，对了 {stats['一致数']} 次</div>"
             f"</div>",
@@ -8563,7 +8563,7 @@ else:
         st.markdown(
             """
             <div style='margin:2px 0 20px'>
-                <span style='font-size:var(--fs-lg);font-weight:650;letter-spacing:-.022em;
+                <span style='font-size:var(--fs-lg);font-weight:600;letter-spacing:var(--ls-tight);
                              color:var(--fa-text)'>Invest Agent</span>
             </div>
             """,
