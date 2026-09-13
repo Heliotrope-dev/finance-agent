@@ -2322,6 +2322,27 @@ def _macro_sparkline(name: str, color: str) -> str:
     )
 
 
+def _warm_macro_sparklines(names: list[str]) -> None:
+    """把这六条走势并发预热进缓存，再让渲染循环逐个去读（那时全是内存命中）。
+
+    2026-09-13。加完走势线之后实测首页冷加载从 8.9 秒涨到 15 秒，其中 3.46 秒
+    是这六条——每条 0.5 秒的 Yahoo 请求，在渲染循环里一条接一条串着跑。
+    六个互不相干的网络请求没有理由排队。
+
+    为什么不直接在循环里并发：_macro_spark_closes 是 @st.cache_data，缓存的
+    写入必须发生在 Streamlit 的脚本线程上下文里才算数。所以这里先并发**预热**
+    （子线程里调用同一个函数，缓存由它自己写），循环里再正常调用一次拿结果。
+    预热失败也无所谓，循环里那次照样会去取，只是退回串行。
+    """
+    _hour = cn_now().strftime("%Y%m%d%H")
+    try:
+        _run_concurrent_with_deadline(
+            names, lambda n: _macro_spark_closes(n, _hour), timeout=6, max_workers=6,
+        )
+    except Exception:
+        pass
+
+
 @st.fragment
 def _render_macro_strip():
     """行情页顶部的跨资产温度计：VIX / 美债10年期 / 美元指数 / 黄金 / 原油 / 铜。
@@ -2340,6 +2361,10 @@ def _render_macro_strip():
         rows = None
     if not rows:
         return
+
+    # 六条走势先并发预热，下面循环里再读就是内存命中。不预热的话六个各 0.5 秒
+    # 的请求会在循环里串着跑，实测给首页冷加载加了 3.46 秒。
+    _warm_macro_sparklines(list(rows.keys()))
 
     cards = []
     for name, r in rows.items():
