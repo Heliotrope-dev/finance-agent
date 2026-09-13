@@ -40,7 +40,15 @@
    雅黑，换成 Noto 是明确的提升。也就是说这一条只会让人变好，不会让人变差。
    Google Fonts 把中文按 unicode-range 切成上百个子集，只下载真正用到的那几段，
    这个页面实测是几十 KB 级别，不是整包几 M。 */
-@import url('https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+/* Inter 用**区间**语法 400..600 而不是列举 400;500;600。
+   两种都返回 200，但列举式会展开成 21 个 @font-face（3 个字重 × 7 个
+   unicode 子集），区间式只有 7 个——一个子集一个可变字体，字重在 400-600
+   之间连续插值。
+   这不是省几个请求的问题：第一版用列举式，上线实测 Inter 600 那个拉丁子集
+   status 是 `error`，于是全站 138 处 600 字重的文字（所有数字、名称、标题）
+   静默掉到了系统字体上——实测同样内容 600 比 400 还窄 14px，说明根本不是
+   同一套字。面数越多、每一面都可能单独失败，而这种失败是完全无声的。 */
+@import url('https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..600&family=Noto+Sans+SC:wght@400..700&display=swap');
 
 :root {
     /* ── 间距阶 ───────────────────────────────────────────────────────────
