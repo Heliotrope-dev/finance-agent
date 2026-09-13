@@ -4,6 +4,7 @@
 跟 analysis.py 里 AI 的文字判断是两条独立的证据链。
 """
 
+import re
 from datetime import date, datetime
 from datetime import time as dtime
 from zoneinfo import ZoneInfo
@@ -119,22 +120,37 @@ def _apply_chart_theme(fig, height=None, *, legend=False, grid="y", margin=None,
     return fig
 
 
+# 严格的完整日期串：2026-06-01 / 2026/06/01。刻意**不**匹配 "202609" 这种
+# ——那是"按月拆解"那张图的类别标签，不是日期轴，套上日期格式会把刻度排错。
+_FULL_DATE_RE = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}")
+
+
 def _is_datetime_axis(fig) -> bool:
     """这张图的 x 轴是不是时间轴。
 
-    看第一条有 x 数据的 trace 的第一个值是不是日期类型就够了——同一张图不会
-    一半是日期一半是数字。用 pandas 的类型判断而不是 try-parse 字符串：
-    "202609" 这种也能被 parse 成日期，但它其实是一个类别标签（按月拆解那张图
-    的 x 轴就是这种），当成日期处理会把刻度全排错。
+    看第一条有 x 数据的 trace 的第一个值就够了——同一张图不会一半日期一半数字。
+
+    要认两种形态，这是 2026-09-13 在比特币 K 线上踩出来的：同一个
+    get_stock_history，港股/沪深回来的"日期"列是 datetime64，而虚拟货币那条
+    路径回来的是**字符串** '2026-06-01'（dtype=object）。第一版只认 datetime
+    对象，于是虚拟货币的图没被套上格式，plotly 自己把日期串认出来、按它的
+    默认格式渲染成 "Jun 28 2026"——全站唯一的英文又冒出来了，而且只在这一类
+    标的上出现，最难发现。
+
+    字符串这一路用严格正则而不是 try-parse，原因见 _FULL_DATE_RE 上面那行。
     """
     for tr in fig.data:
         x = getattr(tr, "x", None)
         if x is None or len(x) == 0:
             continue
         first = x[0]
-        return isinstance(first, (pd.Timestamp, datetime, date)) or (
-            hasattr(first, "dtype") and pd.api.types.is_datetime64_any_dtype(first)
-        )
+        if isinstance(first, (pd.Timestamp, datetime, date)):
+            return True
+        if hasattr(first, "dtype") and pd.api.types.is_datetime64_any_dtype(first):
+            return True
+        if isinstance(first, str):
+            return bool(_FULL_DATE_RE.match(first))
+        return False
     return False
 
 

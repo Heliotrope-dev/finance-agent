@@ -468,6 +468,26 @@ def _fetch_news_items(keyword: str, symbol: str | None, market: str) -> tuple:
     if futu_news is not None and not futu_news.empty:
         return futu_news, "futu"
 
+    # 虚拟货币单独放行一次"只按关键词搜"。
+    #
+    # 2026-09-13 用户反馈"比特币的最新资讯没有，这不可能"。查下来确实是我们
+    # 这边的问题：带 symbol 过滤时 get_futu_news("比特币", symbol="BTCUSD",
+    # market="CC") 返回 0 条，不带 symbol 直接搜"比特币"返回 8 条、全是当天的。
+    # 原因是富途的资讯是按**证券代码**索引的，而它的加密货币资讯根本不挂
+    # CC.BTCUSD 这个代码，于是精确过滤把所有结果都筛掉了。
+    #
+    # 下面那条"有代码就不退回模糊匹配"的规则本身没错——它防的是同名/同类
+    # 基金串味（"广发中证XX"这种名字一搜一大把）。但这个风险对虚拟货币不
+    # 存在："比特币""以太坊"是唯一的，没有同名标的可混。所以只给 CC 开口子，
+    # 股票和基金那条规则原样保留。
+    if market == "CC":
+        try:
+            _cc_news = get_futu_news(keyword, max_count=8)
+        except Exception:
+            _cc_news = None
+        if _cc_news is not None and not _cc_news.empty:
+            return _cc_news, "futu"
+
     # 有证券代码却没有精确命中的富途资讯时，不能再退回名称模糊匹配。后者会
     # 重新把同名/同类基金的新闻塞进来，等于绕过了上面的精确过滤。
     if symbol:
