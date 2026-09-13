@@ -4897,11 +4897,11 @@ def _render_ipo_perf_block(perf: dict, show_calculator: bool = True, key_suffix:
         _avg_c = UP_COLOR if _st["avg"] > 0 else DOWN_COLOR
         _med_c = UP_COLOR if _st["median"] > 0 else DOWN_COLOR
         _cells = [
-            ("首日涨跌幅均值", f"{_st['avg']:+.1f}%", _avg_c, "1.3rem"),
-            ("中位数", f"{_st['median']:+.1f}%", _med_c, "1.3rem"),
-            ("上涨占比", f"{_up_rate:.0f}%", "var(--fa-text)", "1.3rem"),
-            ("破发率", f"{_st['break_rate']:.0f}%", "var(--fa-text)", "1.3rem"),
-            ("区间", f"{_st['min']:+.0f}% ~ {_st['max']:+.0f}%", "var(--fa-text)", "1.05rem"),
+            ("首日涨跌幅均值", f"{_st['avg']:+.1f}%", _avg_c, "var(--fs-lg)"),
+            ("中位数", f"{_st['median']:+.1f}%", _med_c, "var(--fs-lg)"),
+            ("上涨占比", f"{_up_rate:.0f}%", "var(--fa-text)", "var(--fs-lg)"),
+            ("破发率", f"{_st['break_rate']:.0f}%", "var(--fa-text)", "var(--fs-lg)"),
+            ("区间", f"{_st['min']:+.0f}% ~ {_st['max']:+.0f}%", "var(--fa-text)", "var(--fs-md)"),
         ]
         st.markdown(
             "<div class='fa-ipo-stats'>"
