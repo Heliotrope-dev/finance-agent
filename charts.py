@@ -828,7 +828,7 @@ def build_macro_series_chart(series: dict) -> go.Figure:
         for _gi in _gap_idx:
             fig.add_annotation(x=x[_gi], y=0, yref="paper", yanchor="bottom",
                                 text="无数据", showarrow=False,
-                                font=dict(size=9, color=_AUX_SOFT))
+                                font=dict(size=10, color=_AUX_SOFT))
         return fig
 
     fig.add_trace(
@@ -872,7 +872,7 @@ def build_macro_series_chart(series: dict) -> go.Figure:
     for _gi in _gap_idx:
         fig.add_annotation(x=x[_gi], y=0, yref="paper", yanchor="bottom",
                             text="无数据", showarrow=False,
-                            font=dict(size=9, color=_AUX_SOFT))
+                            font=dict(size=10, color=_AUX_SOFT))
     return fig
 
 
