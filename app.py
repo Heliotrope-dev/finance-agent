@@ -117,7 +117,7 @@ from auth import (
     _check_user, _register_user, _create_token, _validate_token,
     _invalidate_token, _hash_pw, _user_exists,
 )
-from theme import UP_COLOR, DOWN_COLOR, NEUTRAL_COLOR, OK_COLOR, BAD_COLOR
+from theme import UP_COLOR, DOWN_COLOR, NEUTRAL_COLOR, OK_COLOR, BAD_COLOR, HOLD_COLOR, WATCH_COLOR
 
 for _k in ("SUPABASE_URL", "SUPABASE_KEY", "ADVISOR_EMAIL"):
     if _k not in os.environ:
@@ -3299,7 +3299,11 @@ def _render_home_map():
 
 
 _ADVICE_EMAIL = os.environ.get("ADVISOR_EMAIL", "")  # advisor.py 私人脚本写advice表时用的固定账号，跟当前登录访客无关
-_ADVICE_ACTION_COLOR = {"买入": UP_COLOR, "卖出": DOWN_COLOR, "持有": NEUTRAL_COLOR, "观望": NEUTRAL_COLOR}
+# 2026-09-14用户要求"买入/卖出/持有/观望换成颜色好区分"：买入/卖出本来就
+# 复用红涨绿跌的UP/DOWN_COLOR，跟这个项目一贯的配色直觉一致，不用改；
+# 持有/观望之前共用同一种灰(NEUTRAL_COLOR)，两个不同结论看不出区别，
+# 改成专用的HOLD_COLOR(蓝)/WATCH_COLOR(黄)，四个结论互不混淆。
+_ADVICE_ACTION_COLOR = {"买入": UP_COLOR, "卖出": DOWN_COLOR, "持有": HOLD_COLOR, "观望": WATCH_COLOR}
 # 2026-09-04把判断输出升级成机构研报格式后新增的几段（投资期限/目标价/
 # 估值方法/多头逻辑/空头逻辑/关键假设/催化剂/证伪条件）。解析器是按段名定位、
 # 位置排序切段的，新增段名向后兼容——2026-09-04之前的老记录没有这些段，
