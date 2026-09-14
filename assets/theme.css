@@ -40,15 +40,24 @@
    雅黑，换成 Noto 是明确的提升。也就是说这一条只会让人变好，不会让人变差。
    Google Fonts 把中文按 unicode-range 切成上百个子集，只下载真正用到的那几段，
    这个页面实测是几十 KB 级别，不是整包几 M。 */
-/* Inter 用**区间**语法 400..600 而不是列举 400;500;600。
-   两种都返回 200，但列举式会展开成 21 个 @font-face（3 个字重 × 7 个
-   unicode 子集），区间式只有 7 个——一个子集一个可变字体，字重在 400-600
-   之间连续插值。
-   这不是省几个请求的问题：第一版用列举式，上线实测 Inter 600 那个拉丁子集
-   status 是 `error`，于是全站 138 处 600 字重的文字（所有数字、名称、标题）
-   静默掉到了系统字体上——实测同样内容 600 比 400 还窄 14px，说明根本不是
-   同一套字。面数越多、每一面都可能单独失败，而这种失败是完全无声的。 */
-@import url('https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..600&family=Noto+Sans+SC:wght@400..700&display=swap');
+/* 2026-09-13 从 Inter 换成 IBM Plex。用户："现在这个有点AI。"
+   这个判断是准的——Inter 是当下 AI/SaaS 产品的默认脸（Linear、Vercel、
+   OpenAI 都在用），用它等于没做选择。
+
+   Plex 是 IBM 给自己做的企业字体，有几处形态一眼能跟 Inter 分开：a 带小
+   尾巴、l 有弯钩、g 是单层。气质偏工程/终端，正好是行情终端该有的样子，
+   而不是创业公司落地页。
+
+   数字单独用 Plex Mono（同一个超级字族，配一起不打架）——但**只给主数字**，
+   不全局套：全局套会让中文句子里的行内数字（"近5日-3.3%"）也变等宽，反而
+   更花。列对齐本来就由 Plex Sans 自带的 tabular figures 保证，Mono 加的是
+   "终端感"，用在最显眼的几处就够。
+
+   注意 Plex 在 Google Fonts 上**没有可变版**，只能列举字重。这正是之前
+   Inter 出事的那种形态（21 个面里有一个静默 error，600 字重全站掉到系统
+   字体）。所以这次字重只要 400/500/600 三档——正好是 --fw-* 的三档，一个
+   不多，面数最少，并且部署后逐个字重验证过加载状态。 */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400..700&display=swap');
 
 :root {
     /* ── 间距阶 ───────────────────────────────────────────────────────────
@@ -165,6 +174,17 @@
        才用全圆。 */
     --r-base: 2px;
     --r-pill: 999px;
+
+    /* ── 字体 ─────────────────────────────────────────────────────────────
+       中文排在西文之后、苹方排在网络字体之前：Mac 上苹方比 Noto Sans SC
+       好看，本机有就用本机的、一个字节不下；没苹方的机器（Windows/Linux）
+       原本会落到微软雅黑，现在落到 Noto，只会变好不会变差。 */
+    --font-ui: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+               'Noto Sans SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+    /* 主数字专用。只给"成列出现、需要一眼对齐"的那些数——价格、涨跌幅、
+       指标值。中文句子里的行内数字不用，那里换等宽只会让句子看着断断续续。 */
+    --font-num: 'IBM Plex Mono', 'IBM Plex Sans', ui-monospace, SFMono-Regular,
+                Menlo, monospace;
 
     /* ── 别名层。上面是真相，这里只是转发，见文件头那段说明。 ───────────── */
     --fa-bg:        var(--bg-page);
