@@ -3770,6 +3770,42 @@ def run_positions_advice():
         print("（本次持仓/自选判断全部失败，跳过。）\n")
 
 
+def run_portfolio_only():
+    """独立入口——只给 _EMAIL 这一个私人账号跑一次组合层面分析，供OpenClaw
+    新增的12:30/22:00两个推送节点用。
+
+    跟main()里"组合分析覆盖所有注册用户"的那段循环不冲突——那段仍然在
+    17:30跑、覆盖所有用户，服务的是网站"持仓"页和首页"资产配置行动清单"
+    这个通用功能；这里只是给_EMAIL这一个账号在午盘和晚间多两个检查点，
+    范围收窄到跟其它私人微信简报一致，不重新算一遍全体用户。
+
+    用户原话"这个资产配置行动计划每天下午十二点半和晚上十点执行，没有
+    就直接不用动，有的话AI分析open claw发微信和项目同步推送"——"项目
+    同步推送"不需要额外代码：advise_portfolio()写进的还是同一张
+    portfolio_advice表，网站首页/持仓页本来就读这张表的最新一条，这里
+    多跑几次自然就是网站看到的最新内容，不用另外同步一遍。"没有就不用
+    动"靠advise_portfolio()本身的返回值判断——持仓不足2支时返回None，
+    这里如实不打印任何"资产配置行动清单"章节标记，下游负责转发微信的
+    agentTurn靠"文件里有没有这个章节标记"决定要不要发消息，不硬凑一句
+    "本次无更新"去打扰用户。
+    """
+    _load_secrets_into_env()
+    _check_gemini_available()
+    result = advise_portfolio(_EMAIL)
+    if not result:
+        print("（本次跳过：持仓不足2支，或组合分析未能生成，没有新内容，不需要推送。）")
+        return
+    print("==================== 资产配置行动清单 ====================")
+    print(result["analysis_text"])
+    action_signals = [s for s in result["signals"] if s["action"] != "不动"]
+    if action_signals:
+        print("\n---- 交易信号（需要操作的） ----")
+        for s in action_signals:
+            print(f"{s['name']}：{s['action']} {s['shares']:g}股 · 约¥{s['amount_cny']:,.0f}")
+    else:
+        print("\n（本次交易信号维持不动，没有需要操作的标的。）")
+
+
 def main():
     _load_secrets_into_env()
     _check_gemini_available()
@@ -3914,6 +3950,8 @@ if __name__ == "__main__":
     import sys as _sys
     if "--positions-only" in _sys.argv:
         run_positions_advice()
+    elif "--portfolio-only" in _sys.argv:
+        run_portfolio_only()
     else:
         main()
     # get_stock_realtime_futu 建立的 Futu SDK 连接会开一个非 daemon 线程，main()
