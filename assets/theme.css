@@ -713,6 +713,16 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
     border-color: transparent !important;
     box-shadow: none !important;
 }
+/* 这两个 widget 自身带 key；BaseWeb 的实际填充层可能是 input/base-input，
+   所以直接锁定到它们，避免影响页面其它需要底色的选择器。 */
+[class*="st-key-_watch_sort_mode"] [data-baseweb],
+[class*="st-key-_watch_density"] [data-baseweb],
+[class*="st-key-_watch_sort_mode"] [data-baseweb] > div,
+[class*="st-key-_watch_density"] [data-baseweb] > div {
+    background: transparent !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
+}
 
 /* 行内折叠框：去掉边框和底色，变成一行安静的可展开文字。
    六处（持仓行 / 推荐股行 / 宏观条目 / AI决策记录 / 我的页关于 / 侧栏）
