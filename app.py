@@ -8957,30 +8957,20 @@ else:
                     _present = {it.get("market", "A") for it in watch_items}
                     _opts = ["全部"] + [k for k, v in _mkt_labels.items() if v in _present]
                     with st.container(key="watch_controls"):
-                        _f_col, _s_col, _d_col = st.columns([2, 1, 1], vertical_alignment="center")
+                        _f_col, _s_col, _d_col = st.columns([1.35, 2.15, 0.8], vertical_alignment="center")
                         with _f_col:
                             _mkt_pick = st.radio(
                                 "市场", _opts, horizontal=True, label_visibility="collapsed",
                                 key="_watch_market_filter",
                             )
                         with _s_col:
-                        # 2026-09-13：选项从"默认/涨幅/跌幅/AI评分"改成说清楚
-                        # 是什么顺序的四项。"默认"没有回答任何问题——用户看到
-                        # 它不知道列表现在是按什么排的，也就无从判断要不要换。
-                        # 它实际上是"添加时间"（自己加自选的先后顺序），直接
-                        # 写出来。涨幅/跌幅合并成一个"涨跌幅"（点两次切方向没
-                        # 有意义，两个独立选项更直接），另加成交额。
-                            _sort_pick = st.selectbox(
+                            _sort_pick = st.radio(
                                 "排序", ["添加时间", "涨幅", "跌幅", "成交额", "AI评分"],
-                                label_visibility="collapsed", key="_watch_sort_mode",
+                                horizontal=True, label_visibility="collapsed", key="_watch_sort_mode",
                             )
                         with _d_col:
-                        # 密度开关。52 支自选在改造前每行 83px，一屏看 7 支要滚
-                        # 八屏；紧凑档把成交额和持仓盈亏那两行次要信息收起来，
-                        # 行高减半。默认紧凑——自选列表的用途是"扫一眼谁在动"，
-                        # 不是逐支细看，细看有详情页。
-                            _density = st.selectbox(
-                                "密度", ["紧凑", "舒适"],
+                            _density = st.radio(
+                                "密度", ["紧凑", "舒适"], horizontal=True,
                                 label_visibility="collapsed", key="_watch_density",
                             )
                     _want = _mkt_labels.get(_mkt_pick)
