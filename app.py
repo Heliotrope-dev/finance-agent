@@ -7112,7 +7112,10 @@ def _render_ai_sim_dashboard():
         _latest_when = _latest_dt.strftime("%m-%d %H:%M") if _latest_dt else "最近一次"
         _latest_reason = _sim_run_reason(_latest.get("reasoning_text", "")) or _sim_note_for_display(_latest.get("note", ""))
         if _latest_reason:
-            st.caption(f"最近一次完整决策 · {_latest_when} · {_latest_reason}")
+            # _latest_reason 是模型自己写的复盘文字，常带 HK$ 这类金额——
+            # 一对没转义的 $ 会被 markdown 当成 LaTeX 定界符吃掉，中间的字
+            # 渲染成数学斜体、内容看着断在数字中间（真实复现过）。
+            st.caption(f"最近一次完整决策 · {_latest_when} · {_latest_reason.replace('$', r'\$')}")
 
     # 走势图数据源用sim_equity_snapshots(每几分钟一次，跟AI决策频率解耦)，
     # 不再用sim_agent_runs的决策快照(15分钟一次)——用户反馈"遇到低波动
@@ -8964,10 +8967,11 @@ else:
                                 key="_watch_market_filter",
                             )
                         with _s_col:
-                            _sort_pick = st.radio(
-                                "排序", ["添加时间", "涨幅", "跌幅", "成交额", "AI评分"],
-                                horizontal=True, label_visibility="collapsed", key="_watch_sort_mode",
-                            )
+                            with st.container(key="watch_sort_controls"):
+                                _sort_pick = st.radio(
+                                    "排序", ["添加时间", "涨幅", "跌幅", "成交额", "AI评分"],
+                                    horizontal=True, label_visibility="collapsed", key="_watch_sort_mode",
+                                )
                         # 自选固定舒适密度：这是观察清单的默认阅读节奏，不再给
                         # 用户一个会反复改变整页行高、却没有明确任务价值的切换项。
                         _density = "舒适"

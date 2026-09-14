@@ -723,6 +723,10 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
     border-color: transparent !important;
     box-shadow: none !important;
 }
+/* 自选的排序是一组次级控制，靠右收束，和左侧市场筛选形成清晰两端。 */
+[class*="st-key-watch_sort_controls"] [role="radiogroup"] {
+    justify-content: flex-end !important;
+}
 
 /* 行内折叠框：去掉边框和底色，变成一行安静的可展开文字。
    六处（持仓行 / 推荐股行 / 宏观条目 / AI决策记录 / 我的页关于 / 侧栏）
