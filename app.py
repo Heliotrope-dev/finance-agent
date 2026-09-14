@@ -8977,7 +8977,10 @@ else:
                                 key="_watch_market_filter",
                             )
                         with _s_col:
-                            with st.container(key="watch_sort_controls"):
+                            # 让排序组占最右侧的实际列，而不是依赖 CSS 猜测 radio
+                            # 内部结构；五个文字控制项会稳定与内容右缘对齐。
+                            _, _sort_col = st.columns([1.4, 1])
+                            with _sort_col:
                                 _sort_pick = st.radio(
                                     "排序", ["添加时间", "涨幅", "跌幅", "成交额", "AI评分"],
                                     horizontal=True, label_visibility="collapsed", key="_watch_sort_mode",
