@@ -3353,7 +3353,7 @@ def _labeled_line(label: str, value: str) -> str:
 _CN_TZ_APP = timezone(timedelta(hours=8))
 
 _PORTFOLIO_SECTIONS = (
-    "总体评估", "集中度风险", "行业集中", "市场敞口",
+    "总体评估", "集中度风险", "行业集中", "市场敞口", "对冲与保险",
     "宏观适配", "逐支跟踪", "新增配置建议", "操作建议",
 )
 
@@ -3663,116 +3663,112 @@ def _load_watch_only_items(market: str) -> list[dict]:
 
 
 @st.fragment
+def _render_home_portfolio_action():
+    """首页"资产配置行动清单"——2026-09-14替换掉原来那版"今日可执行清单"
+    （全市场量化初筛+AI打分选股，跟用户具体持有什么完全无关）。用户原话：
+    "首页那个可执行清单那边我们换个维度就不用AI打分了...要跟我们持仓
+    联动...没有持仓就说清闲添加持仓，持仓填完之后根据持仓的股票可以考虑
+    资产配置是否合理可以买什么对冲买什么保险买什么...然后有什么东西要
+    卖出"——核心是从"AI看全市场选股"换成"AI看你已经买了什么，判断这些
+    持仓摆在一起合不合理、要不要对冲、要不要加减仓"。
+
+    没有另起一套AI调用——advisor.advise_portfolio()（工作日17:30随组合分析
+    一起跑）本来就在回答同一个问题，"持仓"页的_render_portfolio_advice是
+    完整版（含逐支跟踪、交易信号、立即重新分析按钮）。这里只是从同一份
+    portfolio_advice落库结果里摘最跟"下一步该做什么"相关的几段，首页给
+    一个更短的摘要，把"AI投研候选"那条路让给下面的"投研观察排行榜"
+    （回答"值不值得新建仓"，本来就是两个不同的问题，不用互相取代）。
+
+    未登录/没有持仓/持仓不足2支（advise_portfolio的最低门槛，1支算不出
+    集中度）分别给不同的空状态提示，不能笼统一句"暂无数据"糊弄过去。
+    """
+    st.markdown("**资产配置行动清单**")
+
+    if not st.session_state.get("logged_in"):
+        st.caption("登录并添加持仓后，AI 会结合最新行情/新闻判断这些持仓摆在一起是否合理、要不要对冲、要不要加减仓。")
+        if st.button("登录 / 注册", key="home_action_login"):
+            st.session_state["guest_mode"] = False
+            st.rerun()
+        return
+
+    _email = st.session_state.get("user_email")
+    positions = get_positions(_email) if _email else []
+    holding_items = [p for p in positions if (p.get("shares") or 0) > 0]
+
+    if not holding_items:
+        st.caption("还没有持仓——添加持仓后，AI 会结合最新行情/新闻判断资产配置是否合理、要不要对冲、要不要加减仓。")
+        if st.button("添加第一笔持仓", key="home_action_add"):
+            _show_add_position_dialog(_email)
+        return
+
+    if len(holding_items) < 2:
+        st.caption("目前只有 1 支持仓，配置类判断（集中度/对冲）至少要 2 支才有意义——去「持仓」页看这一支的单独判断，或再添加一支。")
+        return
+
+    advice = get_latest_portfolio_advice(_email)
+    if not advice:
+        st.caption("AI 组合分析还没生成过——去「持仓」页点击「立即重新分析」，1-3 分钟生成第一份。")
+        return
+
+    created = advice["created_at"][:19].replace("T", " ")
+    st.caption(f"更新于 {created}（UTC）· 完整分析、逐支跟踪与交易信号见「持仓」页")
+
+    try:
+        snapshot_symbols = {h["symbol"] for h in json.loads(advice.get("holdings_json") or "[]")}
+    except Exception:
+        snapshot_symbols = set()
+    current_symbols = {p["symbol"] for p in holding_items}
+    if snapshot_symbols and snapshot_symbols != current_symbols:
+        st.warning("持仓自这份分析生成后已发生变化（加仓/减仓/清仓），下面内容可能已过期——去「持仓」页重新分析。")
+
+    # 首页只摘"这个组合现在该怎么办"最相关的几段——总体结论、集中度是
+    # 不是问题、要不要对冲/保险、下一步操作。行业集中/宏观适配/逐支跟踪/
+    # 新增配置建议这几段留给"持仓"页的完整版，首页保持一个摘要该有的长度。
+    _parts = _parse_portfolio_text(advice["analysis_text"])
+    _home_sections = ("总体评估", "集中度风险", "对冲与保险", "操作建议")
+    if _parts:
+        for _name in _home_sections:
+            _body = _parts.get(_name)
+            if not _body:
+                continue
+            st.markdown(
+                f"<div style='font-size:var(--fs-xs);letter-spacing:var(--ls-label);color:var(--fa-muted);"
+                f"text-transform:none;margin:16px 0 6px'>{_name}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(_render_bold_as_red(_body), unsafe_allow_html=True)
+    else:
+        st.markdown(_render_bold_as_red(advice["analysis_text"]), unsafe_allow_html=True)
+
+
 def _render_advice_section():
-    """首页"AI投研候选"——跟其它模块（世界地图/今日资讯）唯一的本质区别：
-    这里明确给买入/卖出/持有/观望结论，其它模块刻意"只摆事实不下结论"。
-    这个差异必须对访客说清楚，不能让人以为整个网站的调性突然变了。
+    """首页"投研观察排行榜"——跟其它模块（世界地图/今日资讯）唯一的本质
+    区别：这里明确给买入/卖出/持有/观望结论，其它模块刻意"只摆事实不下
+    结论"。这个差异必须对访客说清楚，不能让人以为整个网站的调性突然变了。
+
+    这块回答的是"值不值得新建仓"（全市场量化初筛+AI判断），跟上面
+    _render_home_portfolio_action回答的"已有持仓该怎么办"是两个不同的
+    问题，不互相取代——2026-09-14之前首页最上面那段"今日可执行清单"就是
+    这块数据的另一种呈现，已经被换成持仓联动版，这里改成只保留排行榜。
 
     只读advisor.py（私人cron脚本，工作日17:30跑一次）写进advice表的最近一次
     结果，首页访问不现场重新跑——重新跑一次要几分钟、几十次AI调用，公开页面
     每次访问都触发一遍完全不现实，也没必要（这类基本面判断一天一次足够新）。
     """
-    # 标题跟着市场状态走。三个市场全收盘时叫"今日可执行清单"是错的——那份
-    # 清单对"今日"已经没有可执行性了，它只能是下一个交易日的待办。
-    # 休市是一个独立的状态，不是"数据还没来"：周六打开看到"今天还没有生成
-    # 盘前计划"，读起来像系统出了问题，其实是根本不该生成。
-    _all_closed = not any(_market_session(_m)["open"] for _m in ("HK", "A", "US"))
-    st.markdown("**下个交易日待办**" if _all_closed else "**今日可执行清单**")
-    st.caption("通过买入区间、股数、止损、目标和盈亏比全部校验的标的排在最前；没过闸门的也列出来，并写明差在哪。")
-
-    def _plan_row(item: dict, *, ready: bool) -> str:
-        # 买入区间经常只有单边：daily_plan 在均线已经高于赔率分界时会只给上限
-        # 不给下沿（"这个位置本来就不便宜"），两边都当必填就会把一个有效的
-        # "不高于X就能买"渲染成一个没信息量的破折号。
-        lo, hi = item.get("买入下沿"), item.get("买入上限")
-        _has_lo, _has_hi = isinstance(lo, (int, float)), isinstance(hi, (int, float))
-        if _has_lo and _has_hi:
-            range_text = f"买入区间 {lo:.2f}–{hi:.2f}"
-        elif _has_hi:
-            range_text = f"买入上限 {hi:.2f}"
-        elif _has_lo:
-            range_text = f"买入下沿 {lo:.2f}"
-        else:
-            range_text = "尚无有效买入区间"
-        bits = [range_text]
-        if item.get("建议股数"):
-            bits.append(f"买入 {int(item['建议股数'])} 股")
-        if isinstance(item.get("止损参考"), (int, float)):
-            bits.append(f"止损 {item['止损参考']:.2f}")
-        if isinstance(item.get("目标价"), (int, float)):
-            bits.append(f"目标 {item['目标价']:.2f}")
-        if isinstance(item.get("盈亏比"), (int, float)):
-            bits.append(f"盈亏比 {item['盈亏比']:.2f}:1")
-        if isinstance(item.get("现价"), (int, float)):
-            bits.insert(0, f"现价 {item['现价']:.2f}")
-        market = str(item.get("市场", "")).upper()
-        market_label = {"HK": "港股", "US": "美股", "A": "沪深"}.get(market, market or "—")
-        symbol = str(item.get("代码", ""))
-        name = _clean_name(item.get("名称", ""))
-        href = _detail_href(symbol, market, name, "首页") if symbol and market else "#"
-        action = "买入" if ready else "仅观察"
-        # 没过闸门的必须把原因摆出来。"不可执行原因"是 daily_plan 逐条算出来的
-        # 具体判据（尚未触发/不可追高/趋势仍向下/盈亏比不足…），不是一句笼统的
-        # "不达标"——用户要的正是这个，好自己判断是"差一点"还是"差很远"。
-        reason = item.get("不可执行原因") if not ready else None
-        score = item.get("评分")
-        # 与下方投研榜使用同一阅读顺序：标的/市场在左，评分和结论在右；
-        # 第二行给现价与交易参数，最后一行才解释为什么可执行或被拦截。
-        # 这样两块虽服务不同任务，视觉上仍是一套克制的研究清单。
-        score_html = (
-            f"<span style='font-size:var(--fs-md);font-weight:600;letter-spacing:var(--ls-tight);"
-            f"font-variant-numeric:tabular-nums;color:var(--fa-text)'>{_esc(score)}</span>"
-            if score is not None else ""
-        )
-        verdict_color = OK_COLOR if ready else "var(--fa-faint)"
-        return (
-            f"<a class='pos-card-link' href='{href}' target='_self' "
-            f"style='display:block;padding:11px 0;border-bottom:1px solid var(--fa-border)'>"
-            f"<div style='overflow:hidden'><span style='float:right;white-space:nowrap'>{score_html}"
-            f"<span style='color:{verdict_color};margin-left:10px;font-size:var(--fs-xs);"
-            f"font-weight:600;letter-spacing:var(--ls-label)'>{action}</span></span>"
-            f"<span style='font-weight:600'>{_esc(name)}"
-            f"<span style='font-weight:400;color:var(--fa-faint);font-size:var(--fs-xs)'> · {_esc(market_label)}</span>"
-            f"</span></div>"
-            f"<div style='font-size:var(--fs-xs);color:var(--fa-faint);margin-top:3px'>"
-            f"{_esc(symbol)} · {' · '.join(_esc(bit) for bit in bits)}</div>"
-            + (f"<div style='font-size:var(--fs-xs);color:var(--fa-faint);margin-top:4px'>{_esc(reason)}</div>"
-               if reason else "")
-            + "</a>"
-        )
-
-    _order_ready = [item for _market in ("HK", "US") for item in _load_order_ready_items(_market)]
-    _watch_only = [item for _market in ("HK", "US") for item in _load_watch_only_items(_market)]
-    if not _order_ready and not _watch_only:
-        if _all_closed:
-            _nx = _next_open_local("HK")
-            st.caption(
-                "三个市场都已收盘，本轮没有待执行的清单。"
-                + (f"下一份盘前计划在 {_nx:%m-%d} 开盘前生成。" if _nx else "")
-            )
-        else:
-            st.caption("今天还没有生成盘前计划（港股09:00前、美股21:00前各跑一次）。")
-    else:
-        if _order_ready:
-            for item in _order_ready:
-                st.markdown(_plan_row(item, ready=True), unsafe_allow_html=True)
-        else:
-            st.caption("今天没有标的通过全部下单校验——下面是当天打过分、但被闸门拦下的候选，供参考，不是下单指令。")
-        # 没过闸门的按评分降序，最多列8条：这块是"参考"，不是又一张长列表。
-        for item in sorted(_watch_only, key=lambda x: -(x.get("评分") or 0))[:8]:
-            st.markdown(_plan_row(item, ready=False), unsafe_allow_html=True)
-
     st.markdown("**投研观察排行榜**")
     # 2026-09-12（前端审计"排行榜说买入、自选里同一只标观望"）：补一句说明
     # 这里的结论回答的是哪个问题。这条链路(source='screen')问的是"现在值不
     # 值得新建仓"，自选/持仓那边(source='position')问的是"已有仓位要不要继续
     # 拿"，同一支票两个答案可以同时成立，不是数据打架。详见自选行展开区里
     # 对应的那段说明。
-    # 这句里引用的清单名要跟上面那块的标题一致——上面收盘时叫"下个交易日
-    # 待办"，这里还写"今日可执行清单"，读者会去找一个页面上不存在的板块。
+    #
+    # 2026-09-14：这句原来还会引用上方"今日可执行清单/下个交易日待办"作为
+    # 下单依据——那块现在已经是持仓联动的"资产配置行动清单"，不再是可以
+    # 直接对照下单的执行清单，这句里对应的引用一并去掉，只保留"排行榜是
+    # 研究排序、不是下单指令"这个核心提醒。
     st.caption(
-        f"研究排序，不是下单指令——实际操作以上方「{'下个交易日待办' if _all_closed else '今日可执行清单'}」为准。"
-        "这里回答「值不值得新建仓」，持仓页的标签回答「已持有的要不要继续拿」，两者不一致正常。"
+        "研究排序，不是下单指令，回答的是「值不值得新建仓」——"
+        "持仓页的标签回答「已持有的要不要继续拿」，两者不一致正常。"
     )
     # 卡片可点击跳转详情页——复用持仓列表卡片验证过的方案（见
     # _render_position_rows 的踩坑记录：JS/CSS猜DOM结构点不动，最后用最朴素
@@ -5733,9 +5729,21 @@ def _render_home_page():
     # 清单。用户发现后原话："你把首页的世界地图放哪里了放回来"。这次是真的
     # 按上面那条注释描述的布局做：宏观横栏+地图叠在最上面（"今天全球什么
     # 情况"），清单紧跟其后，不再是"清单在最前、地图消失"。
+    #
+    # 2026-09-14（同一天，第二次改动）：地图之后紧跟的那份清单本身也换了
+    # 维度——原来是全市场量化初筛+AI打分选股，跟用户具体持有什么无关。
+    # 用户原话："可执行清单那边我们换个维度就不用AI打分了...要跟我们持仓
+    # 联动...没有持仓就说清闲添加持仓...根据持仓的股票可以考虑资产配置是否
+    # 合理可以买什么对冲买什么保险买什么...有什么东西要卖出"。改成
+    # _render_home_portfolio_action()：有持仓就摘AI组合分析里"该怎么办"的
+    # 结论，没持仓就引导去添加。原来那份全市场排行榜没有删，挪到
+    # _render_advice_section()里单独展示，回答的是不同的问题（"值不值得
+    # 新建仓" vs "已有持仓该怎么办"），两者互补不冲突。
     _render_macro_strip()
     _render_home_map()
 
+    st.divider()
+    _render_home_portfolio_action()
     st.divider()
     _render_advice_section()
     _render_macro_briefs()
