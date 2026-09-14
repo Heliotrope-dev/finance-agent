@@ -704,6 +704,15 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
     box-shadow: none !important;
 }
 [class*="st-key-watch_controls"] [data-baseweb="select"] > div { min-height: 34px !important; }
+/* Streamlit/BaseWeb 在不同版本会把填充色放在 select 的外层包装节点；
+   对自选这一个容器逐层清掉，弹出的选项菜单不在这个容器内，仍保持可读。 */
+[class*="st-key-watch_controls"] [data-testid="stSelectbox"] > div,
+[class*="st-key-watch_controls"] [data-testid="stSelectbox"] [data-baseweb="select"],
+[class*="st-key-watch_controls"] [data-testid="stSelectbox"] [data-baseweb="select"] > div {
+    background: transparent !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
+}
 
 /* 行内折叠框：去掉边框和底色，变成一行安静的可展开文字。
    六处（持仓行 / 推荐股行 / 宏观条目 / AI决策记录 / 我的页关于 / 侧栏）
