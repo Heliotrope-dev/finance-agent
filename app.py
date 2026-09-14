@@ -395,6 +395,61 @@ _SLUG_BY_SECTION = {
 }
 _SECTION_BY_SLUG = {v: k for k, v in _SLUG_BY_SECTION.items()}
 
+# 详情页不是一个孤立的目的地：返回时应恢复用户刚才所在的分区和筛选，而不是
+# 只回一个默认 tab。把少量、稳定的浏览状态放进 URL，既能跨整页链接保留，也
+# 能让刷新/复制详情地址后的「返回」保持可预期。滚动位置属于浏览器历史状态，
+# 不把它伪装成服务端状态；正常返回仍由浏览器保留，站内链接则至少完整恢复视图。
+_DETAIL_RETURN_KEYS = {
+    "行情": (("_market_overview_pick", "return_market"),),
+    "自选": (
+        ("_watch_market_filter", "return_watch_market"),
+        ("_watch_sort_mode", "return_watch_sort"),
+        ("_watch_density", "return_watch_density"),
+    ),
+}
+
+
+def _detail_return_context(section: str | None = None) -> dict[str, str]:
+    """Encode the current browse context for a detail-page return route."""
+    section = section or st.session_state.get("_active_section", "行情")
+    params = {"section": section}
+    for state_key, param_key in _DETAIL_RETURN_KEYS.get(section, ()):
+        value = st.session_state.get(state_key)
+        if value is not None:
+            params[param_key] = str(value)
+    return params
+
+
+def _restore_detail_return_context() -> None:
+    """Restore return state before Streamlit creates the related widgets."""
+    for state_key, param_key in sum((list(v) for v in _DETAIL_RETURN_KEYS.values()), []):
+        value = st.query_params.get(param_key)
+        if value:
+            st.session_state[state_key] = value
+
+
+def _detail_href(symbol: str, market: str, name: str, section: str | None = None) -> str:
+    """Build one canonical detail URL for every list/card entry point."""
+    params = {
+        "symbol": symbol,
+        "market": market,
+        "name": name,
+        **_detail_return_context(section),
+    }
+    return "?" + urllib.parse.urlencode(params) + _auth_qs()
+
+
+def _return_from_stock_detail() -> None:
+    """Leave a stock detail route without losing the originating view."""
+    section = st.session_state.get("_detail_return_section", "行情")
+    for key in ("_detail_symbol", "_detail_market", "_detail_name", "_detail_module"):
+        st.session_state.pop(key, None)
+    st.session_state["_active_section"] = section
+    st.query_params.clear()
+    st.query_params.update({"tab": _SLUG_BY_SECTION.get(section, "market"),
+                            **_detail_return_context(section)})
+    st.rerun()
+
 # 个股详情页有稳定的可分享地址。旧的 open_* 是一次性跳转参数，第一次进入
 # 后会改写为 symbol/market/name/section 四个规范参数；后者不清理，刷新或复制
 # 地址仍能回到同一只标的。认证令牌不放进规范地址，登录态由七天 Cookie 维持。
@@ -419,6 +474,7 @@ if _route_symbol:
         st.session_state["_active_section"] = _from
     if _from:
         st.session_state["_detail_return_section"] = st.session_state.get("_active_section", "持仓")
+        _restore_detail_return_context()
     if _route_is_legacy:
         # 旧链接带 _auth 时也只使用一次；规范 URL 不泄露可登录令牌。
         st.query_params.clear()
@@ -718,7 +774,8 @@ def _open_detail_route(symbol: str, market: str, name: str, section: str = "我�
     st.session_state["_detail_return_section"] = section
     st.session_state["_active_section"] = section
     st.query_params.clear()
-    st.query_params.update({"symbol": symbol, "market": market, "name": name, "section": section})
+    st.query_params.update({"symbol": symbol, "market": market, "name": name,
+                            **_detail_return_context(section)})
     st.rerun()
 
 
@@ -1194,6 +1251,8 @@ def _render_overall_summary(raw_text: str):
     """
     import re
     score = extract_score(raw_text)
+    # 研究文本不是公式输入。Streamlit 会把一对 $ 当 LaTex，金融金额（HK$…）
+    # 因此会被吞掉货币符号并产生斜体/异常间距；统一转义后仍保留普通 Markdown。
     display_text = re.sub(r"\[综合评分[：:]\s*\d{1,3}\]", "", raw_text).strip()
 
     if score is not None:
@@ -1220,7 +1279,7 @@ def _render_overall_summary(raw_text: str):
             + "</div>",
             unsafe_allow_html=True,
         )
-    st.markdown(display_text)
+    st.markdown(_clean_ai_markdown(display_text).replace("$", r"\$"))
 
 
 def _display_name(symbol: str, market: str, spot: dict) -> str:
@@ -1677,23 +1736,25 @@ def _render_key_metrics(spot: dict, market: str):
     沪深走的是腾讯那条路径（不是Futu），拿不到估值类字段；缺的项直接不显示，
     不用"—"占位撑出一堆空格子——那会让人以为是加载失败。
     """
+    is_crypto = market == "CC"
     rows: list[tuple[str, str]] = [
-        ("最高", f"{spot['最高']:.2f}" if spot.get("最高") else None),
-        ("最低", f"{spot['最低']:.2f}" if spot.get("最低") else None),
-        ("今开", f"{spot['今开']:.2f}" if spot.get("今开") else None),
-        ("昨收", f"{spot['昨收']:.2f}" if spot.get("昨收") else None),
-        ("成交量", _fmt_big(spot.get("成交量"), "股") if spot.get("成交量") else None),
+        ("最高", _fmt_price(spot.get("最高")) if spot.get("最高") else None),
+        ("最低", _fmt_price(spot.get("最低")) if spot.get("最低") else None),
+        ("今开", _fmt_price(spot.get("今开")) if spot.get("今开") else None),
+        ("昨收", _fmt_price(spot.get("昨收")) if spot.get("昨收") else None),
+        # 加密资产的成交量不是「股」；数据源没有可靠的计价单位时宁可不展示。
+        ("成交量", _fmt_big(spot.get("成交量"), "股") if spot.get("成交量") and not is_crypto else None),
         ("成交额", _fmt_big(spot.get("成交额")) if spot.get("成交额") else None),
-        ("换手率", f"{spot['换手率']:.2f}%" if spot.get("换手率") is not None else None),
+        ("换手率", f"{spot['换手率']:.2f}%" if spot.get("换手率") is not None and not is_crypto else None),
         ("振幅", f"{spot['振幅']:.2f}%" if spot.get("振幅") is not None else None),
         ("量比", f"{spot['量比']:.2f}" if spot.get("量比") is not None else None),
         ("总市值", _fmt_big(spot.get("总市值")) if spot.get("总市值") else None),
         # PE 为负说明公司在亏损，此时"市盈率"这个比值没有估值含义（越亏损
         # 数值反而越接近0），直接写"亏损"比印一个 -12.3 更诚实。
         ("PE(TTM)", ("亏损" if spot["PE_TTM"] < 0 else f"{spot['PE_TTM']:.2f}")
-                    if spot.get("PE_TTM") is not None else None),
-        ("PB", f"{spot['PB']:.2f}" if spot.get("PB") is not None else None),
-        ("股息率", f"{spot['股息率TTM']:.2f}%" if spot.get("股息率TTM") else None),
+                    if spot.get("PE_TTM") is not None and not is_crypto else None),
+        ("PB", f"{spot['PB']:.2f}" if spot.get("PB") is not None and not is_crypto else None),
+        ("股息率", f"{spot['股息率TTM']:.2f}%" if spot.get("股息率TTM") and not is_crypto else None),
     ]
     cells = "".join(
         f"<div><div style='font-size:var(--fs-xs);color:var(--fa-faint)'>{_esc(k)}</div>"
@@ -1759,12 +1820,12 @@ def _render_price_header(symbol: str, market: str):
 
     st.markdown(
         f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:2px'>"
-        + f"<span style='font-size:var(--fs-2xl);font-weight:600;color:{color}'>{spot['最新价']:.2f}</span>&nbsp;&nbsp;"
+        + f"<span style='font-size:var(--fs-2xl);font-weight:600;color:{color}'>{'US$' if market == 'CC' else ''}{_fmt_price(spot['最新价'])}</span>&nbsp;&nbsp;"
         + f"<span style='font-size:var(--fs-lg);color:{color}'>{change:+.2f} ({change_pct:+.2f}%)</span>"
         + "</div>",
         unsafe_allow_html=True,
     )
-    _src = "Futu 报价" if spot.get("数据源") == "Futu实时" else "延迟报价"
+    _src = "加密货币报价" if market == "CC" else ("Futu 实时报价" if spot.get("数据源") == "Futu实时" else "延迟报价")
     st.caption(f"{_src} · {_quote_market_status(spot, market)}")
     _render_key_metrics(spot, market)
 
@@ -1827,12 +1888,7 @@ def _render_stock_movers_cards(df, market: str):
     for _, row in df.iterrows():
         mv_symbol = str(row["代码"])
         mv_color = UP_COLOR if row["涨跌幅"] >= 0 else DOWN_COLOR
-        href = (
-            f"?open_symbol={urllib.parse.quote(mv_symbol)}"
-            f"&open_market={urllib.parse.quote(market)}"
-            f"&open_name={urllib.parse.quote(str(row['名称']))}"
-            f"{_auth_qs()}"
-        )
+        href = _detail_href(mv_symbol, market, str(row["名称"]))
         flash_key = f"_mv_last_price_{mv_symbol}_{market}"
         prev = st.session_state.get(flash_key)
         st.session_state[flash_key] = row["最新价"]
@@ -2262,12 +2318,8 @@ def _render_market_extras(market: str):
             _c = UP_COLOR if (_cp or 0) > 0 else (DOWN_COLOR if (_cp or 0) < 0 else "var(--fa-muted)")
             _price = f"{it['price']:,.2f}" if it.get("price") is not None else ""
             _chg = f"{_cp:+.2f}%" if _cp is not None else ""
-            _href = (
-                f"?open_symbol={urllib.parse.quote(it['symbol'])}"
-                f"&open_market={urllib.parse.quote(it.get('market') or market)}"
-                f"&open_name={urllib.parse.quote(it.get('name') or it['symbol'])}"
-                f"&open_from={urllib.parse.quote('行情')}{_auth_qs()}"
-            )
+            _href = _detail_href(it["symbol"], it.get("market") or market,
+                                 it.get("name") or it["symbol"], "行情")
             st.markdown(
                 f"<a class='pos-card-link' href='{_href}' target='_self'>"
                 f"<span style='display:flex;align-items:baseline;padding:8px 2px;"
@@ -3782,12 +3834,8 @@ def _render_advice_section():
             else:
                 target_text = parts.get("目标价")
             score = row.get("score")
-            href = (
-                f"?open_symbol={urllib.parse.quote(row.get('symbol',''))}"
-                f"&open_market={urllib.parse.quote(market_key)}"
-                f"&open_name={urllib.parse.quote(row.get('name',''))}"
-                f"{_auth_qs()}"
-            )
+            href = _detail_href(row.get("symbol", ""), market_key,
+                                row.get("name", ""), "首页")
             # 跟持仓/自选列表同一个处理：不再用 border=True 的卡片。原来每一条是
             # 一张带边框的卡片，卡片里又套一个带边框的"基本面/技术面/价格位置"
             # 折叠框，五条就是五组方框套方框。改成发丝线分隔的平铺条目。
@@ -4673,7 +4721,7 @@ def _render_ipo_calculator(items: list[dict]):
         return
 
     with st.expander("打新收益测算器"):
-        st.caption("算的是长期重复打新的平均结果；单次要么中0手要么中1手，实际会大幅跳变。")
+        st.caption("这是按认购手数与获配概率计算的长期期望值；实际获配是离散结果，可能为 0 手或多手。")
         c1, c2, c3 = st.columns(3)
         with c1:
             lot_price = st.number_input("每手入场费（港币）", min_value=0.0,
@@ -4701,6 +4749,7 @@ def _render_ipo_calculator(items: list[dict]):
         )
         if not res:
             return
+        expected_lots = res["allotted_amount"] / lot_price if lot_price else 0
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("认购总额", f"HK${res['subscribe_amount']:,.0f}")
         m2.metric("自有资金", f"HK${res['own_capital']:,.0f}")
@@ -4714,7 +4763,7 @@ def _render_ipo_calculator(items: list[dict]):
         # 截图里是"借来的 HK22,500计的…净亏 𝐻𝐾122"。
         # st.metric 不走 markdown，所以上面那四个 f"HK${...}" 不用转义。
         st.caption(
-            f"预期中签 HK\\${res['allotted_amount']:,.0f}，"
+            f"预期获配 {expected_lots:.2f} 手（HK\\${res['allotted_amount']:,.0f}），"
             f"首日需涨 **{res.get('breakeven_move_pct', 0):.2f}%** 才够覆盖利息和手续费。"
         )
         if margin_pct > 0:
@@ -5048,7 +5097,11 @@ def _render_ipo_perf_block(perf: dict, show_calculator: bool = True, key_suffix:
                 st.markdown(
                     "<div style='font-size:var(--fs-xs);color:var(--fa-faint);margin:14px 0 6px'>"
                     "逐只（按上市日倒序）</div>", unsafe_allow_html=True)
-                for it in _items[:40]:
+                _visible_key = f"_ipo_items_visible_{key_suffix}"
+                visible_count = st.session_state.get(_visible_key, 40)
+                shown_items = _items[:visible_count]
+                st.caption(f"已显示 {len(shown_items)}/{len(_items)} 只")
+                for it in shown_items:
                     _c = UP_COLOR if it["first_day_pct"] > 0 else DOWN_COLOR
                     _op = (f"开盘 {it['open_pct']:+.0f}%" if it.get("open_pct") is not None else "")
                     st.markdown(
@@ -5065,6 +5118,10 @@ def _render_ipo_perf_block(perf: dict, show_calculator: bool = True, key_suffix:
                         f"<span style='color:{_c};font-size:var(--fs-md);min-width:80px;text-align:right'>"
                         f"{it['first_day_pct']:+.1f}%</span></div>",
                         unsafe_allow_html=True)
+                if len(shown_items) < len(_items):
+                    if st.button(f"加载剩余 {len(_items) - len(shown_items)} 只", key=f"_ipo_more_{key_suffix}"):
+                        st.session_state[_visible_key] = len(_items)
+                        st.rerun()
 
 
 @st.fragment
@@ -6018,17 +6075,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     # 真实来源。价格的"活着的感觉"已经由下面的fragment用更轻量的方式做到了，
     # 删掉这个多余的整页定时rerun。
     if st.button("", icon=":material/arrow_back:", key=f"detail_back_{symbol}_{market}", type="tertiary", help="返回"):
-        for k in ("_detail_symbol", "_detail_market", "_detail_name", "_detail_module"):
-            st.session_state.pop(k, None)
-        for key in ("symbol", "market", "name", "section"):
-            try:
-                del st.query_params[key]
-            except KeyError:
-                pass
-        # 回到进来时那个分区。以前这里写死"持仓"，从自选点进来的用户按返回会
-        # 落在一个自己没在看的分区上。
-        st.session_state["_active_section"] = st.session_state.get("_detail_return_section", "持仓")
-        st.rerun()
+        _return_from_stock_detail()
 
     # 详情页页眉。跟首页一样去掉了通栏红底——标题本身用字号和字重就能站住，
     # 满屏的品牌红反而会把下面真正要看的涨跌红压掉。底部一条细线做分隔。
@@ -6078,10 +6125,24 @@ def _render_stock_detail(symbol: str, market: str, name: str):
 
     st.divider()
     period_labels = ["分时K（今日）", "日K", "周K", "月K"]
+    # 分时不可用时不要让控件继续假装选中「分时K」而画一张日K。先探测，再把
+    # 选择状态切到真正会展示的周期；这比在图表下方塞一句补救文案更不误导。
+    _intraday_probe = None
+    try:
+        _intraday_probe = (get_stock_intraday_a(symbol) if market == "A"
+                           else get_stock_intraday_futu(symbol, market))
+    except Exception:
+        _intraday_probe = pd.DataFrame()
+    _intraday_missing = _intraday_probe is None or _intraday_probe.empty
+    _auto_switched_to_daily = _intraday_missing and st.session_state.get("_detail_kline_period", "分时K（今日）") == "分时K（今日）"
+    if _auto_switched_to_daily:
+        st.session_state["_detail_kline_period"] = "日K"
     period_label = st.radio("K线周期", period_labels, index=0, horizontal=True, key="_detail_kline_period")
+    if _auto_switched_to_daily:
+        st.caption("分时数据暂不可用，已切换至日K。")
 
     if market == "A" and period_label == "分时K（今日）":
-        intraday = get_stock_intraday_a(symbol)
+        intraday = _intraday_probe
         if intraday.empty:
             st.caption("今天的分时数据暂时取不到，展示日K替代。")
             if hist is not None and not hist.empty:
@@ -6103,7 +6164,7 @@ def _render_stock_detail(symbol: str, market: str, name: str):
         if chart_hist is not None and not chart_hist.empty:
             st.plotly_chart(build_candlestick(chart_hist), use_container_width=True, config=_PLOTLY_CONFIG)
     elif period_label == "分时K（今日）":
-        intraday = get_stock_intraday_futu(symbol, market)
+        intraday = _intraday_probe
         if intraday.empty:
             st.caption("分时数据需要本地 Futu OpenD 连接、且当前有实时推送，暂时展示日K替代。")
             if hist is not None and not hist.empty:
@@ -6233,12 +6294,22 @@ def _render_index_detail(name: str, code: str, market: str):
 
     _render_index_price_header(name, market)
 
+    base_price = idx_snap.get("最新") - idx_snap.get("涨跌") if idx_snap else None
     st.divider()
+    try:
+        _idx_intraday_probe = (get_index_intraday_a(code) if market == "A"
+                               else get_index_intraday_futu(name, market, base_price))
+    except Exception:
+        _idx_intraday_probe = pd.DataFrame()
+    _idx_intraday_missing = _idx_intraday_probe is None or _idx_intraday_probe.empty
+    _idx_auto_switched_to_daily = _idx_intraday_missing and st.session_state.get("_idx_kline_period", "分时K（今日）") == "分时K（今日）"
+    if _idx_auto_switched_to_daily:
+        st.session_state["_idx_kline_period"] = "日K"
     period_label = st.radio(
         "K线周期", ["分时K（今日）", "日K", "周K", "月K"], index=0, horizontal=True, key="_idx_kline_period",
     )
-
-    base_price = idx_snap.get("最新") - idx_snap.get("涨跌") if idx_snap else None
+    if _idx_auto_switched_to_daily:
+        st.caption("分时数据暂不可用，已切换至日K。")
 
     # 2026-09-11修（P0，前端审计"指数K线空白"）：实测不是取不到数据——沪深
     # 指数分时/日K走的是BaoStock/新浪这两个接口（个股K线走本地Futu，几乎
@@ -6250,7 +6321,7 @@ def _render_index_detail(name: str, code: str, market: str):
     # 而不是"卡死了"。
     with st.spinner("加载K线数据..."):
         if period_label == "分时K（今日）":
-            intraday = get_index_intraday_a(code) if market == "A" else get_index_intraday_futu(name, market, base_price)
+            intraday = _idx_intraday_probe
             if intraday.empty:
                 st.caption("今天的分时数据暂时取不到，展示日K替代。")
                 try:
@@ -8703,11 +8774,12 @@ else:
                         st.markdown(
                             "<div style='text-align:center;color:var(--fa-muted);padding:20px 0 10px'>"
                             "还没有持仓<br>"
-                            "<span style='font-size:var(--fs-sm)'>点右上角的 + 按钮添加；填写股数或金额后才算持仓，成交均价可选填——"
-                            "股数和金额都留空会加进「自选」分区</span>"
+                            "<span style='font-size:var(--fs-sm)'>添加第一笔持仓后，即可查看盈亏、风险与组合分析。</span>"
                             "</div>",
                             unsafe_allow_html=True,
                         )
+                        if st.button("添加第一笔持仓", key="pos_empty_add", type="primary", use_container_width=True):
+                            _show_add_position_dialog(_email)
 
                 if holding_items:
                     # 环形图 | 持仓列表，左右各半——环形图不用@st.fragment(run_every=3)
