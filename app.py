@@ -1060,31 +1060,50 @@ def _render_market_clock():
     个股详情页早就做对了这件事（"Futu 报价 · 已收盘 · 香港 09-11 16:07"），
     这里是把那个模式抄到全站。
 
-    刻意只有一行、12px、次要色：它是背景信息，不是内容。做成 fragment 是因为
-    它每分钟要重算一次状态，而整页其余部分没理由跟着重跑。
+    做成 fragment 是因为它每分钟要重算一次状态，而整页其余部分没理由跟着重跑。
+
+    2026-09-15改版：用户反馈原来那版"一行纯灰字、点号分隔"看着粗糙——已收盘/
+    交易中挤在一起全是同一个颜色，得逐字读才知道哪个市场开着。改成一张浅色
+    卡片、每个市场的开盘状态按红/绿区分（已收盘/盘前/午间休市/周末休市这些
+    "不可交易"的状态统一用红，交易中用绿——跟这个项目"红涨绿跌"的方向配色
+    是两套独立语义，这里借用的是OK/BAD_COLOR那组"正常/不可用"语义，不是
+    UP/DOWN_COLOR，别混用），一眼扫过去就知道哪个市场现在能下单。
+    另外补一条"北京时间"整点——原来三个市场各自的时间是交易所本地时间
+    （美股显示的是美东时间），没有一处直接写"这是北京时间几点"，用户在国内
+    看这条栏目其实最先想确认的是"我这儿现在几点"，不该要求读者自己心算时差。
     """
-    _bits = []
+    _bj_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    _cells = [
+        f"<span style='color:var(--fa-text-2);font-weight:600'>北京时间 {_bj_now:%H:%M}</span>"
+    ]
     for _mkt, _label in (("HK", "港股"), ("A", "沪深"), ("US", "美股")):
         _s = _market_session(_mkt)
         _t = _s["local"]
-        if _s["open"]:
-            _bits.append(f"{_label} 交易中 {_t:%H:%M}")
-        else:
-            _bits.append(f"{_label} {_s['state']}")
+        _state_color = OK_COLOR if _s["open"] else BAD_COLOR
+        _state_text = f"交易中 {_t:%H:%M}" if _s["open"] else _s["state"]
+        _cells.append(
+            f"<span style='color:var(--fa-muted)'>{_esc(_label)} </span>"
+            f"<span style='color:{_state_color};font-weight:600'>{_esc(_state_text)}</span>"
+        )
     _all_closed = not any(_market_session(m)["open"] for m in ("HK", "A", "US"))
     if _all_closed:
         # 下一次开盘取三个市场里最早的那个，并标出是哪个市场——只写一个时间
-        # 而不说是谁的，读者没法判断它跟自己关心的市场有没有关系。
+        # 而不说是谁的，读者没法判断它跟自己关心的市场有没有关系。这条是补充
+        # 信息，不属于开盘/收盘二元状态，保持中性色，不套红绿。
         _nexts = [(m, _next_open_local(m)) for m in ("HK", "A", "US")]
         _nexts = [(m, d) for m, d in _nexts if d]
         if _nexts:
             _m, _d = min(_nexts, key=lambda x: x[1].astimezone(timezone.utc))
             _name = {"HK": "港股", "A": "沪深", "US": "美股"}[_m]
-            _bits.append(f"下次开盘 {_name} {_d:%m-%d %H:%M}")
+            _cells.append(
+                f"<span style='color:var(--fa-faint)'>下次开盘 {_esc(_name)} {_d:%m-%d %H:%M}</span>"
+            )
     st.markdown(
-        "<div style='font-size:var(--fs-xs);color:var(--fa-muted);"
-        "padding:2px 2px 10px;letter-spacing:var(--ls-label)'>"
-        + _esc(" · ".join(_bits)) + "</div>",
+        "<div style='display:flex;flex-wrap:wrap;gap:14px;align-items:center;"
+        "font-size:var(--fs-sm);letter-spacing:var(--ls-label);"
+        "background:var(--bg-card);border:1px solid var(--fa-border);"
+        "border-radius:var(--fa-radius);padding:8px 12px;margin-bottom:10px'>"
+        + "".join(_cells) + "</div>",
         unsafe_allow_html=True,
     )
 
