@@ -8135,9 +8135,11 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                     # 结论已并到名称行；理由留给详情页，不再额外占一行。
                     continue
                 with st.expander(_label):
+                    # 2026-09-14用户反馈实心背景色块"很突兀"（对照的是排行榜
+                    # 看多/看空那种纯文字换色的克制风格）——改成跟看多/看空
+                    # 同一套处理，只换字体颜色，不填背景色块。
                     st.markdown(
-                        f"<span style='background:{adv_color};color:#fff;border-radius:2px;padding:1px 8px;"
-                        f"font-size:var(--fs-sm);font-weight:600'>{_esc(adv_action)}</span> "
+                        f"<span style='color:{adv_color};font-size:var(--fs-sm);font-weight:600'>{_esc(adv_action)}</span> "
                         f"<span style='font-size:var(--fs-xs);color:var(--fa-muted)'>置信度：{_esc(adv_parts.get('置信度','—'))}</span>",
                         unsafe_allow_html=True,
                     )
