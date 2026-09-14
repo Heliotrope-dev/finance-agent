@@ -1197,7 +1197,16 @@ def _sim_run_reason(reasoning_text: str, limit: int = 46) -> str:
     if m:
         t = t[: m.start()]
     t = t.strip()
-    return t if len(t) <= limit else t[: limit - 1] + "…"
+    if len(t) <= limit:
+        return t
+    # 硬切到第 limit 个字符经常正好落在数字或单位中间（实测切出过
+    # "HK76,55…"这种断在金额中间的结果）。优先找 limit 以内最后一个逗号
+    # 断句，找不到才退回硬切——两种情况都保留原有的截断上限，不会变长。
+    head = t[:limit]
+    comma_at = max(head.rfind("，"), head.rfind(","))
+    if comma_at >= limit // 2:
+        return t[:comma_at] + "…"
+    return t[: limit - 1] + "…"
 
 
 def _chat_bubble(role: str, text: str) -> str:
@@ -7115,7 +7124,8 @@ def _render_ai_sim_dashboard():
             # _latest_reason 是模型自己写的复盘文字，常带 HK$ 这类金额——
             # 一对没转义的 $ 会被 markdown 当成 LaTeX 定界符吃掉，中间的字
             # 渲染成数学斜体、内容看着断在数字中间（真实复现过）。
-            st.caption(f"最近一次完整决策 · {_latest_when} · {_latest_reason.replace('$', r'\$')}")
+            _latest_reason_display = _latest_reason.replace("$", "\\$")
+            st.caption(f"最近一次完整决策 · {_latest_when} · {_latest_reason_display}")
 
     # 走势图数据源用sim_equity_snapshots(每几分钟一次，跟AI决策频率解耦)，
     # 不再用sim_agent_runs的决策快照(15分钟一次)——用户反馈"遇到低波动
