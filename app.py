@@ -8957,7 +8957,7 @@ else:
                     _present = {it.get("market", "A") for it in watch_items}
                     _opts = ["全部"] + [k for k, v in _mkt_labels.items() if v in _present]
                     with st.container(key="watch_controls"):
-                        _f_col, _s_col, _d_col = st.columns([1.35, 2.15, 0.8], vertical_alignment="center")
+                        _f_col, _s_col = st.columns([1.35, 2.95], vertical_alignment="center")
                         with _f_col:
                             _mkt_pick = st.radio(
                                 "市场", _opts, horizontal=True, label_visibility="collapsed",
@@ -8968,11 +8968,9 @@ else:
                                 "排序", ["添加时间", "涨幅", "跌幅", "成交额", "AI评分"],
                                 horizontal=True, label_visibility="collapsed", key="_watch_sort_mode",
                             )
-                        with _d_col:
-                            _density = st.radio(
-                                "密度", ["紧凑", "舒适"], horizontal=True,
-                                label_visibility="collapsed", key="_watch_density",
-                            )
+                        # 自选固定舒适密度：这是观察清单的默认阅读节奏，不再给
+                        # 用户一个会反复改变整页行高、却没有明确任务价值的切换项。
+                        _density = "舒适"
                     _want = _mkt_labels.get(_mkt_pick)
                     _shown = [it for it in watch_items if _want is None or it.get("market", "A") == _want]
                     if not _shown:
