@@ -7716,7 +7716,7 @@ def _render_portfolio_advice(email: str, positions: list):
 
 @st.fragment(run_every=10)
 def _render_position_rows(position_items: list, _email: str, sort_mode: str = "添加时间",
-                          compact: bool = False):
+                          compact: bool = False, allow_remove: bool = True):
     """持仓列表本体单独做成 fragment，价格/涨跌幅每10秒自己刷新（2026-09-02
     从3秒调宽到10秒，理由见_render_positions_today_pnl同一处注释——批量化
     之后单次调用变1次了，但3秒刷新叠加另一个同页fragment，还是有撞富途
@@ -7744,7 +7744,8 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
     # 另外拿flex div模仿列宽——之前拿固定36px去凑删除键那一列的宽度，
     # 在不同屏幕宽度下跟实际的 st.columns([9,1]) 比例对不上，表头和数据
     # 看着就没对齐。
-    _head_static_col, _head_dynamic_col, _head_del_col = st.columns([5.24, 3.76, 1])
+    _head_columns = st.columns([5.24, 3.76, 1] if allow_remove else [5.24, 3.76])
+    _head_static_col, _head_dynamic_col = _head_columns[:2]
     _head_static_col.markdown(
         "<div class='fa-flex-row' style='display:flex;align-items:center;padding:4px 8px;font-size:var(--fs-xs);color:var(--fa-muted)'>"
         "<div style='flex:2.1'>名称/代码</div>"
@@ -7999,6 +8000,18 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
             price_html = "<div style='text-align:right;color:var(--fa-muted)'>—</div>"
             badge_html = ""
 
+        adv = _advice_map.get(symbol)
+        # 自选紧凑模式把 AI 结论并入名称行；第二行“AI：持有（今天）”会让
+        # 观察清单的留白大过信息本身。
+        adv_inline = ""
+        if compact and adv:
+            adv_action = adv.get("action", "观望")
+            adv_color = _ADVICE_ACTION_COLOR.get(adv_action, NEUTRAL_COLOR)
+            adv_inline = (
+                f"<span style='font-size:var(--fs-xs);font-weight:500;color:{adv_color};"
+                f"margin-left:9px'>AI {_esc(adv_action)}</span>"
+            )
+
         # 行容器不再用 border=True。原来每一行是一张带边框的卡片，卡片里又套
         # 一个带边框的"AI持仓判断"折叠框——二十来行就是二十来个"方框套方框"，
         # 用户反馈的"看上去很冗杂"就是这么来的。改成没有边框的平铺行，行与行
@@ -8009,7 +8022,8 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
             # "静态(名称+走势)/动态(价格+涨跌幅)"拆成两组，再按原比例
             # 换算回外层st.columns([9,1])的尺度（9*3.2/5.5≈5.24，9*2.3/5.5≈3.76），
             # 保证拆分前后每一段的实际宽度不变，不会因为拆列导致布局跳动。
-            static_col, dynamic_col, del_col = st.columns([5.24, 3.76, 1], vertical_alignment="center")
+            _row_columns = st.columns([5.24, 3.76, 1] if allow_remove else [5.24, 3.76], vertical_alignment="center")
+            static_col, dynamic_col = _row_columns[:2]
             href = _detail_href(symbol, item_market, item["name"],
                                 st.session_state.get("_active_section", "持仓"))
             # 名称+走势图（静态部分）和价格+涨跌幅（动态部分）拆成两个独立的
@@ -8030,6 +8044,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                 f"<div style='flex:2.1;text-decoration:none'>"
                 f"<span style='font-weight:600;color:var(--fa-text)'>{_esc(item['name'])}</span>"
                 f"<span style='font-size:var(--fs-xs);color:var(--fa-muted);margin-left:6px'>{_esc(symbol)}</span>"
+                f"{adv_inline}"
                 f"</div>"
                 f"<div style='flex:1.1;display:flex;justify-content:center'>{spark_svg}</div>"
                 f"</div></a>",
@@ -8043,7 +8058,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                 f"</div>{pnl_html}</a>",
                 unsafe_allow_html=True,
             )
-            if del_col.button("", icon=":material/close:", key=f"pos_del_{symbol}", help="卖出/取消关注", type="tertiary"):
+            if allow_remove and _row_columns[2].button("", icon=":material/close:", key=f"pos_del_{symbol}", help="卖出/取消关注", type="tertiary"):
                 # 不能在这里直接调_confirm_sell_dialog——这个函数(_render_position_rows)
                 # 是@st.fragment(run_every=3)，弹窗打开后绑定的是当下这个fragment实例，
                 # 但每3秒的自动刷新会让fragment在后台重新生成一份，弹窗还留在界面上、
@@ -8061,7 +8076,6 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                 }
                 st.rerun()
 
-            adv = _advice_map.get(symbol)
             if adv:
                 adv_action = adv.get("action", "观望")
                 adv_color = _ADVICE_ACTION_COLOR.get(adv_action, NEUTRAL_COLOR)
@@ -8089,18 +8103,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                 if _stale_adv:
                     _label += " · 已过期"
                 if compact:
-                    # 紧凑档不给折叠框，只留一行贴着主行的小字。
-                    # 折叠框自带的 summary 行 + 上下 padding 是 32px，52 行就是
-                    # 1600px——实测带 AI 判断的行是 81px、不带的是 49px，整份列表
-                    # 的高度几乎全花在这一个元素上。判断本身（"观望"、几天前）
-                    # 是扫列表时有用的，展开后的理由不是：真要读理由的人会点进
-                    # 详情页，那里有完整版本。所以紧凑档保留结论、去掉展开。
-                    st.markdown(
-                        f"<div style='font-size:var(--fs-xs);margin:-8px 0 2px 2px;"
-                        f"color:{'var(--fa-muted)' if _stale_adv else adv_color};"
-                        f"{'opacity:.75' if _stale_adv else ''}'>{_esc(_label)}</div>",
-                        unsafe_allow_html=True,
-                    )
+                    # 结论已并到名称行；理由留给详情页，不再额外占一行。
                     continue
                 with st.expander(_label):
                     st.markdown(
@@ -8923,11 +8926,15 @@ else:
 
                 # 复用持仓分区那套圆形图标按钮样式（见上面"持仓"分支同款CSS的
                 # 注释）——两个分区各自独立渲染，键名前缀不同，样式要各放一份。
-                _, search_col, add_col = st.columns([10, 1, 1], vertical_alignment="center")
+                _, search_col, add_col, manage_col = st.columns([9, 1, 1, 1], vertical_alignment="center")
                 if search_col.button("", icon=":material/search:", key="watch_search_icon", type="tertiary", help="搜索"):
                     _show_stock_search_dialog(_email)
                 if add_col.button("", icon=":material/add:", key="watch_add_icon", type="tertiary", help="添加自选"):
                     _show_add_watchlist_dialog(_email)
+                _watch_manage = st.session_state.get("_watch_manage_mode", False)
+                if manage_col.button("完成" if _watch_manage else "管理", key="watch_manage", type="tertiary"):
+                    st.session_state["_watch_manage_mode"] = not _watch_manage
+                    st.rerun()
 
                 if not watch_items:
                     st.write("")
@@ -8949,32 +8956,33 @@ else:
                     _mkt_labels = {"全部": None, "港股": "HK", "美股": "US", "沪深": "A", "加密": "CC"}
                     _present = {it.get("market", "A") for it in watch_items}
                     _opts = ["全部"] + [k for k, v in _mkt_labels.items() if v in _present]
-                    _f_col, _s_col, _d_col = st.columns([2, 1, 1], vertical_alignment="center")
-                    with _f_col:
-                        _mkt_pick = st.radio(
-                            "市场", _opts, horizontal=True, label_visibility="collapsed",
-                            key="_watch_market_filter",
-                        )
-                    with _s_col:
+                    with st.container(key="watch_controls"):
+                        _f_col, _s_col, _d_col = st.columns([2, 1, 1], vertical_alignment="center")
+                        with _f_col:
+                            _mkt_pick = st.radio(
+                                "市场", _opts, horizontal=True, label_visibility="collapsed",
+                                key="_watch_market_filter",
+                            )
+                        with _s_col:
                         # 2026-09-13：选项从"默认/涨幅/跌幅/AI评分"改成说清楚
                         # 是什么顺序的四项。"默认"没有回答任何问题——用户看到
                         # 它不知道列表现在是按什么排的，也就无从判断要不要换。
                         # 它实际上是"添加时间"（自己加自选的先后顺序），直接
                         # 写出来。涨幅/跌幅合并成一个"涨跌幅"（点两次切方向没
                         # 有意义，两个独立选项更直接），另加成交额。
-                        _sort_pick = st.selectbox(
-                            "排序", ["添加时间", "涨幅", "跌幅", "成交额", "AI评分"],
-                            label_visibility="collapsed", key="_watch_sort_mode",
-                        )
-                    with _d_col:
+                            _sort_pick = st.selectbox(
+                                "排序", ["添加时间", "涨幅", "跌幅", "成交额", "AI评分"],
+                                label_visibility="collapsed", key="_watch_sort_mode",
+                            )
+                        with _d_col:
                         # 密度开关。52 支自选在改造前每行 83px，一屏看 7 支要滚
                         # 八屏；紧凑档把成交额和持仓盈亏那两行次要信息收起来，
                         # 行高减半。默认紧凑——自选列表的用途是"扫一眼谁在动"，
                         # 不是逐支细看，细看有详情页。
-                        _density = st.selectbox(
-                            "密度", ["紧凑", "舒适"],
-                            label_visibility="collapsed", key="_watch_density",
-                        )
+                            _density = st.selectbox(
+                                "密度", ["紧凑", "舒适"],
+                                label_visibility="collapsed", key="_watch_density",
+                            )
                     _want = _mkt_labels.get(_mkt_pick)
                     _shown = [it for it in watch_items if _want is None or it.get("market", "A") == _want]
                     if not _shown:
@@ -8982,7 +8990,7 @@ else:
                     else:
                         st.caption(f"共 {len(_shown)} 支")
                         _render_position_rows(_shown, _email, sort_mode=_sort_pick,
-                                              compact=(_density == "紧凑"))
+                                              compact=(_density == "紧凑"), allow_remove=_watch_manage)
 
                 # 同上——挪到稳定作用域，避开run_every fragment失效的问题；
                 # shares<=0过滤只处理"自选"这边点的卖出/取消关注。

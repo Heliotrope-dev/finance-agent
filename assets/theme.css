@@ -696,6 +696,15 @@ div[data-testid="stButtonGroup"] p, div[data-testid="stButtonGroup"] span { colo
 [class*="st-key-pos_row_"] [class*="st-key-pos_del_"] button { opacity: 0; transition: opacity .15s ease; }
 [class*="st-key-pos_row_"]:hover [class*="st-key-pos_del_"] button { opacity: 1; }
 
+/* 自选页常态是一张透明观察表，不让两个选择框成为首屏最醒目的元素。 */
+[class*="st-key-watch_controls"] [data-baseweb="select"] > div,
+[class*="st-key-watch_controls"] [data-baseweb="select"] > div:hover {
+    background: transparent !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
+}
+[class*="st-key-watch_controls"] [data-baseweb="select"] > div { min-height: 34px !important; }
+
 /* 行内折叠框：去掉边框和底色，变成一行安静的可展开文字。
    六处（持仓行 / 推荐股行 / 宏观条目 / AI决策记录 / 我的页关于 / 侧栏）
    改造前各写了一份，合并成一条。 */
