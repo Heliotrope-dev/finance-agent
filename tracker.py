@@ -1788,6 +1788,39 @@ def get_recent_advice_map(within_hours: int = 36) -> dict:
     return out
 
 
+def get_recent_advice_changes(limit: int = 12) -> list[dict]:
+    """Return the latest materially changed advisor view for each security.
+
+    This is deliberately a comparison of stored, dated decisions, not an LLM
+    reconstruction.  A user can therefore see exactly what changed (action,
+    score, or the price snapshot) and inspect the two timestamps.
+    """
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT symbol, market, name, source, action, score, price_at_advice, created_at "
+            "FROM advice WHERE source IN ('screen', 'watchlist', 'watchlist_hk', 'watchlist_us', 'position') "
+            "ORDER BY created_at DESC LIMIT 800"
+        ).fetchall()
+    latest: dict[tuple[str, str, str], dict] = {}
+    changes: list[dict] = []
+    for row in rows:
+        current = dict(row)
+        key = (current["symbol"], current["market"], current["source"])
+        newer = latest.get(key)
+        if newer is None:
+            latest[key] = current
+            continue
+        if (newer.get("action") != current.get("action")
+                or newer.get("score") != current.get("score")):
+            changes.append({"current": newer, "previous": current})
+            latest.pop(key, None)
+            if len(changes) >= limit:
+                break
+    return changes
+
+
 def get_latest_advice(limit_per_market: int = 3) -> dict:
     """给首页"投研候选"模块用：只读最近一次 advisor.py 跑出来的结果，不现场
     重新跑（那一次要跑几分钟、几十次AI调用，公开首页每次访问都触发一遍
@@ -1930,9 +1963,13 @@ def get_latest_leaderboard(limit: int = 10, source: str = "screen", market_quota
             "SELECT created_at FROM advice WHERE source = ? ORDER BY created_at DESC LIMIT 1", (source,),
         ).fetchone()
         if latest is None:
-            return {"run_date": None, "leaderboard": []}
+            return {"run_date": None, "leaderboard": [], "raw_count": 0}
         run_date = latest["created_at"][:10]
         _cutoff = _latest_run_cutoff(c, source) or (run_date + "T00:00:00")
+        raw_count = c.execute(
+            "SELECT COUNT(*) FROM advice WHERE source = ? AND created_at >= ?",
+            (source, _cutoff),
+        ).fetchone()[0]
         # market_quota要在全量候选里挑，不能先用SQL LIMIT截断到limit条
         # （截断早了美股候选可能压根没进这批行，配额也补不回来）。这批
         # 候选本来就是一天的观察池（约120支封顶），全取出来在Python里
@@ -1952,7 +1989,7 @@ def get_latest_leaderboard(limit: int = 10, source: str = "screen", market_quota
     board = [dict(r) for r in rows]
     if market_quota:
         board = _apply_market_quota(board, limit, market_quota)
-    return {"run_date": run_date, "leaderboard": board}
+    return {"run_date": run_date, "leaderboard": board, "raw_count": raw_count}
 
 
 def get_watchlist_verdict_for_symbol(symbol: str, source: str = "watchlist") -> dict:

@@ -85,6 +85,7 @@ from assistant import build_context as build_assistant_context, stream_reply as 
 from tracker import (
     log_analysis, get_history, get_due_for_review, record_review, get_accuracy_stats, record_overall_score,
     get_advice_accuracy, get_recent_advice_outcomes, get_advice_outcome_summary,
+    get_recent_advice_changes,
     get_advice_outcome_windows,
     extract_score_breakdown,
     get_accuracy_trend, get_daily_accuracy, add_watch_only, is_position_tracked,
@@ -449,6 +450,34 @@ def _return_from_stock_detail() -> None:
     st.query_params.update({"tab": _SLUG_BY_SECTION.get(section, "market"),
                             **_detail_return_context(section)})
     st.rerun()
+
+
+def _restore_section_scroll(section: str) -> None:
+    """Persist and restore scroll per main section across detail navigation.
+
+    Streamlit recreates the document during a full rerun, so its own history
+    restoration is not sufficient for an in-app back button.  This tiny local
+    browser-state bridge stores no user data and only restores the last reading
+    position for the current section.
+    """
+    safe_section = json.dumps(section, ensure_ascii=False)
+    _cv1.html(
+        f"""<script>
+        try {{
+          const w = window.parent, key = 'fa_scroll_' + {safe_section};
+          const root = w.document.scrollingElement || w.document.documentElement;
+          w.__faScrollKey = key;
+          const save = () => w.sessionStorage.setItem(w.__faScrollKey, String(root.scrollTop || w.scrollY || 0));
+          if (!w.__faScrollBridge) {{
+            w.addEventListener('scroll', save, {{passive:true}});
+            w.__faScrollBridge = true;
+          }}
+          const y = Number(w.sessionStorage.getItem(key) || 0);
+          if (y > 0) w.requestAnimationFrame(() => w.scrollTo(0, y));
+        }} catch (e) {{}}
+        </script>""",
+        height=0,
+    )
 
 # 个股详情页有稳定的可分享地址。旧的 open_* 是一次性跳转参数，第一次进入
 # 后会改写为 symbol/market/name/section 四个规范参数；后者不清理，刷新或复制
@@ -3667,27 +3696,40 @@ def _render_advice_section():
             bits.append(f"盈亏比 {item['盈亏比']:.2f}:1")
         if isinstance(item.get("现价"), (int, float)):
             bits.insert(0, f"现价 {item['现价']:.2f}")
-        tag = (
-            f"<span style='color:{OK_COLOR};font-size:var(--fs-xs);font-weight:600'>可执行</span>"
-            if ready else
-            f"<span style='color:var(--fa-faint);font-size:var(--fs-xs)'>仅观察</span>"
-        )
+        market = str(item.get("市场", "")).upper()
+        market_label = {"HK": "港股", "US": "美股", "A": "沪深"}.get(market, market or "—")
+        symbol = str(item.get("代码", ""))
+        name = _clean_name(item.get("名称", ""))
+        href = _detail_href(symbol, market, name, "首页") if symbol and market else "#"
+        action = "买入" if ready else "仅观察"
         # 没过闸门的必须把原因摆出来。"不可执行原因"是 daily_plan 逐条算出来的
         # 具体判据（尚未触发/不可追高/趋势仍向下/盈亏比不足…），不是一句笼统的
         # "不达标"——用户要的正是这个，好自己判断是"差一点"还是"差很远"。
         reason = item.get("不可执行原因") if not ready else None
         score = item.get("评分")
+        # 与下方投研榜使用同一阅读顺序：标的/市场在左，评分和结论在右；
+        # 第二行给现价与交易参数，最后一行才解释为什么可执行或被拦截。
+        # 这样两块虽服务不同任务，视觉上仍是一套克制的研究清单。
+        score_html = (
+            f"<span style='font-size:var(--fs-md);font-weight:600;letter-spacing:var(--ls-tight);"
+            f"font-variant-numeric:tabular-nums;color:var(--fa-text)'>{_esc(score)}</span>"
+            if score is not None else ""
+        )
+        verdict_color = OK_COLOR if ready else "var(--fa-faint)"
         return (
-            f"<div style='padding:9px 0;border-bottom:1px solid var(--fa-border)'>"
-            f"<strong>{_esc(_clean_name(item.get('名称', '')))}</strong>"
-            f"<span style='color:var(--fa-faint);font-size:var(--fs-xs)'> · "
-            f"{_esc(str(item.get('市场', '')))} · {_esc(str(item.get('代码', '')))}"
-            + (f" · {score}分" if score is not None else "")
-            + f"</span>&nbsp;&nbsp;{tag}<br>"
-            f"<span style='font-size:var(--fs-sm);color:var(--fa-muted)'>{' · '.join(bits)}</span>"
-            + (f"<br><span style='font-size:var(--fs-xs);color:var(--fa-faint)'>{_esc(reason)}</span>"
+            f"<a class='pos-card-link' href='{href}' target='_self' "
+            f"style='display:block;padding:11px 0;border-bottom:1px solid var(--fa-border)'>"
+            f"<div style='overflow:hidden'><span style='float:right;white-space:nowrap'>{score_html}"
+            f"<span style='color:{verdict_color};margin-left:10px;font-size:var(--fs-xs);"
+            f"font-weight:600;letter-spacing:var(--ls-label)'>{action}</span></span>"
+            f"<span style='font-weight:600'>{_esc(name)}"
+            f"<span style='font-weight:400;color:var(--fa-faint);font-size:var(--fs-xs)'> · {_esc(market_label)}</span>"
+            f"</span></div>"
+            f"<div style='font-size:var(--fs-xs);color:var(--fa-faint);margin-top:3px'>"
+            f"{_esc(symbol)} · {' · '.join(_esc(bit) for bit in bits)}</div>"
+            + (f"<div style='font-size:var(--fs-xs);color:var(--fa-faint);margin-top:4px'>{_esc(reason)}</div>"
                if reason else "")
-            + "</div>"
+            + "</a>"
         )
 
     _order_ready = [item for _market in ("HK", "US") for item in _load_order_ready_items(_market)]
@@ -3912,13 +3954,22 @@ def _render_advice_section():
 
     # 港股/美股各自独立取一份，不再用market_quota从混合池里配额分配。
     _any_board = False
+    _board_diagnostics = []
     for _mk, _label in (("HK", "港股"), ("US", "美股")):
         try:
             _data = get_latest_leaderboard(limit=5, source=f"watchlist_{_mk.lower()}")
         except Exception:
+            _board_diagnostics.append(f"{_label}读取失败")
             continue
         _board = _data.get("leaderboard") or []
         if not _data.get("run_date") or not _board:
+            _raw_count = _data.get("raw_count", 0)
+            if not _data.get("run_date"):
+                _board_diagnostics.append(f"{_label}尚未生成观察池结果")
+            elif _raw_count:
+                _board_diagnostics.append(f"{_label}本轮有{_raw_count}条结果，但未解析出有效评分")
+            else:
+                _board_diagnostics.append(f"{_label}本轮未输出候选")
             continue
         _any_board = True
         st.markdown(f"**{_label}**")
@@ -3930,7 +3981,7 @@ def _render_advice_section():
         _render_board_rows(_board)
 
     if not _any_board:
-        st.caption("还没有生成过投研观察排行榜")
+        st.caption("；".join(_board_diagnostics) or "还没有生成过投研观察排行榜")
         return
 
     # 免责声明统一放在榜单末尾说一次——上面每张卡里的那句已经剥掉了。
@@ -4320,8 +4371,8 @@ def _render_my_page():
             if stats.get("总数") else "你在详情页点「综合数据分析」时记下的方向，满 7 天回看；还没有满 7 天的记录",
         )]
         for _src, _label, _what in (
-            ("watchlist", "推荐股排行榜", "advisor.py 每工作日 17:30 自动出的买卖判断，满 6.9 天回看"),
-            ("position", "持仓判断", "同上，只针对已持仓的标的"),
+            ("watchlist", "推荐股排行榜", "系统在每个交易日生成的买卖判断，满 7 天回看"),
+            ("position", "持仓判断", "同一套方法，只针对已持仓的标的"),
         ):
             _s = _by_source.get(_src) or {}
             _acc_rows.append((
@@ -4473,6 +4524,32 @@ def _render_my_page():
             "「说对/说错」只对买入、卖出这类带方向的结论成立，持有/观望不计入胜率。"
             "事后价格是系统按固定回看窗口自动补录的，不是挑出来的时点。"
         )
+
+        # 把「今天给了什么判断」变成可追溯的变化记录，而不是每天再读一篇
+        # 长分析。比较的是两条真实入库记录，明确展示旧值、新值与发生时间。
+        try:
+            _changes = get_recent_advice_changes(limit=8)
+        except Exception:
+            _changes = []
+        if _changes:
+            st.divider()
+            st.markdown("**判断变化记录**")
+            st.caption("只显示结论或评分发生变化的标的；价格与风险线请以当日清单为准。")
+            for _change in _changes:
+                _now, _old = _change["current"], _change["previous"]
+                _now_time = _to_cn_dt(_now.get("created_at", ""))
+                _when = _now_time.strftime("%m-%d %H:%M") if _now_time else ""
+                _score_delta = ""
+                if _now.get("score") is not None and _old.get("score") is not None:
+                    _delta = _now["score"] - _old["score"]
+                    _score_delta = f" · 评分 {_old['score']} → {_now['score']}（{_delta:+g}）"
+                st.markdown(
+                    f"<div style='display:flex;gap:10px;padding:8px 2px;border-bottom:1px solid var(--fa-border)'>"
+                    f"<span style='flex:1;font-weight:600;color:var(--fa-text)'>{_esc(_clean_name(_now.get('name') or _now['symbol']))}</span>"
+                    f"<span style='color:var(--fa-text-2)'>{_esc(_old.get('action') or '—')} → {_esc(_now.get('action') or '—')}{_esc(_score_delta)}</span>"
+                    f"<span style='color:var(--fa-faint);font-size:var(--fs-xs)'>{_when}</span></div>",
+                    unsafe_allow_html=True,
+                )
 
         # ── 风险偏好 ────────────────────────────────────────────────────
         # 放在"我的"而不是"持仓"：清单里那句"低于风险档案下限2:1"是全站性的
@@ -5642,17 +5719,12 @@ def _render_home_page():
     # 地图挪回最上面之后这个理由就不成立了，留着只是把同一组数字讲两遍。
     # 宏观横栏留下：VIX/美债/美元/金油铜地图上没有，不重复。
     #
-    # 顺序：宏观横栏(VIX/美债/美元/金油铜) → 世界地图 →
-    #       今日可执行清单+排行榜 → 宏观议题/日历/IPO → 资讯。
-    _render_macro_strip()
-
-    st.markdown("**全球指数一览**")
-    _render_home_map()
-
-    st.divider()
+    # 首页先回答「我现在该做什么」。市场地图是浏览工具，不该把真正要处理的
+    # 清单推到首屏之后；它保留在行情分区，那里才是横向比较各市场的语境。
     _render_advice_section()
 
     st.divider()
+    _render_macro_strip()
     _render_macro_briefs()
     _render_event_calendar()
     # 三个市场的新股收进一组标签，而不是竖着排三段——竖排的话首页要多滚三屏，
@@ -6114,7 +6186,17 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     core = st.session_state[core_key]
     hist, spot = core["hist"], core["spot"]
 
+    summary_key = f"_detail_summary_{symbol}_{market}"
+
     _render_price_header(symbol, market)
+
+    # 已生成过的研究结论应在首屏可见：用户首先要知道「结论、依据、风险」，
+    # 再决定是否下钻新闻、资金与财务。首次打开不会为此额外触发模型调用，仍在
+    # 页面下方的完整研究流程生成，避免为了排版增加等待时间。
+    if st.session_state.get(summary_key):
+        st.markdown("**研究摘要**")
+        _render_overall_summary(st.session_state[summary_key])
+        st.caption("基于上次完整分析；重新分析后会更新。")
 
     # 到价提醒放在价格区块之外，不能放进去。_render_price_header 是
     # @st.fragment(run_every=3)，每3秒自动重跑一次——弹窗里的输入框会在用户
@@ -6229,7 +6311,6 @@ def _render_stock_detail(symbol: str, market: str, name: str):
     ) if market == "CC" else (
         ("news", "资讯解读"), ("financial", "财务摘要"), ("benchmark", "对比大盘"), ("cross", "综合数据分析（交叉验证）"),
     )
-    summary_key = f"_detail_summary_{symbol}_{market}"
     if _refresh_col.button("重新分析", key=f"_reanalyze_{symbol}_{market}", use_container_width=True):
         for mod_key, _ in module_defs:
             st.session_state.pop(f"_detail_mod_{symbol}_{market}_{mod_key}", None)
@@ -6240,8 +6321,8 @@ def _render_stock_detail(symbol: str, market: str, name: str):
         with st.container(border=True):
             st.markdown(f"**{mod_label}**")
             _render_module(mod_key, symbol, market, hist, spot)
-    with st.container(border=True):
-        st.markdown("**总结性分析**")
+    with st.container(border=False):
+        st.markdown("**完整研究总结**")
         if summary_key not in st.session_state:
             try:
                 section_texts = {
@@ -7026,6 +7107,12 @@ def _render_ai_sim_dashboard():
             f"最后一次成功决策是 {_ok_text}。"
             f"下方的收益和持仓数字仍会跟着行情波动，但期间没有产生任何新的买卖决策。"
         )
+    elif _latest is not None:
+        _latest_dt = _to_cn_dt(_latest.get("run_at"))
+        _latest_when = _latest_dt.strftime("%m-%d %H:%M") if _latest_dt else "最近一次"
+        _latest_reason = _sim_run_reason(_latest.get("reasoning_text", "")) or _sim_note_for_display(_latest.get("note", ""))
+        if _latest_reason:
+            st.caption(f"最近一次完整决策 · {_latest_when} · {_latest_reason}")
 
     # 走势图数据源用sim_equity_snapshots(每几分钟一次，跟AI决策频率解耦)，
     # 不再用sim_agent_runs的决策快照(15分钟一次)——用户反馈"遇到低波动
@@ -7923,18 +8010,8 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
             # 换算回外层st.columns([9,1])的尺度（9*3.2/5.5≈5.24，9*2.3/5.5≈3.76），
             # 保证拆分前后每一段的实际宽度不变，不会因为拆列导致布局跳动。
             static_col, dynamic_col, del_col = st.columns([5.24, 3.76, 1], vertical_alignment="center")
-            href = (
-                f"?open_symbol={urllib.parse.quote(symbol)}"
-                f"&open_market={urllib.parse.quote(item_market)}"
-                f"&open_name={urllib.parse.quote(item['name'])}"
-                # 带上真正的来源分区，不再写死"pos"。2026-09-01把"自选"从持仓里
-                # 拆成独立分区之后，这两个分区共用同一个 _render_position_rows，
-                # 于是从自选点进详情、再点返回，会被送回"持仓"——去了一个自己
-                # 根本没在看的分区。整页导航会重建 session，记不住来路，只能靠
-                # URL 显式带过去。
-                f"&open_from={urllib.parse.quote(st.session_state.get('_active_section', '持仓'))}"
-                f"{_auth_qs()}"
-            )
+            href = _detail_href(symbol, item_market, item["name"],
+                                st.session_state.get("_active_section", "持仓"))
             # 名称+走势图（静态部分）和价格+涨跌幅（动态部分）拆成两个独立的
             # st.markdown调用——同一个href两边都能点，视觉上还是整行可点，
             # 但静态部分的HTML字符串在数据没变时保持不变，Streamlit的diff能
@@ -8491,12 +8568,13 @@ def _show_add_position_dialog(email: str):
         _hist_market_label = {"A": "沪深", "HK": "港股", "US": "美股"}
         for h in history:
             row_label = f"{h['query']}（{_hist_market_label.get(h['market'], h['market'])}）"
-            # 点历史记录直接跳去那只股票的详情页，不是再加一遍持仓——
-            # 用户反馈"再加"这个按钮没必要，点了就想直接看那只股票。
+            # 添加流程里的最近搜索是「快捷选标的」，不是离开任务去看详情。选中
+            # 后直接进入第二步填写仓位，避免用户点了“添加持仓”却被带离弹窗。
             if st.button(row_label, key=f"_pos_hist_open_{h['id']}", use_container_width=True):
-                sym = _resolve_add_symbol(h["query"], h["market"])
-                if sym:
-                    _open_detail_route(sym, h["market"], h["query"], "持仓")
+                confirmed = _resolve_confirmed_symbol(email, h["query"], h["market"])
+                if confirmed:
+                    st.session_state["_pos_add_confirmed"] = confirmed
+                    st.rerun(scope="fragment")
                 else:
                     st.error(f"没查到「{h['query']}」的行情。")
 
@@ -8697,6 +8775,11 @@ else:
             # 会以为是两份不同的东西。
             mkt_pick = st.radio("市场", ["沪深", "港股", "美股", "虚拟货币"], horizontal=True, key="_market_overview_pick")
             mkt_code = {"沪深": "A", "港股": "HK", "美股": "US", "虚拟货币": "CC"}[mkt_pick]
+
+            # 地图服务的是横向市场比较，不占首页的行动入口。默认收起，桌面端想
+            # 看全球联动时一键展开；窄屏则自然避免标签挤在一张小地图里。
+            with st.expander("全球市场地图", expanded=False):
+                _render_home_map()
 
             # 虚拟货币走单独一条渲染路径，不是"少调用几个函数"那么简单：
             # 指数快照、涨停跌停池、南向资金、热门板块、新股这几块的概念在
@@ -8919,3 +9002,4 @@ else:
             _render_my_page()
 
         _render_ai_assistant()
+        _restore_section_scroll(active_section)
