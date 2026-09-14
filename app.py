@@ -1063,14 +1063,21 @@ def _render_market_clock():
     做成 fragment 是因为它每分钟要重算一次状态，而整页其余部分没理由跟着重跑。
 
     2026-09-15改版：用户反馈原来那版"一行纯灰字、点号分隔"看着粗糙——已收盘/
-    交易中挤在一起全是同一个颜色，得逐字读才知道哪个市场开着。改成一张浅色
-    卡片、每个市场的开盘状态按红/绿区分（已收盘/盘前/午间休市/周末休市这些
-    "不可交易"的状态统一用红，交易中用绿——跟这个项目"红涨绿跌"的方向配色
-    是两套独立语义，这里借用的是OK/BAD_COLOR那组"正常/不可用"语义，不是
-    UP/DOWN_COLOR，别混用），一眼扫过去就知道哪个市场现在能下单。
+    交易中挤在一起全是同一个颜色，得逐字读才知道哪个市场开着。改成开盘状态
+    按红/绿区分（已收盘/盘前/午间休市/周末休市这些"不可交易"的状态统一用红，
+    交易中用绿——跟这个项目"红涨绿跌"的方向配色是两套独立语义，这里借用的是
+    OK/BAD_COLOR那组"正常/不可用"语义，不是UP/DOWN_COLOR，别混用），一眼扫
+    过去就知道哪个市场现在能下单；整行居中排布，不再挤在左边留一大片空白。
     另外补一条"北京时间"整点——原来三个市场各自的时间是交易所本地时间
     （美股显示的是美东时间），没有一处直接写"这是北京时间几点"，用户在国内
     看这条栏目其实最先想确认的是"我这儿现在几点"，不该要求读者自己心算时差。
+
+    第一版曾经给整行加过一圈边框+浅底色卡片，想让它更"精致"，用户反馈那圈
+    白框看着像一个按钮方块，反而显得突兀——去掉了，改回不带背景/边框的纯
+    文字行，"精致"靠颜色和对齐本身，不靠额外的容器。同一版也去掉了每个
+    市场自己的本地时间（比如"交易中 12:09"里那个12:09）：北京时间已经是
+    这一行唯一的时间基准，市场那几个词只需要说清楚"现在能不能交易"，不需要
+    再各自带一个只有算时差才看得懂的本地钟点。
     """
     _bj_now = datetime.now(ZoneInfo("Asia/Shanghai"))
     _cells = [
@@ -1078,12 +1085,10 @@ def _render_market_clock():
     ]
     for _mkt, _label in (("HK", "港股"), ("A", "沪深"), ("US", "美股")):
         _s = _market_session(_mkt)
-        _t = _s["local"]
         _state_color = OK_COLOR if _s["open"] else BAD_COLOR
-        _state_text = f"交易中 {_t:%H:%M}" if _s["open"] else _s["state"]
         _cells.append(
             f"<span style='color:var(--fa-muted)'>{_esc(_label)} </span>"
-            f"<span style='color:{_state_color};font-weight:600'>{_esc(_state_text)}</span>"
+            f"<span style='color:{_state_color};font-weight:600'>{_esc(_s['state'])}</span>"
         )
     _all_closed = not any(_market_session(m)["open"] for m in ("HK", "A", "US"))
     if _all_closed:
@@ -1099,10 +1104,9 @@ def _render_market_clock():
                 f"<span style='color:var(--fa-faint)'>下次开盘 {_esc(_name)} {_d:%m-%d %H:%M}</span>"
             )
     st.markdown(
-        "<div style='display:flex;flex-wrap:wrap;gap:14px;align-items:center;"
-        "font-size:var(--fs-sm);letter-spacing:var(--ls-label);"
-        "background:var(--bg-card);border:1px solid var(--fa-border);"
-        "border-radius:var(--fa-radius);padding:8px 12px;margin-bottom:10px'>"
+        "<div style='display:flex;flex-wrap:wrap;justify-content:center;gap:14px;"
+        "align-items:center;font-size:var(--fs-sm);letter-spacing:var(--ls-label);"
+        "padding:6px 2px 12px'>"
         + "".join(_cells) + "</div>",
         unsafe_allow_html=True,
     )
