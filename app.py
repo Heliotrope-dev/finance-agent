@@ -9156,6 +9156,10 @@ else:
                         _show_compare_dialog(holding_items)
                 else:
                     title_col, search_col, add_col = st.columns([10, 1, 1], vertical_alignment="center")
+                title_col.markdown(
+                    "<div style='font-size:var(--fs-lg);font-weight:600;letter-spacing:var(--ls-tight)'>持仓</div>",
+                    unsafe_allow_html=True,
+                )
                 if search_col.button("", icon=":material/search:", key="pos_search_icon", type="tertiary", help="搜索"):
                     _show_stock_search_dialog(_email)
                 if add_col.button("", icon=":material/add:", key="pos_add_icon", type="tertiary", help="添加持仓"):
@@ -9176,16 +9180,16 @@ else:
                             _show_add_position_dialog(_email)
 
                 if holding_items:
-                    # 环形图 | 持仓列表，左右各半——环形图不用@st.fragment(run_every=3)
-                    # （见_render_positions_donut docstring：Plotly图3秒重绘会闪烁），
-                    # 右边列表沿用原来的3秒自动刷新fragment，两边各自独立刷新节奏。
-                    donut_col, list_col = st.columns([1, 1])
-                    with donut_col:
-                        _render_positions_donut(holding_items)
-                    with list_col:
-                        # 用户反馈持仓一般也就几只，市场筛选(全部/沪深/港股/美股)没有实际
-                        # 必要，反而多一层点击——去掉筛选，统一直接展示全部持仓。
-                        _render_position_rows(holding_items, _email)
+                    # 原来的“环形图 | 列表 / 今日收益 | AI分析”田字布局会把每一块
+                    # 都压成半宽，图、数字和长分析互相抢视线。改成首页同款的单列
+                    # 信息流：先看状态和真实仓位，再按需展开配置、预算和风险信息。
+                    st.markdown("**持仓概览**")
+                    _render_positions_today_pnl(holding_items)
+
+                    st.divider()
+                    st.markdown("**当前持仓**")
+                    # 持仓一般只有几只，市场筛选只会额外增加一步，直接完整展示。
+                    _render_position_rows(holding_items, _email)
 
                     # 卖出确认弹窗调用挪到这个稳定作用域（不是_render_position_rows
                     # 那个run_every=3的fragment内部）——见_render_position_rows里
@@ -9197,19 +9201,19 @@ else:
                         _confirm_sell_dialog(_email, _sell_target["item"], _sell_target["market"], _sell_target["cur_price"])
 
                     st.divider()
-                    pnl_col, ai_col = st.columns([1, 1])
-                    with pnl_col:
-                        _render_positions_today_pnl(holding_items)
-                        st.divider()
+                    with st.expander("配置分布", expanded=False):
+                        _render_positions_donut(holding_items)
+                    with st.expander("资金与风险预算", expanded=False):
                         _render_max_capital_input(_email)
-                    with ai_col:
+
+                    st.divider()
+                    st.markdown("**组合分析**")
+                    with st.container(key="portfolio_advice_stream"):
                         _render_portfolio_advice(_email, holding_items)
 
-                    # 组合体检放在AI组合分析之后、整页最下面：它是本地算的客观
-                    # 结构（暴露/相关性/波动率/VaR），通栏展示——相关性矩阵塞进
-                    # 半宽列里会挤成一团。
                     st.divider()
-                    _render_portfolio_risk(holding_items)
+                    with st.expander("组合风险体检", expanded=False):
+                        _render_portfolio_risk(holding_items)
 
         elif active_section == "自选":
             if not st.session_state.get("logged_in"):
