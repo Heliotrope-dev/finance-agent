@@ -99,6 +99,7 @@ from tracker import (
     get_latest_portfolio_advice, get_max_capital, set_max_capital,
     get_simulated_orders, get_sim_agent_runs, get_sim_virtual_cash,
     get_equity_snapshots, get_period_pnl,
+    log_portfolio_equity_snapshot, get_portfolio_equity_snapshots,
     add_price_alert, get_price_alerts, delete_price_alert, set_price_alert_enabled,
 )
 import sim_trader
@@ -108,7 +109,7 @@ from charts import (
     build_candlestick, build_intraday_line, compute_stats, compute_technical_signal, compute_realtime_signal,
     build_benchmark_comparison, build_return_histogram, build_multi_comparison, build_position_donut,
     build_fed_watch_chart, build_macro_series_chart,
-    build_sim_equity_curve, build_sector_treemap, build_correlation_heatmap,
+    build_sim_equity_curve, build_sector_treemap, build_correlation_heatmap, build_portfolio_value_curve,
     build_sim_vs_benchmark, build_ipo_open_vs_close,
 )
 import portfolio_risk
@@ -4207,45 +4208,21 @@ def _render_app_guide():
     在"我的"这一页底部突兀地冒出两个白盒子。靠这个key在CSS里把它们压成
     跟上面完全一致的行。
     """
+    sections = (
+        ("定位", "Invest Agent 是多市场行情与数据交叉验证工具。个股和指数页的 AI 只做证据核对与综合评分，不直接荐股；持仓页则基于你录入的仓位和资金上限，给出仓位管理建议。"),
+        ("行情", "按市场查看核心指数、市场状态和数据时间；沪深还提供涨跌停池与南向资金。"),
+        ("个股 / 指数详情", "先看 K 线或分时，再看原始资讯与财务数据，最后阅读 AI 对技术面、消息面与大盘的交叉验证。评分反映证据是否一致，不等同于主观看多或看空。"),
+        ("持仓", "搜索代码或名称后可添加关注或真实持仓。录入股数与成交金额后，页面会显示实时估值、配置、风险体检和针对当前仓位的组合分析。"),
+        ("AI 模拟炒股", "使用虚拟资金运行，仅交易港股和美股；展示其持仓、收益曲线及交易记录，仅供观察，不构成投资建议。"),
+        ("我的", "集中查看账户、自选、持仓、搜索与数据源状态。AI 判断准确率是历史方向核对，不是未来收益承诺。"),
+        ("重要说明", "分析、评分和资讯摘要均基于公开数据整理，不构成投资建议；请自行判断数据时效性与投资风险。"),
+    )
     with st.container(key="my_about_guide"), st.expander("应用指南"):
-        st.markdown(
-            "**定位**\n\n"
-            "Invest Agent 是一个多市场（沪深/港股/美股）行情查询和数据交叉验证工具，"
-            "把行情、财务、新闻这几类原始数据放在一起给你看。个股/指数详情页的 AI 分析"
-            "只做交叉核对和综合评分，不做黑箱荐股、不直接给买卖判断；"
-            "「持仓」页的组合分析是例外——它只针对你自己填的真实持仓和设定的资金上限，"
-            "按集中度、资金余量给出继续持有/加仓/减仓/定投/止盈/割肉这类具体操作建议"
-            "（附股数和金额），这是基于你自己数据算出来的仓位管理建议，不是选股推荐，"
-            "同样不构成投资建议，请自行判断风险。\n\n"
-            "**行情**\n\n"
-            "在「行情」分区按市场查看核心指数（沪深按涨跌幅列示，港股按东财人气榜排热度，"
-            "美股展示固定核心股名单），沪深另有涨停/跌停池和南向资金；"
-            "局部报价会自动刷新，模块旁会标注市场状态与数据时间。\n\n"
-            "**个股/指数详情页**\n\n"
-            "点开任意标的先看K线或分时图，再看一手资讯（沪深优先展示官方公告，"
-            "港股/美股优先富途资讯，都查不到才退回财新摘要），最后是 AI 深度分析——"
-            "包含资讯解读、财务摘要、对比大盘、技术面与消息面交叉验证，"
-            "以及一段综合评分（0-100，越高越偏多头证据、越低越偏空头证据，"
-            "评分依据是各条独立证据链是否互相印证，不是 AI 自己主观看好程度）。\n\n"
-            "**持仓**\n\n"
-            "右上角搜索可按代码或名称查行情，+ 按钮用于添加持仓；填写股数或金额后记为真实持仓，成交均价可选填"
-            "（不填只是关注），卡片显示迷你走势图、实时涨跌和持仓浮盈，"
-            "点卡片进详情页，点 × 卖出或取消关注。\n\n"
-            "**AI模拟炒股**\n\n"
-            "内置 Gemini AI 用虚拟资金自主管理一个模拟盘——只交易港股/美股（沪深不参与），"
-            "在开盘时段按行情触发决策，不需要手动操作；"
-            "这里能看到它的持仓、收益曲线和完整交易记录，仅供观察AI决策能力，"
-            "不构成投资建议。\n\n"
-            "**我的**\n\n"
-            "账户信息、自选与持仓的数量和市场分布、累计做过多少次AI分析、最近搜索、"
-            "以及行情与 Gemini AI 的数据源状态都在这里。其中「AI 判断准确率」是这样来的：每次"
-            "生成「综合数据分析」时会记录当时价格和 AI 判断的方向倾向，满 7 天后"
-            "自动补录当时的价格做对照，统计一个方向一致率——这是历史记录的客观统计，"
-            "不代表未来表现，不是胜率承诺。\n\n"
-            "**重要说明**\n\n"
-            "本应用所有分析、评分、资讯摘要仅基于公开数据的整理和交叉核对，"
-            "不构成任何投资建议，不保证数据的完整性和及时性，据此操作的风险自负。"
+        guide_html = "".join(
+            f"<section class='app-guide-section'><div class='app-guide-title'>{_esc(title)}</div><p>{_esc(body)}</p></section>"
+            for title, body in sections
         )
+        st.markdown(f"<div class='app-guide-copy'>{guide_html}</div>", unsafe_allow_html=True)
 
 
 def _render_data_source_health():
@@ -6766,7 +6743,7 @@ def _render_index_detail(name: str, code: str, market: str):
 
 
 @st.fragment(run_every=10)
-def _render_positions_today_pnl(positions: list):
+def _render_positions_today_pnl(positions: list, email: str):
     """今日收益，要求实时同步——跟_render_position_rows一样每10秒刷新
     （2026-09-02从3秒调宽到10秒：批量化之后单次调用变1次了，但两个
     fragment(这个+_render_position_rows)各自每3秒都打一次批量请求，
@@ -6856,6 +6833,17 @@ def _render_positions_today_pnl(positions: list):
         st.caption(f"有 {skipped} 支持仓因行情/汇率暂时获取不到，未计入。")
     if stale_count:
         st.caption(f"其中 {stale_count} 支场外基金/贵金属现货用的是上一披露日净值（非实时），已计入合计。")
+    # 真实快照只在实际取到完整市值时记录；页面每 10 秒刷新，但五分钟最多一条，
+    # 不能用相邻渲染的同一个数字硬填一条“走势”。
+    log_portfolio_equity_snapshot(email, total_value)
+    snapshots = get_portfolio_equity_snapshots(email)
+    if len(snapshots) >= 2:
+        st.markdown("**持仓市值趋势**")
+        st.plotly_chart(build_portfolio_value_curve(snapshots), use_container_width=True,
+                        config=_PLOTLY_CONFIG, key="_portfolio_value_curve")
+        st.caption("按已获取行情折算人民币，每约 5 分钟记录一个真实快照；线条不补造休市期间数据。")
+    else:
+        st.caption("持仓市值趋势已开始记录；积累第二个真实快照后显示曲线。")
 
 
 def _render_max_capital_input(email: str):
@@ -7625,7 +7613,20 @@ def _render_positions_donut(positions: list):
         if value_cny is None:
             skipped += 1
             continue
-        holdings.append({"label": f"{item['name']}（{item['symbol']}）", "value_cny": value_cny})
+        _name = f"{item['name']} {item['symbol']}".upper()
+        if any(k in _name for k in ("黄金", "GOLD", "GLD", "IAU", "XAU")):
+            asset_class = "黄金"
+        elif any(k in _name for k in ("债", "BOND", "TLT", "IEF", "SHY")):
+            asset_class = "债券"
+        elif item.get("market") == "CC":
+            asset_class = "加密资产"
+        elif any(k in _name for k in ("2X", "3X", "两倍", "三倍", "做多", "做空", "杠杆", "反向")):
+            asset_class = "杠杆/反向产品"
+        elif any(k in _name for k in ("ETF", "基金", "联接", "QDII")):
+            asset_class = "ETF/基金"
+        else:
+            asset_class = "股票"
+        holdings.append({"label": f"{item['name']}（{item['symbol']}）", "value_cny": value_cny, "asset_class": asset_class})
 
     if not holdings:
         st.caption("行情/汇率暂时都获取不到，稍后重试。")
@@ -7633,7 +7634,19 @@ def _render_positions_donut(positions: list):
 
     holdings.sort(key=lambda h: h["value_cny"], reverse=True)
     total_value_cny = sum(h["value_cny"] for h in holdings)
+    st.markdown("**单个持仓分布**")
+    st.caption("按单个持仓的最新市值折算人民币；场外基金使用最近披露净值（T-1），不是盘中实时价格。")
     st.plotly_chart(build_position_donut(holdings, total_value_cny), use_container_width=True, config=_PLOTLY_CONFIG, key="_positions_donut")
+    allocation: dict[str, float] = {}
+    for holding in holdings:
+        allocation[holding["asset_class"]] = allocation.get(holding["asset_class"], 0.0) + holding["value_cny"]
+    allocation_rows = [{"label": label, "value_cny": value} for label, value in sorted(allocation.items(), key=lambda x: x[1], reverse=True)]
+    st.markdown("**资产类别配置**")
+    st.caption("按资产属性汇总；杠杆或反向产品单列，避免与普通股票或基金混为同一风险等级。")
+    st.plotly_chart(
+        build_position_donut(allocation_rows, total_value_cny, show_legend=True, hole=0, show_center=False),
+        use_container_width=True, config=_PLOTLY_CONFIG, key="_asset_allocation_pie",
+    )
     if skipped:
         st.caption(f"有 {skipped} 支持仓因行情/汇率暂时获取不到，未计入本图。")
 
@@ -7922,6 +7935,28 @@ def _render_trade_signals(signals_json: str):
         )
 
 
+def _start_portfolio_analysis(email: str) -> None:
+    """启动一次后台分析；所有入口共用，避免“自动分析”和按钮入口出现两套行为。"""
+    events = Queue()
+
+    def _report(stage: str):
+        events.put(stage)
+
+    def _run_analysis():
+        try:
+            import advisor
+            advisor._load_secrets_into_env()
+            return advisor.advise_portfolio(email, progress=_report)
+        except Exception as e:
+            raise RuntimeError(str(e)) from e
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="portfolio-analysis")
+    st.session_state[_portfolio_analysis_task_key(email)] = {
+        "future": executor.submit(_run_analysis), "executor": executor, "events": events,
+        "history": ["已提交当前持仓的组合分析任务。"],
+    }
+
+
 def _render_portfolio_advice(email: str, positions: list):
     """AI组合分析卡片——跟左边"今日收益"不同，这块不是实时刷新的（AI调用
     有成本，不能每3秒跑一次），只读advisor.py（每工作日17:30跑）写进
@@ -7937,6 +7972,7 @@ def _render_portfolio_advice(email: str, positions: list):
         st.error(error)
     advice = get_latest_portfolio_advice(email)
 
+    is_current = bool(advice and _portfolio_advice_is_current(advice, positions))
     if advice:
         created = advice["created_at"][:19].replace("T", " ")
         st.caption(f"更新于 {created}（UTC）")
@@ -7947,10 +7983,10 @@ def _render_portfolio_advice(email: str, positions: list):
         # 金额是基于生成那一刻的持仓快照(holdings_json)算的，持仓一旦变化
         # （加仓/减仓/清仓）这些具体数字就直接过期了——拿当前真实持仓的
         # symbol集合跟落库时的快照比对，不一致就强提醒，不能沉默展示。
-        if not _portfolio_advice_is_current(advice, positions):
+        if not is_current:
             st.warning(
-                "你的持仓自这份分析生成后已经变化，旧交易信号不会显示；"
-                "请先看一眼下方持仓列表，再点击下方「立即重新分析」刷新。"
+                "你的持仓自这份分析生成后已经变化，旧分析不会套用到当前持仓；"
+                "正在生成一份新的分析。"
             )
         else:
             _render_trade_signals(advice.get("signals_json", ""))
@@ -7974,7 +8010,7 @@ def _render_portfolio_advice(email: str, positions: list):
             else:
                 st.markdown(_render_bold_as_red(advice["analysis_text"]), unsafe_allow_html=True)
     else:
-        st.caption("AI 组合分析还没生成过。")
+        st.caption("当前持仓还没有生成过 AI 组合分析，正在生成。")
 
     if holding_count < 2:
         st.caption("持仓不足2支，暂不生成集中度分析")
@@ -7985,34 +8021,28 @@ def _render_portfolio_advice(email: str, positions: list):
         st.button("组合分析进行中", disabled=True, use_container_width=True)
         return
 
+    # 旧分析与当前持仓不一致时，展示旧结论是风险；但把整块留空也会让用户
+    # 误以为系统没有分析。对每一份持仓快照只自动提交一次后台任务，完成后
+    # 读取新结果；失败仍保留手动入口，不会在每次页面刷新时重复消耗模型额度。
+    signature = "|".join(
+        f"{p.get('symbol')}:{p.get('shares')}:{p.get('cost_total')}" for p in positions if (p.get("shares") or 0) > 0
+    )
+    auto_key = f"_portfolio_auto_analysis_started_{email}_{signature}"
+    if not is_current and not st.session_state.get(auto_key):
+        st.session_state[auto_key] = True
+        st.session_state[f"_portfolio_advice_last_{email}"] = time.time()
+        _start_portfolio_analysis(email)
+        st.rerun()
+
     throttle_key = f"_portfolio_advice_last_{email}"
     elapsed = time.time() - st.session_state.get(throttle_key, 0)
     if elapsed < _PORTFOLIO_REANALYZE_COOLDOWN:
         st.button(f"请稍后再试（{int(_PORTFOLIO_REANALYZE_COOLDOWN - elapsed)}秒冷却）", disabled=True, use_container_width=True)
         return
 
-    if st.button("立即重新分析", key=f"_portfolio_reanalyze_{email}", use_container_width=True):
+    if st.button("立即重新分析", key=f"_portfolio_reanalyze_{email}", type="primary", use_container_width=True):
         st.session_state[throttle_key] = time.time()
-        events = Queue()
-
-        def _report(stage: str):
-            events.put(stage)
-
-        def _run_analysis():
-            try:
-                import advisor
-                advisor._load_secrets_into_env()
-                return advisor.advise_portfolio(email, progress=_report)
-            except Exception as e:
-                raise RuntimeError(str(e)) from e
-
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="portfolio-analysis")
-        st.session_state[task_key] = {
-            "future": executor.submit(_run_analysis),
-            "executor": executor,
-            "events": events,
-            "history": ["已提交组合分析任务。"],
-        }
+        _start_portfolio_analysis(email)
         st.rerun()
 
 
@@ -9184,7 +9214,7 @@ else:
                     # 都压成半宽，图、数字和长分析互相抢视线。改成首页同款的单列
                     # 信息流：先看状态和真实仓位，再按需展开配置、预算和风险信息。
                     st.markdown("**持仓概览**")
-                    _render_positions_today_pnl(holding_items)
+                    _render_positions_today_pnl(holding_items, _email)
 
                     st.divider()
                     st.markdown("**当前持仓**")
@@ -9212,7 +9242,8 @@ else:
                         _render_portfolio_advice(_email, holding_items)
 
                     st.divider()
-                    with st.expander("组合风险体检", expanded=False):
+                    st.markdown("**组合风险体检**")
+                    with st.container(key="portfolio_risk_full"):
                         _render_portfolio_risk(holding_items)
 
         elif active_section == "自选":

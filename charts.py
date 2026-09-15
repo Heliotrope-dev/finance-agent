@@ -953,7 +953,7 @@ _DONUT_COLORS = [
 
 def build_position_donut(
     holdings: list[dict], total_value_cny: float, currency_symbol: str = "¥", show_legend: bool = False,
-    center_label: str = "总资产",
+    center_label: str = "总资产", hole: float = 0.62, show_center: bool = True,
 ) -> go.Figure:
     """持仓占比环形图。holdings: [{"label": "名称（代码）", "value_cny": 折算后市值}, ...]，
     调用方（app.py）负责按金额降序排好、汇率折算好——这里不做排序也不做汇率转换，
@@ -990,7 +990,7 @@ def build_position_donut(
 
     fig = go.Figure(
         go.Pie(
-            labels=labels, values=values, hole=0.62,
+            labels=labels, values=values, hole=hole,
             marker=dict(colors=colors, line=dict(color="#fff", width=2)),
             textinfo="percent", textposition="inside",
             hovertemplate=f"%{{label}}<br>{currency_symbol}%{{value:,.0f}}（%{{percent}}）<extra></extra>",
@@ -1001,10 +1001,11 @@ def build_position_donut(
     # 传进来的可能是"含现金的总资产"，也可能只是"持仓市值"（AI模拟盘那两个
     # 饼图就是一个传总资产、一个传持仓合计），一律标"总资产"会让第二个图
     # 凭空少掉现金那部分，用户核对时对不上账。标签跟着调用方传的数据走。
-    fig.add_annotation(
-        text=f"{center_label}<br><b style='font-size:1.3em'>{currency_symbol}{total_value_cny:,.0f}</b>",
-        showarrow=False, font=dict(size=13), align="center",
-    )
+    if show_center:
+        fig.add_annotation(
+            text=f"{center_label}<br><b style='font-size:1.3em'>{currency_symbol}{total_value_cny:,.0f}</b>",
+            showarrow=False, font=dict(size=13), align="center",
+        )
     fig.update_layout(
         height=300 if not show_legend else 360,
         margin=dict(l=10, r=10, t=10, b=10),
@@ -1015,6 +1016,36 @@ def build_position_donut(
         dragmode=False,
         xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
     )
+    return fig
+
+
+def build_portfolio_value_curve(points: list[dict]) -> go.Figure:
+    """真实持仓市值快照曲线；不插值，也不把成本或单日盈亏伪装成历史收益。"""
+    df = pd.DataFrame(points).sort_values("snapshot_at").reset_index(drop=True)
+    start_value = float(df["net_value_cny"].iloc[0])
+    end_value = float(df["net_value_cny"].iloc[-1])
+    line_color = UP_COLOR if end_value >= start_value else DOWN_COLOR
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["snapshot_at"], y=df["net_value_cny"], mode="lines",
+        line=dict(color=line_color, width=1.75, shape="linear"),
+        hovertemplate="%{x|%Y-%m-%d %H:%M}<br>持仓市值 ¥%{y:,.0f}<extra></extra>",
+    ))
+    last = df.iloc[-1]
+    fig.add_trace(go.Scatter(
+        x=[last["snapshot_at"]], y=[last["net_value_cny"]], mode="markers",
+        marker=dict(size=6, color=line_color), hoverinfo="skip", showlegend=False,
+    ))
+    fig.add_hline(y=start_value, line=dict(color="rgba(23,24,28,0.16)", width=1))
+    fig.add_annotation(
+        x=last["snapshot_at"], y=end_value, text=f"  ¥{end_value:,.0f}", showarrow=False,
+        xanchor="left", yanchor="middle", font=dict(family=_CHART_FONT, size=12, color=line_color),
+    )
+    y_min, y_max = min(start_value, float(df["net_value_cny"].min())), max(start_value, float(df["net_value_cny"].max()))
+    y_pad = max((y_max - y_min) * 0.18, max(y_max, 1) * 0.002)
+    _apply_chart_theme(fig, height=250, margin=dict(l=6, r=76, t=18, b=6))
+    fig.update_layout(yaxis=dict(range=[y_min - y_pad, y_max + y_pad], tickprefix="¥", tickformat=",.0f", zeroline=False))
+    fig.update_xaxes(tickformat="%m-%d\n%H:%M", showgrid=False, nticks=7)
     return fig
 
 

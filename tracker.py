@@ -432,6 +432,23 @@ def init_db():
             """
         )
 
+        # 真实持仓的市值快照与 AI 模拟盘分表保存：前者是用户自己录入的真实仓位，
+        # 不能与模拟账户的虚拟现金、币种和采样口径混在一起。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS portfolio_equity_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                snapshot_at TEXT NOT NULL,
+                net_value_cny REAL NOT NULL
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_portfolio_equity_snapshots_email_time "
+            "ON portfolio_equity_snapshots(email, snapshot_at)"
+        )
+
         # sim_agent_lessons：AI模拟盘的长期经验教训——2026-09-02用户明确要求
         # "他也要学习，想让他变强大"。sim_agent.py每次决策时能看到的历史只有
         # 最近_HISTORY_CONTEXT_SIZE(5)次的短期战绩，跨天/跨周的规律性教训看
@@ -1029,6 +1046,43 @@ def get_equity_snapshots(email: str, limit: int = 500) -> list[dict]:
             "ORDER BY snapshot_at DESC LIMIT ?", (email, cutover, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def log_portfolio_equity_snapshot(email: str, net_value_cny: float, min_interval_seconds: int = 300) -> bool:
+    """记录真实持仓市值，限频以避免页面 10 秒刷新制造伪密集历史。"""
+    init_db()
+    now = datetime.now(timezone.utc)
+    with closing(_conn()) as c:
+        row = c.execute(
+            "SELECT snapshot_at FROM portfolio_equity_snapshots WHERE email = ? "
+            "ORDER BY snapshot_at DESC LIMIT 1", (email,),
+        ).fetchone()
+        if row:
+            try:
+                last = datetime.fromisoformat(row[0])
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                if (now - last).total_seconds() < min_interval_seconds:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        c.execute(
+            "INSERT INTO portfolio_equity_snapshots (email, snapshot_at, net_value_cny) VALUES (?, ?, ?)",
+            (email, now.isoformat(), float(net_value_cny)),
+        )
+        c.commit()
+        return True
+
+
+def get_portfolio_equity_snapshots(email: str, limit: int = 500) -> list[dict]:
+    init_db()
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT snapshot_at, net_value_cny FROM portfolio_equity_snapshots WHERE email = ? "
+            "ORDER BY snapshot_at DESC LIMIT ?", (email, limit),
+        ).fetchall()
+    return list(reversed([dict(r) for r in rows]))
 
 
 def log_sim_agent_lesson(email: str, lesson_text: str) -> int:

@@ -325,6 +325,17 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
 [class*="st-key-my_about_"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] p {
     font-size: var(--fs-md);
 }
+/* 应用指南不再吃 Markdown 的粗体/段间距默认值：用与全站一致的字体栈、
+   正文档字号和小标题层级，避免看起来像从帮助中心嵌进来的另一套页面。 */
+.app-guide-copy, .app-guide-copy * {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+                 'Noto Sans SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif !important;
+}
+.app-guide-section { padding: 13px 0; border-bottom: 1px solid var(--line-divider); }
+.app-guide-section:first-child { padding-top: 3px; }
+.app-guide-section:last-child { border-bottom: 0; padding-bottom: 3px; }
+.app-guide-title { color: var(--text-primary); font-size: var(--fs-sm); font-weight: var(--fw-medium); margin-bottom: 5px; }
+.app-guide-section p { color: var(--text-secondary) !important; font-size: var(--fs-md) !important; line-height: var(--lh-body); margin: 0 !important; }
 /* 项目里所有小节标题都是 st.markdown("**标题**")，也就是一个只含<strong>的<p>。
    2026-09-12改（前端审计第14条"层级太平"）：上一版把它渲染成 0.825rem 的
    灰色大写眉标，出发点是"安静"，但实测的结果是标题和正文分不出来。安静和
