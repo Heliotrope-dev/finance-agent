@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""自选股逐支评分简报——09:00港股/21:00美股的编排入口，全部北京时间。
+"""自选股评分 Top 3 简报——09:00港股/21:00美股的编排入口，全部北京时间。
 
 2026-09-08新增，2026-09-11改版。流程：交易日守卫 -> advisor.judge_market_
-watchlist(该市场自选逐支打分) -> render_watchlist_report(每支都出：评分+
-方向+一句话理由) -> render_market_text -> 落盘market快照。全部资料链路复用
+watchlist(该市场自选逐支打分) -> render_watchlist_report(评分前三名，详细理由)
+-> 落盘market快照。全部资料链路复用
 advisor._judge_one()现成的完整数据收集（财务+季度趋势+估值+技术面+新闻+
 价格位置+分析师一致预期+筹码面+公司行为+市场环境），不简化、不裁剪。
 
@@ -11,8 +11,8 @@ advisor._judge_one()现成的完整数据收集（财务+季度趋势+估值+技
 ≥3:1才能进Top3——用户反馈两个问题都是真的：(1)天天在扫一堆自己根本不
 关心的热门股，白费token；(2)盈亏比闸门太严，连续好几天Top3是空的，报告
 变成"无"，等于没有产出。现在改成：候选池就是自选本身（不再补热门股），
-每一支都出评分+方向+理由，不再用盈亏比卡掉大多数——盈亏比信息还在，作为
-每支的参考数据点，不再是能不能出现在报告里的门槛。
+每一支仍完整评分，但微信只播报综合得分前三名；盈亏比仍属于可执行计划的
+确定性风控闸门，不混进研究排名。
 
 默认只把正文打印到 stdout，方便人工排查；加 ``--deliver`` 后，由项目内
 已验证回执的微信桥直接投递。不要经由 OpenClaw agentTurn 转发：这份扫描
@@ -26,14 +26,9 @@ import sys
 from pathlib import Path
 
 import advisor
+import tracker
 
 _TRADING_CAL = Path("/root/.openclaw/workspace/scripts/trading_cal.py")
-
-# 结论排序：买入排最前面，其次持有，然后观望，卖出排最后——用户翻简报
-# 时最想先看到的是"现在能不能买"，其次是"已经在拿的还要不要留"，"不用管"
-# 的排后面，跟“操作紧迫度”对齐，不是随便挑的顺序。
-_ACTION_ORDER = {"买入": 0, "持有": 1, "观望": 2, "卖出": 3}
-
 
 def _is_trading_day(market: str) -> bool:
     if not _TRADING_CAL.exists():
@@ -47,32 +42,61 @@ def _is_trading_day(market: str) -> bool:
         return True
 
 
+def _extract_report_reason(text: str, max_len: int = 420) -> str:
+    """提取 Top 3 用的完整理由，不把维度分和总分重复塞进正文。"""
+    import re
+
+    m = re.search(
+        r"\*{0,2}理由\*{0,2}\s*[：:]\s*(.+?)(?=\n\s*(?:\*{0,2}(?:维度打分|综合得分|置信度)\*{0,2})\s*[：:]|\Z)",
+        text or "", re.S,
+    )
+    if not m:
+        return advisor._extract_short_reason(text) or "未能解析出详细理由，请以应用内完整判断为准。"
+    reason = re.sub(r"\s+", " ", m.group(1)).strip()
+    if len(reason) > max_len:
+        reason = reason[:max_len].rstrip("，,、；; ") + "…"
+    return reason
+
+
+def _format_breakdown(text: str) -> str:
+    breakdown = tracker.extract_score_breakdown(text or "")
+    labels = (
+        ("fundamental", "基本面", 22), ("price_position", "价格位置", 20),
+        ("technical", "技术面", 20), ("chips", "筹码面", 20),
+        ("analyst", "分析师预期", 8), ("data_certainty", "数据确定性", 10),
+    )
+    if any(breakdown.get(key) is None for key, _, _ in labels):
+        return ""
+    return " · ".join(f"{label}{breakdown[key]}/{maximum}" for key, label, maximum in labels)
+
+
 def render_watchlist_report(market: str, judged: list[dict]) -> str:
-    """每支自选都出一行：名称(代码) 方向 评分分 | 一句话理由。按"结论紧迫度
-    优先、同结论内按分数降序"排序——跟老版本"只挑几支"的Top3思路不同，这里
-    是"全员点名"，用户自己的自选股不该有谁被悄悄漏掉不提。"""
+    """严格按综合得分播报前三名；结论只解释单支股票，不改变名次。"""
     market_label = {"HK": "港股", "US": "美股"}.get(market, market)
     rows = []
     for e in judged:
         text = e.get("fundamental_verdict", "") or ""
-        reason = advisor._extract_short_reason(text) or "（未能解析出理由，见完整判断记录）"
         rows.append({
             "symbol": e.get("symbol", ""),
             "name": e.get("name") or e.get("symbol", ""),
             "action": e.get("action", "观望"),
             "score": e.get("score"),
             "price": e.get("price"),
-            "reason": reason,
+            "reason": _extract_report_reason(text),
+            "breakdown": _format_breakdown(text),
         })
-    rows.sort(key=lambda r: (_ACTION_ORDER.get(r["action"], 9), -(r["score"] or 0)))
+    rows.sort(key=lambda r: -(r["score"] if r["score"] is not None else -1))
+    top_rows = rows[:3]
 
-    lines = [f"【{market_label}自选评分】{len(rows)}支，逐支给方向和理由，不是下单指令："]
-    for r in rows:
+    lines = [f"【{market_label}自选综合评分 Top {len(top_rows)}】已完成{len(rows)}支评分，以下按分数从高到低排列："]
+    for rank, r in enumerate(top_rows, start=1):
         score_text = f"{r['score']}分" if r["score"] is not None else "分数未知"
         price_text = f"{r['price']:.2f}" if isinstance(r["price"], (int, float)) else "—"
         lines.append(
-            f"\n{r['name']}({r['symbol']}) 现价{price_text} · {r['action']} · {score_text}\n"
-            f"  {r['reason']}"
+            f"\n{rank}. {r['name']}（{r['symbol']}）\n"
+            f"现价{price_text} · 结论{r['action']} · 综合{score_text}\n"
+            + (f"评分构成：{r['breakdown']}\n" if r["breakdown"] else "")
+            + f"详细理由：{r['reason']}"
         )
     lines.append(
         "\n仅供参考，不构成投资建议——过往判断的方向一致率参见「我的」页"
