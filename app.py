@@ -3889,24 +3889,56 @@ def _render_home_portfolio_action():
         st.warning("持仓记录已在这份分析后变化，旧交易信号已失效；请到「持仓」页重新分析。")
         return
 
-    # 首页只摘"这个组合现在该怎么办"最相关的几段——总体结论、集中度是
-    # 不是问题、要不要对冲/保险、下一步操作。行业集中/宏观适配/逐支跟踪/
-    # 新增配置建议这几段留给"持仓"页的完整版，首页保持一个摘要该有的长度。
+    # 首页不是完整版组合诊断的缩略本，而是当天的执行面板：把模型的结构化
+    # 信号翻成一条一条的操作。没有可执行信号时就明确显示“观望”，不再把
+    # “总体评估/集中度/对冲/操作建议”四段长文搬过来，让用户误以为需要立刻
+    # 做一堆事。完整证据和逐支理由仍留在「持仓」页。
     _parts = _parse_portfolio_text(advice["analysis_text"])
-    _home_sections = ("总体评估", "集中度风险", "对冲与保险", "操作建议")
-    if _parts:
-        for _name in _home_sections:
-            _body = _parts.get(_name)
-            if not _body:
-                continue
-            st.markdown(
-                f"<div style='font-size:var(--fs-xs);letter-spacing:var(--ls-label);color:var(--fa-muted);"
-                f"text-transform:none;margin:16px 0 6px'>{_name}</div>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(_render_bold_as_red(_body), unsafe_allow_html=True)
-    else:
-        st.markdown(_render_bold_as_red(advice["analysis_text"]), unsafe_allow_html=True)
+    try:
+        signals = json.loads(advice.get("signals_json") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        signals = []
+    actions = [s for s in signals if s.get("action") in ("买入", "卖出")]
+
+    # 用逐支跟踪里的六分类替代信号的三分类：结构化信号只能表达买/卖/不动，
+    # 首页应让用户一眼分清这是减仓、止盈还是割肉，以及是加仓还是定投。
+    tracking = _parts.get("逐支跟踪", "")
+    for signal in actions:
+        display_action = "买入" if signal["action"] == "买入" else "减仓"
+        try:
+            shares = float(signal.get("shares") or 0)
+            amount_cny = float(signal.get("amount_cny") or 0)
+        except (TypeError, ValueError):
+            # 老记录可能来自早期宽松解析，数值字段不合法时宁可不在首页把
+            # 它伪装成可执行订单；完整版仍会保留原始分析供核对。
+            continue
+        match = re.search(
+            rf"{re.escape(str(signal.get('name', '')))}.*?【(继续持有|加仓|减仓|定投|止盈|割肉)】",
+            tracking,
+        )
+        if match:
+            display_action = match.group(1)
+        color = UP_COLOR if signal["action"] == "买入" else DOWN_COLOR
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:12px;"
+            f"padding:10px 0;border-bottom:1px solid var(--fa-border)'>"
+            f"<span style='font-weight:600'>{_esc(str(signal.get('name', '未知标的')))}</span>"
+            f"<span style='color:{color};font-weight:600;white-space:nowrap'>{_esc(display_action)} "
+            f"{shares:g}股 · 约¥{amount_cny:,.0f}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    if not actions:
+        st.markdown("**观望**")
+        st.caption("当前没有需要执行的买卖动作，现有持仓维持。")
+
+    allocation = _parts.get("新增配置建议", "").strip()
+    # 模型明确说“没有合适配置”时不重复显示；有建议才作为最后一条“优化
+    # 配置”呈现，避免和当前持仓的即时交易信号混在一起。
+    if allocation and not re.search(r"暂无|没有.*合适|无.*合适|不建议", allocation):
+        st.markdown("**优化资产配置**")
+        st.markdown(_render_bold_as_red(allocation), unsafe_allow_html=True)
 
 
 def _render_advice_section():
