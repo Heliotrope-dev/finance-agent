@@ -3062,6 +3062,10 @@ def _render_home_map():
 
     markers_js = []
     marker_coords = []
+    # 窄屏不再试图在一张世界地图上同时塞进十一张三行标签：地图只保留点位，
+    # 下方详情卡默认展示上证指数，用户点其它点位时再切换。桌面端仍使用原来的
+    # 全标签总览。这里把卡片所需的确定性行情数据一并传进 iframe。
+    mobile_map_data: dict[str, dict] = {}
     dotted = set()
     anchor_by_name: dict[str, list[int]] = {}
     for name, mkt, lat, lon, dx, dy in _HOME_MAP_MARKERS:
@@ -3091,17 +3095,30 @@ def _render_home_map():
         )
         marker_coords.append([lat, lon])
         # 真实位置上的小圆点。这是"这个指数在哪"的唯一事实来源——文字可以为了
-        # 排版左右挪，圆点不能。墨色不用涨跌红绿：它表达的是位置不是方向，
-        # 染成红绿会多出一组跟数字重复、又跟全站黑白灰调子打架的色块。
-        # 三个美股指数共用纽约一个坐标，圆点只画一次（它们确实是同一个地方）。
+        # 排版左右挪，圆点不能。手机端由圆点本身接收点击，不能再让不可点击的
+        # 圆点与偏移后的隐藏文字标签争夺命中区。纽约的两个指数共用一点，连续
+        # 点按该点会在两个指数之间切换。
         if (lat, lon) not in dotted:
             dotted.add((lat, lon))
             markers_js.append(
-                "L.circleMarker([%s, %s], {radius: 3, color: '#FFFFFF', weight: 1.5,"
-                " fillColor: '#17181C', fillOpacity: 1, interactive: false}).addTo(map);"
-                % (lat, lon)
+                "(function() { var names = [%s], dot = L.circleMarker([%s, %s], {radius: 3, color: '#FFFFFF', weight: 1.5,"
+                " fillColor: '#17181C', fillOpacity: 1, interactive: true}).addTo(map);"
+                " mobileDots[%s] = {dot: dot, names: names};"
+                " dot.on('click', function(e) { if (!mobileMapMode()) return; L.DomEvent.stopPropagation(e);"
+                " var i = names.indexOf(activeMobileName); showMobileDetail(names[(i + 1) %% names.length]); }); })();"
+                % (json.dumps(name), lat, lon, json.dumps(f"{lat},{lon}"))
+            )
+        else:
+            markers_js.append(
+                "mobileDots[%s].names.push(%s);" % (json.dumps(f"{lat},{lon}"), json.dumps(name))
             )
         href = href_by_name.get(name)
+        mobile_map_data[name] = {
+            "latest": float(idx["最新"]),
+            "change_pct": float(idx["涨跌幅"]),
+            "color": color,
+            "href": href or "",
+        }
         if href:
             # target='_top'：这个地图本身渲染在st.components.v1.html的iframe里，
             # 普通<a>点击只会在iframe内部跳转、看不到效果，_top让浏览器在最外层
@@ -3119,12 +3136,15 @@ def _render_home_map():
             # 存进tcMarkers，供后面的JS轮询按名字找到这个marker原地更新图标。
             markers_js.append(
                 "tcMarkers[%s] = L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [68, 38], iconAnchor: [%s, %s]})}).addTo(map);"
-                % (json.dumps(name), lat, lon, json.dumps(label), anchor_x, anchor_y)
+                "tcMarkers[%s].on('click', function() { showMobileDetail(%s); });"
+                % (json.dumps(name), lat, lon, json.dumps(label), anchor_x, anchor_y,
+                   json.dumps(name), json.dumps(name))
             )
         else:
             markers_js.append(
-                "L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [68, 38], iconAnchor: [%s, %s]})}).addTo(map);"
-                % (lat, lon, json.dumps(label), anchor_x, anchor_y)
+                "(function() { var marker = L.marker([%s, %s], {icon: L.divIcon({html: %s, className: '', iconSize: [68, 38], iconAnchor: [%s, %s]})}).addTo(map);"
+                "marker.on('click', function() { showMobileDetail(%s); }); })();"
+                % (lat, lon, json.dumps(label), anchor_x, anchor_y, json.dumps(name))
             )
 
     if not markers_js:
@@ -3165,15 +3185,17 @@ def _render_home_map():
           filter: saturate(0) brightness(1.14) contrast(.86);
           opacity: .82;
       }}
-      /* 窄屏把标签再调小一档。手机上即使视野已经按 fitBounds 收进来了，
-         十二个标签挤在三百多像素宽的图上仍然偏密，字号降下来能明显缓解，
-         同时行高压紧、去掉描边的模糊半径以免小字发虚。 */
+      /* 窄屏切换为点选详情：地理位置仍完整呈现，文字改由浮层卡片承载，
+         不再让密集市场的标签彼此覆盖。 */
       @media (max-width: 640px) {{
-          #home-map .leaflet-marker-icon > div {{
-              font-size: .52rem !important; line-height: 1.2 !important;
-              text-shadow: 0 1px 1px rgba(255,255,255,.95) !important;
+          /* 手机上的命中区必须就是可见圆点：旧版隐藏文字标签仍占着一块偏移的
+             68×38px 热区，导致点圆点经常没有反应。 */
+          #home-map .leaflet-marker-icon {{
+              opacity: 0 !important; pointer-events: none !important;
           }}
-          #home-map .leaflet-marker-icon > div > div:last-child {{ font-size: .48rem !important; }}
+          #mobile-map-detail {{
+              display: flex !important; align-items: center; justify-content: space-between;
+          }}
       }}
       /* 署名条也压淡，它是合规必需但不该有存在感。 */
       #home-map .leaflet-control-attribution {{
@@ -3182,7 +3204,10 @@ def _render_home_map():
       #home-map .leaflet-control-attribution a {{ color: #7E828D !important; }}
       #home-map .leaflet-control-attribution {{ color: #7E828D !important; }}
     </style>
-    <div id="home-map" style="height:300px;border-radius:2px;overflow:hidden"></div>
+    <div id="home-map-wrap" style="position:relative;height:300px">
+      <div id="home-map" style="height:300px;border-radius:2px;overflow:hidden"></div>
+      <div id="mobile-map-detail" style="display:none;position:absolute;left:10px;right:10px;bottom:10px;z-index:1000;padding:12px 14px;border:1px solid rgba(23,24,28,.12);border-radius:10px;background:rgba(255,255,255,.96);box-shadow:0 6px 20px rgba(23,24,28,.12);min-height:58px"></div>
+    </div>
     <script>
     // 这张图是"一张会自己刷新数字的静态图"，不是可操作的地图——所有交互
     // 全部关掉。用户2026-09-12原话："那个图片我们就定死不要放大缩小移动，
@@ -3219,7 +3244,42 @@ def _render_home_map():
         attribution: '&copy; OpenStreetMap contributors', maxZoom: 8
     }}).addTo(map);
     var tcMarkers = {{}};
+    var mobileDots = {{}};
     {' '.join(markers_js)}
+    var mobileMapData = {json.dumps(mobile_map_data)};
+    var activeMobileName = null;
+    function mobileMapMode() {{ return window.matchMedia('(max-width: 640px)').matches; }}
+    function paintMobileDots() {{
+        if (!mobileMapMode()) return;
+        Object.keys(mobileDots).forEach(function(key) {{
+            var record = mobileDots[key], selected = record.names.indexOf(activeMobileName) >= 0;
+            var selectedItem = mobileMapData[activeMobileName];
+            record.dot.setStyle({{
+                radius: selected ? 7 : 4,
+                color: '#FFFFFF', weight: selected ? 2 : 1.5,
+                fillColor: selected && selectedItem ? selectedItem.color : '#17181C',
+                fillOpacity: selected ? 1 : .9,
+            }});
+        }});
+    }}
+    function showMobileDetail(name) {{
+        if (!mobileMapMode() || !mobileMapData[name]) return;
+        activeMobileName = name;
+        paintMobileDots();
+        var item = mobileMapData[name];
+        var positive = item.change_pct >= 0;
+        var sign = positive ? '+' : '';
+        var action = item.href
+            ? "<a href='" + item.href + "' target='_top' style='font-size:12px;color:#17181C;text-decoration:none;font-weight:600'>查看详情 →</a>"
+            : "<span style='font-size:12px;color:#7E828D'>点按其他圆点切换</span>";
+        document.getElementById('mobile-map-detail').innerHTML =
+            "<div><div style='font-size:11px;color:#7E828D;letter-spacing:.04em;margin-bottom:3px'>全球指数 · 点按圆点切换</div>"
+            + "<div style='font-size:17px;font-weight:650;color:#17181C'>" + name + "</div></div>"
+            + "<div style='text-align:right'><div style='font-size:19px;font-weight:700;letter-spacing:-.02em;color:" + item.color + "'>"
+            + Number(item.latest).toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}) + "</div>"
+            + "<div style='font-size:13px;color:" + item.color + ";margin:2px 0 4px'>" + sign + Number(item.change_pct).toFixed(2) + "%</div>"
+            + action + "</div>";
+    }}
     // 标签默认以坐标点为中心(iconAnchor=[34,38]，Leaflet据此设inline的
     // margin-left:-34px)，靠近地图左右边界的标记因此有一半落在容器外，被
     // overflow:hidden裁掉——实测左边"标普500"只剩"谱500"、右边"日经225"
@@ -3276,9 +3336,12 @@ def _render_home_map():
         }});
     }}
     fitAll();
+    // 手机上先给出最常用的上证指数，避免首屏只有一张没有说明的点阵图。
+    showMobileDetail(mobileMapData["上证指数"] ? "上证指数" : Object.keys(mobileMapData)[0]);
     // 容器尺寸变化时让Leaflet重新测量（否则瓦片留白），重新适配视野并收边。
     window.addEventListener('resize', function() {{
         map.invalidateSize(); fitAll(); clampLabels();
+        if (mobileMapMode()) showMobileDetail(activeMobileName || (mobileMapData["上证指数"] ? "上证指数" : Object.keys(mobileMapData)[0]));
     }});
     // 拖动地图会把原本在中间的标记带到边界上，同样要重新收边。
     map.on('moveend', clampLabels);
@@ -3308,6 +3371,11 @@ def _render_home_map():
                     var changePct = parseFloat(fields[32]);
                     if (isNaN(last) || isNaN(changePct)) return;
                     var color = changeAmt >= 0 ? '{UP_COLOR}' : '{DOWN_COLOR}';
+                    if (mobileMapData[name]) {{
+                        mobileMapData[name].latest = last;
+                        mobileMapData[name].change_pct = changePct;
+                        mobileMapData[name].color = color;
+                    }}
                     // 这份必须跟上面首次渲染那段保持完全一致的样式，否则
                     // 3秒一次的行情刷新会把这几个标签又变回带框的白卡。
                     var inner = "<div style='padding:1px 3px;font-size:0.62rem;white-space:nowrap;line-height:1.3;"
@@ -3328,6 +3396,7 @@ def _render_home_map():
                     // 歪了"，而且只歪这四个，非常难查。
                     var anc = anchorByName[name] || [34, -8];
                     tcMarkers[name].setIcon(L.divIcon({{html: html, className: '', iconSize: [68, 38], iconAnchor: anc}}));
+                    if (activeMobileName === name) showMobileDetail(name);
                     needClamp = true;
                 }});
                 // setIcon整个重建了divIcon，Leaflet会把margin-left重置回默认的
