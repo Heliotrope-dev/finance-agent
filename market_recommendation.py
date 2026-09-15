@@ -59,6 +59,11 @@ def _extract_report_reason(text: str, max_len: int = 420) -> str:
 
 
 def _format_breakdown(text: str) -> str:
+    import re
+
+    special = re.search(r"专用维度打分\s*[：:]\s*(.+)", text or "")
+    if special:
+        return special.group(1).strip()
     breakdown = tracker.extract_score_breakdown(text or "")
     labels = (
         ("fundamental", "基本面", 22), ("price_position", "价格位置", 20),
@@ -71,7 +76,7 @@ def _format_breakdown(text: str) -> str:
 
 
 def render_watchlist_report(market: str, judged: list[dict]) -> str:
-    """严格按综合得分播报前三名；结论只解释单支股票，不改变名次。"""
+    """同一资产类别内按分数播报前三名，绝不把不同评分尺子混排。"""
     market_label = {"HK": "港股", "US": "美股"}.get(market, market)
     rows = []
     for e in judged:
@@ -84,20 +89,29 @@ def render_watchlist_report(market: str, judged: list[dict]) -> str:
             "price": e.get("price"),
             "reason": _extract_report_reason(text),
             "breakdown": _format_breakdown(text),
+            "asset_kind": e.get("asset_kind") or advisor._asset_kind(market, e.get("name") or ""),
         })
-    rows.sort(key=lambda r: -(r["score"] if r["score"] is not None else -1))
-    top_rows = rows[:3]
-
-    lines = [f"【{market_label}自选综合评分 Top {len(top_rows)}】已完成{len(rows)}支评分，以下按分数从高到低排列："]
-    for rank, r in enumerate(top_rows, start=1):
-        score_text = f"{r['score']}分" if r["score"] is not None else "分数未知"
-        price_text = f"{r['price']:.2f}" if isinstance(r["price"], (int, float)) else "—"
-        lines.append(
-            f"\n{rank}. {r['name']}（{r['symbol']}）\n"
-            f"现价{price_text} · 结论{r['action']} · 综合{score_text}\n"
-            + (f"评分构成：{r['breakdown']}\n" if r["breakdown"] else "")
-            + f"详细理由：{r['reason']}"
-        )
+    labels = {
+        "equity": "普通股票", "leveraged_inverse": "杠杆/反向产品（专用评分）",
+        "crypto": "加密资产（专用评分）",
+    }
+    lines = [f"【{market_label}自选评分】已完成{len(rows)}支评分；不同资产类别使用不同评分尺子，不跨类混排。"]
+    for kind in ("equity", "leveraged_inverse", "crypto"):
+        group = [r for r in rows if r["asset_kind"] == kind]
+        if not group:
+            continue
+        group.sort(key=lambda r: -(r["score"] if r["score"] is not None else -1))
+        top_rows = group[:3]
+        lines.append(f"\n{labels[kind]} Top {len(top_rows)}（类内按分数从高到低）：")
+        for rank, r in enumerate(top_rows, start=1):
+            score_text = f"{r['score']}分" if r["score"] is not None else "分数未知"
+            price_text = f"{r['price']:.2f}" if isinstance(r["price"], (int, float)) else "—"
+            lines.append(
+                f"\n{rank}. {r['name']}（{r['symbol']}）\n"
+                f"现价{price_text} · 结论{r['action']} · 综合{score_text}\n"
+                + (f"评分构成：{r['breakdown']}\n" if r["breakdown"] else "")
+                + f"详细理由：{r['reason']}"
+            )
     lines.append(
         "\n仅供参考，不构成投资建议——过往判断的方向一致率参见「我的」页"
         "AI判断准确率，目前还在被验证阶段，不是确定性预测。"

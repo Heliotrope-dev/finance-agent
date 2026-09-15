@@ -1249,12 +1249,58 @@ def _authoritative_score(text: str) -> int | None:
     六项没有全部解析出来时退回模型自写的总分——解析失败不该连带把这条
     判断的分数整个丢掉（那会让它在排行榜里直接沉底，比分数略有偏差更糟）。
     """
+    # 非股票资产走专用维度。仍由代码把各项相加，不能信任模型自己写的总分；
+    # 但这些分项的含义和权重不再伪装成普通股票的六维口径。
+    special = re.search(r"专用维度打分\s*[：:]\s*(.+)", text or "")
+    if special:
+        values = [int(v) for v in re.findall(r"(\d{1,3})\s*/\s*\d{1,3}", special.group(1))]
+        if len(values) == 5:
+            return max(0, min(100, sum(values)))
     breakdown = tracker.extract_score_breakdown(text)
     keys = ("fundamental", "price_position", "technical", "chips", "analyst", "data_certainty")
     values = [breakdown.get(k) for k in keys]
     if all(v is not None for v in values):
         return max(0, min(100, sum(values)))
     return _extract_score(text)
+
+
+def _asset_kind(market: str, name: str) -> str:
+    """确定性识别不能与普通股票共用评分尺子的资产类别。"""
+    if market == "CC":
+        return "crypto"
+    text = (name or "").lower()
+    leveraged_terms = ("两倍", "三倍", "2x", "3x", "杠杆", "反向", "做多", "做空", "ultra", "short")
+    return "leveraged_inverse" if any(term in text for term in leveraged_terms) else "equity"
+
+
+def _asset_scoring_addendum(kind: str) -> str:
+    """专用评分模板优先于通用股票六维模板，分数不可跨类别混排。"""
+    if kind == "crypto":
+        return """
+
+本标的是加密资产。以下规则优先于上面的普通股票六维评分和目标价规则：
+- 不得因为没有财报、PE 或卖方目标价扣分；这些指标对加密资产不适用。
+- 优先依据加密市场结构（BTC 主导率、ETF 净流）、自身趋势/相对强弱、波动率与
+  流动性、以及数据完整度。没有链上或资金流事实时必须明确缺失，不能编造。
+- 这是高波动、24小时交易资产；止损与仓位必须比普通股票更保守，并说明失效条件。
+- 用且只用下面五项，取代普通股票的“维度打分”，并按分项之和给总分：
+专用维度打分：市场结构X/25 · 趋势与相对强弱X/25 · 进场结构X/20 · 波动与流动性X/20 · 数据确定性X/10
+综合得分：[五项之和的0-100整数]
+"""
+    if kind == "leveraged_inverse":
+        return """
+
+本标的是杠杆或反向单一标的 ETF。以下规则优先于上面的普通股票六维评分和目标价规则：
+- 它不是经营公司，禁止用自身营收、PE、ROE、卖方目标价缺失来扣分，也不能与普通
+  股票按同一总分混排。核心是跟踪标的方向、产品自身进场结构、日波动和每日重置损耗。
+- 必须先判断跟踪标的是明确趋势还是震荡；震荡才显著放大每日重置损耗，趋势明确时
+  不能机械惩罚。若没有可验证的跟踪标的资料，数据确定性最多3/15，结论不得高于观望。
+- 止损按杠杆倍数折算为跟踪标的的等效波动，并明确这是短线战术仓位，不作长期持有建议。
+- 用且只用下面五项，取代普通股票的“维度打分”，并按分项之和给总分：
+专用维度打分：跟踪标的趋势X/30 · 产品进场结构X/25 · 波动与损耗风险X/20 · 流动性与跟踪质量X/10 · 数据确定性X/15
+综合得分：[五项之和的0-100整数]
+"""
+    return ""
 
 
 def _extract_short_reason(text: str, max_len: int = 130) -> str:
@@ -2372,7 +2418,8 @@ def _build_judge_user_content(symbol: str, market: str, name: str, financial_sum
 def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summary: str,
                              technical_summary: str, news_summary: str, position_summary: str = "",
                              valuation_summary: str = "", holding: bool = True,
-                             chips_summary: str = "", analyst_view: str = "") -> dict:
+                             chips_summary: str = "", analyst_view: str = "",
+                             asset_kind: str = "equity") -> dict:
     """带多空辩论的判断——只给持仓用（见上面的成本考量注释）。bull/bear两个
     论证并发生成（互不依赖，同时发也不影响独立性——两边都只能看到原始数据，
     看不到对方的论证，这才是真正各自独立的论据，不是一个抄另一个）。"""
@@ -2477,7 +2524,7 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
     bull_text, bear_text = stance_results[0], stance_results[1]
 
     final_user_content = f"{data_context}\n\n多头论证：\n{bull_text}\n\n空头论证：\n{bear_text}"
-    system_prompt = _JUDGE_SYSTEM + (_HOLDING_ADDENDUM if holding else "") + _DEBATE_JUDGE_ADDENDUM
+    system_prompt = _JUDGE_SYSTEM + _asset_scoring_addendum(asset_kind) + (_HOLDING_ADDENDUM if holding else "") + _DEBATE_JUDGE_ADDENDUM
 
     # 裁判优先用_client()/_MODEL(千问)——2026-08-26曾经短暂换成DeepSeek
     # 第三方（理由见上面模块级注释），但团队决定两个项目都彻底不用
@@ -2516,9 +2563,10 @@ def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summa
 def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
                  technical_summary: str, news_summary: str, position_summary: str = "",
                  valuation_summary: str = "", holding: bool = False,
-                 chips_summary: str = "", analyst_view: str = "") -> dict:
+                 chips_summary: str = "", analyst_view: str = "",
+                 asset_kind: str = "equity") -> dict:
     user_content = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary, chips_summary, analyst_view)
-    system_prompt = _JUDGE_SYSTEM + _HOLDING_ADDENDUM if holding else _JUDGE_SYSTEM
+    system_prompt = _JUDGE_SYSTEM + _asset_scoring_addendum(asset_kind) + (_HOLDING_ADDENDUM if holding else "")
     # max_retries=0+timeout=90：真实故障(2026-09-02)排查judge_stock_with_
     # debate那边的卡死问题时顺带发现——这里的.create()调用同样从来没设过
     # 超时，是同一类风险（见_call_stance/judge_stock_with_debate最终裁判
@@ -3175,6 +3223,7 @@ def _price_position_text(symbol: str, market: str) -> str:
 def _judge_one(item: dict, source: str) -> dict | None:
     holding = source == "position"
     symbol, market, name = item["symbol"], item.get("market", "US"), item.get("name", "")
+    asset_kind = _asset_kind(market, name)
     try:
         price = ds.get_stock_realtime(symbol, market).get("最新价")
     except Exception:
@@ -3230,6 +3279,14 @@ def _judge_one(item: dict, source: str) -> dict | None:
     _env = _market_context_text(symbol, market)
     if _env:
         chips = (chips + "\n\n" if chips else "") + "市场环境：\n" + _env
+    if asset_kind == "crypto":
+        try:
+            regime = ds.get_crypto_regime()
+        except Exception:
+            regime = {}
+        if regime:
+            facts = "；".join(f"{k}：{v}" for k, v in regime.items() if "来源" not in k)
+            chips = (chips + "\n\n" if chips else "") + f"加密市场结构：{facts}"
     # 分析师预期与催化剂（2026-09-05新增，打分的第六维）
     analyst_view = _analyst_view_text(symbol, market, price)
     # 公开网页材料（2026-09-05新增）：接口给数字，网页给理由和催化剂。
@@ -3246,16 +3303,16 @@ def _judge_one(item: dict, source: str) -> dict | None:
         # "screen")继续用单次判断——几十支候选一天判断一遍，辩论版本的
         # 调用量级在那个场景下不划算，见judge_stock_with_debate上面的注释。
         if holding:
-            verdict = judge_stock_with_debate(symbol, market, name, fin, tech, news, position, valuation, holding=True, chips_summary=chips, analyst_view=analyst_view)
+            verdict = judge_stock_with_debate(symbol, market, name, fin, tech, news, position, valuation, holding=True, chips_summary=chips, analyst_view=analyst_view, asset_kind=asset_kind)
         else:
-            verdict = judge_stock(symbol, market, name, fin, tech, news, position, valuation, holding=False, chips_summary=chips, analyst_view=analyst_view)
+            verdict = judge_stock(symbol, market, name, fin, tech, news, position, valuation, holding=False, chips_summary=chips, analyst_view=analyst_view, asset_kind=asset_kind)
     except Exception as e:
         return {"symbol": symbol, "market": market, "name": name, "error": str(e)}
     return {
         "symbol": symbol, "market": market, "name": name, "price": price,
         "action": verdict["action"], "score": verdict.get("score"),
         "fundamental_verdict": verdict["fundamental_verdict"],
-        "technical_signal": tech, "source": source,
+        "technical_signal": tech, "source": source, "asset_kind": asset_kind,
     }
 
 
