@@ -101,6 +101,17 @@ def check() -> dict:
     st = _load_state()
     fired = st.get("fired") or {}
     levels = _plan_levels()
+    # 2026-09-15真实故障：alert_queue.enqueue()按event_key做主键去重，且这个
+    # 去重是永久的、不区分日期——同一支票同一类事件（比如止损）只要曾经在
+    # 任何一天成功推送过一次，往后不管过多久再次触发，enqueue()都会找到那条
+    # 旧的'delivered'行直接no-op，flush()自然也没有新行可发，"送达"永远是0，
+    # 且_load_state()文档写的"去重是每天最多一次，不是永远只推一次"从未真正
+    # 生效过——用户当天设的止损、往后任何一天再跌破都不会再收到提醒，风险
+    # 类功能却在悄悄失效，比完全没有这个功能更危险（用户会误以为在被盯着）。
+    # 根因是event_key（同时也是下面once()的去重key）里没有日期，导致跨天的
+    # "同一支票同一类事件"在alert_queue这层被当成了同一条。加上日期后跟
+    # fired状态文件的每日重置对齐，语义才是文档描述的那样。
+    _today = dt.date.today().isoformat()
 
     # First retry any earlier accepted-for-delivery failure.  This runs before
     # looking at the market so an alert is not abandoned merely because the
@@ -173,14 +184,20 @@ def check() -> dict:
         stop, target = lv.get("止损"), lv.get("目标")
 
         def once(kind: str) -> bool:
-            """同一支票同一类事件每天只推一次。
+            """同一支票同一类事件每天只推一次，不同天各自独立算一次。
 
             Do not mutate ``fired`` here: detection is not delivery.  The old
             implementation wrote this state before Weixin had accepted the
             message, so a transient bridge failure suppressed a real alert for
             the rest of the trading day.
+
+            key里带上日期，跟下面传给alert_queue.enqueue()的event_key保持
+            一致——否则fired每天重置了，但alert_queue按永久key去重，今天
+            的新触发会被历史上任何一天送达过的同名key挡住，送达状态查出来
+            还是"已送达"，但那是上次的，不是今天的（见check()开头的详细
+            说明）。
             """
-            k = f"{key}:{kind}"
+            k = f"{key}:{kind}:{_today}"
             return not fired.get(k)
 
         # 用户自己设的到价提醒优先于系统那几类：这是他亲手画的线，明确说过
@@ -208,25 +225,25 @@ def check() -> dict:
         if is_held:
             if stop and last <= stop and once("止损"):
                 alerts.append(("紧急", f"{name}（{sym}）跌破止损 {stop}，现价 {last}"
-                                      f"（当日{day_pct:+.1f}%）。早上设的线到了。", f"{key}:止损"))
+                                      f"（当日{day_pct:+.1f}%）。早上设的线到了。", f"{key}:止损:{_today}"))
             elif target and last >= target and once("目标"):
                 alerts.append(("止盈", f"{name}（{sym}）触及目标价 {target}，现价 {last}"
-                                      f"（当日{day_pct:+.1f}%）。可以考虑分批兑现。", f"{key}:目标"))
+                                      f"（当日{day_pct:+.1f}%）。可以考虑分批兑现。", f"{key}:目标:{_today}"))
             elif day_pct <= -_DROP_ALERT_PCT and once("急跌"):
                 alerts.append(("预警", f"{name}（{sym}）当日{day_pct:+.1f}%，现价 {last}"
                                       + (f"，止损位 {stop}" if stop else "")
-                                      + "。还没到止损，但值得看一眼有没有消息。", f"{key}:急跌"))
+                                      + "。还没到止损，但值得看一眼有没有消息。", f"{key}:急跌:{_today}"))
             elif day_pct >= _RISE_ALERT_PCT and once("急涨"):
                 alerts.append(("异动", f"{name}（{sym}）当日{day_pct:+.1f}%，现价 {last}"
                                       + (f"，目标价 {target}" if target else "")
-                                      + "。急涨常有消息面，看一眼再决定拿不拿。", f"{key}:急涨"))
+                                      + "。急涨常有消息面，看一眼再决定拿不拿。", f"{key}:急涨:{_today}"))
         else:
             # 候选股：跌到止损位附近意味着更好的介入价，但也可能是逻辑变了。
             # 只报"到位置了"，不说"可以买"。
             if stop and last <= stop * (1 + _ENTRY_NEAR_PCT / 100) and once("买点"):
                 alerts.append(("机会", f"{name}（{sym}）跌到 {last}，接近早上清单里的"
                                       f"止损位 {stop}（当日{day_pct:+.1f}%）。"
-                                      "这个位置进场性价比更高，但先确认跌的原因。", f"{key}:买点"))
+                                      "这个位置进场性价比更高，但先确认跌的原因。", f"{key}:买点:{_today}"))
 
     if not alerts:
         return {"状态": "静默", "盯盘": len(watch), "重试": retried, "说明": "没有触发任何条件"}
