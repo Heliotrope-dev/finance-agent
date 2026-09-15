@@ -3494,6 +3494,16 @@ _PORTFOLIO_SYSTEM = """你是一位理性、保守的投研助理，正在给一
    组合本身已经足够分散、或者仓位金额小到期权一类工具的成本不划算，要明确
    说"目前没有必要额外对冲"并说明理由，不能为了显得完整硬凑一条对冲建议。
 
+13. 数据一致性优先于写得热闹：只允许讨论"各持仓明细"中列出的标的，绝不能
+    引入该清单外的历史持仓、旧交易信号或猜测的仓位。资讯、技术面、行业分类
+    任一项数据不足时，明确标注不足；仅因数据不足不能给出卖出、割肉或加仓。
+    没有明确且可验证的触发依据时，默认"继续持有/不动"，不要为了每一段都有
+    操作而强行制造交易。
+
+14. 交易数量必须可执行：卖出股数不得超过该标的当前持股；买入金额必须不超过
+    给定的剩余额度。若没有剩余额度、实际最小交易单位或精确换算信息，交易
+    信号填"不动|0|0"，在正文说明需要用户确认，不能编造一个可下单数量。
+
 严格按以下格式输出（不要多余寒暄，每一段都以段名加中文冒号开头，段名不要
 自己改写或增减）：
 总体评估：<两三句话。第一句必须是当下最该处理的那一件事，没有问题就直说没有>
@@ -3562,7 +3572,7 @@ def _parse_trade_signals(text: str) -> list[dict]:
     return signals
 
 
-def advise_portfolio(email: str) -> dict | None:
+def advise_portfolio(email: str, progress=None) -> dict | None:
     """组合层面的整体体检——跟advise_positions（单支"要不要卖"判断）是两个
     不同维度，这个函数看的是"这些持仓摆在一起是否健康"（集中度、币种/市场
     敞口、跟单支判断的衔接），单支判断给不出这类信息。只有真实持仓
@@ -3574,6 +3584,12 @@ def advise_portfolio(email: str) -> dict | None:
     硬凑。持仓不足2支时集中度分析意义不大（1支必然100%），直接跳过不
     生成报告，不做没有信息量的判断。
     """
+    def _report(stage: str) -> None:
+        """把确定的工作阶段交给调用方；命令行任务不传 callback 时保持原行为。"""
+        if progress:
+            progress(stage)
+
+    _report("正在核对真实持仓与最新行情…")
     positions = [p for p in tracker.get_positions(email) if (p.get("shares") or 0) > 0]
     if len(positions) < 2:
         return None
@@ -3614,6 +3630,7 @@ def advise_portfolio(email: str) -> dict | None:
     top1_pct = rows[0]["weight_pct"]
     top3_pct = sum(r["weight_pct"] for r in rows[:3])
 
+    _report("正在计算集中度、市场与行业敞口…")
     # 只算市场敞口，不算币种敞口——这个项目里market跟currency是一一对应的
     # (HK=HKD/US=USD/A=CNY)，币种敞口是市场敞口的重复信息，用户明确反馈
     # "AI币种分析不要"，干脆不喂给AI，省得它自己再讲一遍。
@@ -3659,6 +3676,7 @@ def advise_portfolio(email: str) -> dict | None:
             "news": _news_summary_text(r["symbol"], r["market"], r["name"]),
         }
 
+    _report("正在逐支补充价格位置、技术面与近期资讯…")
     ctx_results = _run_concurrent_with_deadline(rows, _fetch_holding_context, timeout=90, max_workers=5)
 
     holdings_lines = []
@@ -3733,6 +3751,7 @@ def advise_portfolio(email: str) -> dict | None:
         + candidates_text
     )
 
+    _report("正在生成组合结论与可执行交易信号…")
     # 走统一的故障转移入口，千问顶不住自动换智谱（见 chat_with_failover）。
     text = chat_with_failover(
         [
@@ -3748,6 +3767,7 @@ def advise_portfolio(email: str) -> dict | None:
     # 空内容的检查由 chat_with_failover 统一做了（空正文被当成失败，会先
     # 换一家再试），这里不需要重复判断——原来那句还引用了已经不存在的 resp。
 
+    _report("正在校验、保存分析结果…")
     holdings_json = json.dumps(
         [{"symbol": r["symbol"], "name": r["name"], "weight_pct": round(r["weight_pct"], 2),
           "value_cny": round(r["value_cny"], 2), "pnl_pct": round(r["pnl_pct"], 2)} for r in rows],
@@ -3785,6 +3805,7 @@ def advise_portfolio(email: str) -> dict | None:
             # 那个agent读了去整理微信简报的，至少能在日常巡检里露出来。
             print(f"（AI模拟盘自动下单失败：{e}）")
 
+    _report("分析完成。")
     return {"email": email, "total_value_cny": total_value_cny, "analysis_text": analysis_text, "signals": signals}
 
 

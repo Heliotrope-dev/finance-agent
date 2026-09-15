@@ -8,6 +8,7 @@ import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, wait as _futures_wait
 from pathlib import Path
+from queue import Empty, Queue
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as _cv1
@@ -7782,6 +7783,60 @@ def _render_portfolio_risk(positions: list):
 _PORTFOLIO_REANALYZE_COOLDOWN = 300  # 5分钟节流——组合分析是1次真实AI调用，不是纯本地计算，不能让用户点着玩
 
 
+def _portfolio_analysis_task_key(email: str) -> str:
+    """每个登录用户各有一个组合分析后台任务，不能串用状态。"""
+    return f"_portfolio_analysis_task_{email}"
+
+
+@st.fragment(run_every=1)
+def _render_portfolio_analysis_progress(email: str):
+    """轮询后台组合分析任务，持续显示阶段而不把整个页面罩在 spinner 下面。
+
+    advisor.advise_portfolio 的取行情、取资讯、模型推理都可能需要几分钟；把它放在
+    Streamlit 本次脚本运行里会让浏览器只能看到全屏遮罩。任务改在线程里执行，
+    fragment 每秒只刷新这张小卡片，页面其余内容和导航仍然可用。线程绝不调用
+    Streamlit API，所有 UI 更新都在这个主线程完成。
+    """
+    task = st.session_state.get(_portfolio_analysis_task_key(email))
+    if not task:
+        return
+
+    events = task["events"]
+    while True:
+        try:
+            task["history"].append(events.get_nowait())
+        except Empty:
+            break
+    task["history"] = task["history"][-6:]
+
+    with st.status("组合分析正在后台运行", state="running", expanded=True) as status:
+        for event in task["history"]:
+            st.write(event)
+        if not task["history"]:
+            st.write("正在启动分析任务…")
+
+        future = task["future"]
+        if not future.done():
+            st.caption("你可以继续查看持仓、切换页面；分析完成后此处会自动更新。")
+            return
+
+        try:
+            result = future.result()
+        except Exception as exc:
+            st.session_state["_portfolio_analysis_error"] = f"分析失败：{exc}"
+            status.update(label="组合分析失败", state="error", expanded=True)
+        else:
+            st.session_state["_portfolio_analysis_notice"] = (
+                "组合分析已完成，已按当前持仓刷新。" if result else "持仓不足 2 支，未生成组合分析。"
+            )
+            status.update(label="组合分析完成", state="complete", expanded=False)
+        finally:
+            task["executor"].shutdown(wait=False, cancel_futures=True)
+            st.session_state.pop(_portfolio_analysis_task_key(email), None)
+        # 重新读取刚落库的组合建议；必须整页重跑，不能只刷新本 fragment。
+        st.rerun(scope="app")
+
+
 def _render_bold_as_red(text: str) -> str:
     """把AI分析文本里的**加粗**改成红色高亮——用户明确要求"重点标红"。AI
     在_PORTFOLIO_SYSTEM里已经被要求用**加粗**标关键结论，复用这个已有的
@@ -7837,6 +7892,11 @@ def _render_portfolio_advice(email: str, positions: list):
     得起），加5分钟节流防止连续点击刷爆DeepSeek账户。
     """
     holding_count = sum(1 for p in positions if (p.get("shares") or 0) > 0)
+    _render_portfolio_analysis_progress(email)
+    if notice := st.session_state.pop("_portfolio_analysis_notice", None):
+        st.success(notice)
+    if error := st.session_state.pop("_portfolio_analysis_error", None):
+        st.error(error)
     advice = get_latest_portfolio_advice(email)
 
     if advice:
@@ -7882,6 +7942,11 @@ def _render_portfolio_advice(email: str, positions: list):
         st.caption("持仓不足2支，暂不生成集中度分析")
         return
 
+    task_key = _portfolio_analysis_task_key(email)
+    if st.session_state.get(task_key):
+        st.button("组合分析进行中", disabled=True, use_container_width=True)
+        return
+
     throttle_key = f"_portfolio_advice_last_{email}"
     elapsed = time.time() - st.session_state.get(throttle_key, 0)
     if elapsed < _PORTFOLIO_REANALYZE_COOLDOWN:
@@ -7890,18 +7955,27 @@ def _render_portfolio_advice(email: str, positions: list):
 
     if st.button("立即重新分析", key=f"_portfolio_reanalyze_{email}", use_container_width=True):
         st.session_state[throttle_key] = time.time()
-        with st.spinner("AI 正在分析组合……（要逐支查行情/新闻+推理+生成交易信号，大约1-3分钟）"):
+        events = Queue()
+
+        def _report(stage: str):
+            events.put(stage)
+
+        def _run_analysis():
             try:
                 import advisor
                 advisor._load_secrets_into_env()
-                result = advisor.advise_portfolio(email)
+                return advisor.advise_portfolio(email, progress=_report)
             except Exception as e:
-                st.error(f"分析失败：{e}")
-                return
-        if result is None:
-            st.warning("持仓不足2支，暂不生成组合分析。")
-        else:
-            st.rerun()
+                raise RuntimeError(str(e)) from e
+
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="portfolio-analysis")
+        st.session_state[task_key] = {
+            "future": executor.submit(_run_analysis),
+            "executor": executor,
+            "events": events,
+            "history": ["已提交组合分析任务。"],
+        }
+        st.rerun()
 
 
 @st.fragment(run_every=10)
