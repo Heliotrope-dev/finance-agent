@@ -28,6 +28,11 @@ _TRADING_DAYS = 252
 # 再多则港美股节假日不同、inner join 之后经常凑不齐。
 _MIN_DAYS = 60
 
+# 相关性、VaR 和 Beta 只有在覆盖大部分资金时才有组合层面的解释力。此前某些
+# 场外基金没有日频历史数据，系统仍用两只小仓位杠杆产品的 25% 覆盖样本画出
+# 精确的 0.02 相关系数，表面上很专业、实际却不是整个组合的统计量。
+_MIN_COVERAGE_FOR_RISK_METRICS = 0.80
+
 # 高相关阈值。0.8不是随便定的：路线图里举的例子"美光/英伟达/台积电三者相关
 # 系数0.85，实际上相当于一只股票"就在这个量级。0.8以上意味着两只票超过64%
 # (r^2) 的日内波动可以互相解释，分散效果基本为零。
@@ -148,6 +153,10 @@ def analyze(
     out["missing_history"] = [s for s in weights_by_sym if s not in rets.columns]
     if covered <= 0:
         out["insufficient_history"] = True
+        return out
+    if covered < _MIN_COVERAGE_FOR_RISK_METRICS:
+        out["insufficient_history"] = True
+        out["insufficient_reason"] = "coverage"
         return out
     w = w_raw / covered
 

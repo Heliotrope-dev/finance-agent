@@ -7745,10 +7745,16 @@ def _render_portfolio_risk(positions: list):
     st.markdown("**组合体检**")
 
     if res.get("insufficient_history"):
-        st.caption(
-            f"历史数据只够 {res.get('n_days', 0)} 个交易日，算不出可信的相关性和波动率。"
-            "新建仓的标的过一段时间再看。"
-        )
+        if res.get("insufficient_reason") == "coverage":
+            st.caption(
+                f"历史数据仅覆盖 {res.get('coverage', 0):.0%} 的仓位；不展示相关性、波动率或 VaR，"
+                "避免把局部仓位的统计误当成整个组合的结论。"
+            )
+        else:
+            st.caption(
+                f"历史数据只够 {res.get('n_days', 0)} 个交易日，算不出可信的相关性和波动率。"
+                "新建仓的标的过一段时间再看。"
+            )
         return
 
     # ── 数字区 ────────────────────────────────────────────────────

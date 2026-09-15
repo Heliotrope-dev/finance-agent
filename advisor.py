@@ -3504,6 +3504,11 @@ _PORTFOLIO_SYSTEM = """你是一位理性、保守的投研助理，正在给一
     给定的剩余额度。若没有剩余额度、实际最小交易单位或精确换算信息，交易
     信号填"不动|0|0"，在正文说明需要用户确认，不能编造一个可下单数量。
 
+15. 产品类型决定分析口径：输入会明确标注场外基金或杠杆/反向产品。场外基金
+    的净值可能滞后一日，不能把它当作盘中技术信号；杠杆产品要按给定的杠杆
+    穿透敞口判断风险，不能把账面仓位误称为全部风险，也不能把普通基金误称为
+    杠杆资产。账面市值、杠杆穿透敞口和资金上限是三个不同数字，必须分开说。
+
 严格按以下格式输出（不要多余寒暄，每一段都以段名加中文冒号开头，段名不要
 自己改写或增减）：
 总体评估：<两三句话。第一句必须是当下最该处理的那一件事，没有问题就直说没有>
@@ -3523,6 +3528,72 @@ _PORTFOLIO_SYSTEM = """你是一位理性、保守的投研助理，正在给一
 """
 
 _SIGNAL_ACTIONS = ("买入", "卖出", "不动")
+
+
+def _portfolio_instrument_profile(symbol: str, market: str, name: str) -> dict:
+    """按可审计规则给组合持仓分类，不能把产品类型交给模型从名称猜。
+
+    这里只识别能从代码/名称确定的产品：场外基金和明确写出倍数的杠杆/反向
+    ETP；其余一律保守地标为普通证券，不把不确定的产品误报为杠杆。
+    """
+    label = f"{symbol} {name}".upper()
+    if market == "A" and ("QDII" in label or "联接" in name or "基金" in name):
+        return {"kind": "场外基金", "leverage": 1.0, "quote_note": "净值通常为 T-1，不能按盘中价格解读"}
+    multiple = None
+    match = re.search(r"(\d+(?:\.\d+)?)\s*X", label)
+    if match:
+        multiple = float(match.group(1))
+    elif "两倍" in name or "2倍" in name:
+        multiple = 2.0
+    elif "三倍" in name or "3倍" in name:
+        multiple = 3.0
+    if multiple and multiple > 1:
+        direction = "反向" if any(word in name.upper() for word in ("做空", "反向", "SHORT", "INVERSE", "BEAR")) else "做多"
+        return {
+            "kind": f"{multiple:g}倍杠杆{direction}产品", "leverage": multiple,
+            "quote_note": "按底层标的的杠杆穿透风险评估，不与普通股票同口径",
+        }
+    return {"kind": "普通证券", "leverage": 1.0, "quote_note": ""}
+
+
+def _validate_portfolio_signals(signals: list[dict], rows: list[dict], max_capital: float | None,
+                                total_value_cny: float) -> list[dict]:
+    """把模型文本解析出的交易信号降到可执行安全边界内。
+
+    模型只能提出意见，不能突破真实持仓、当前价格和资金上限：未知标的、卖超
+    持仓、超额度买入以及无法折算金额的行直接丢弃。这是模拟盘也必须经过的
+    检查，避免自由文本被解析后变成一笔看似合理但实际错误的委托。
+    """
+    by_symbol = {r["symbol"]: r for r in rows}
+    headroom = max(0.0, (max_capital or total_value_cny) - total_value_cny) if max_capital else None
+    checked = []
+    for signal in signals:
+        row = by_symbol.get(signal.get("symbol"))
+        if not row or signal.get("market") != row["market"]:
+            continue
+        try:
+            shares = float(signal.get("shares") or 0)
+        except (TypeError, ValueError):
+            continue
+        if shares <= 0 or signal.get("action") not in ("买入", "卖出"):
+            continue
+        if signal["action"] == "卖出":
+            shares = min(shares, float(row["shares"]))
+        else:
+            native_value = shares * float(row["price"])
+            amount_cny, _ = ds.to_cny(native_value, row["currency"])
+            if amount_cny is None or headroom is None or amount_cny > headroom:
+                continue
+            headroom -= amount_cny
+        native_value = shares * float(row["price"])
+        amount_cny, _ = ds.to_cny(native_value, row["currency"])
+        if amount_cny is None:
+            continue
+        checked.append({
+            "name": row["name"], "symbol": row["symbol"], "market": row["market"],
+            "action": signal["action"], "shares": shares, "amount_cny": amount_cny,
+        })
+    return checked
 
 
 def _parse_trade_signals(text: str) -> list[dict]:
@@ -3612,9 +3683,11 @@ def advise_portfolio(email: str, progress=None) -> dict | None:
         if value_cny is None or cost_cny is None:
             skipped += 1
             continue
+        profile = _portfolio_instrument_profile(symbol, market, p.get("name", symbol))
         rows.append({
             "symbol": symbol, "name": p.get("name", symbol), "market": market, "currency": currency,
             "shares": shares, "price": price, "value_cny": value_cny, "cost_cny": cost_cny,
+            "instrument_kind": profile["kind"], "leverage": profile["leverage"], "quote_note": profile["quote_note"],
             "pnl_pct": (value_cny - cost_cny) / cost_cny * 100 if cost_cny else 0,
         })
 
@@ -3624,11 +3697,14 @@ def advise_portfolio(email: str, progress=None) -> dict | None:
     total_value_cny = sum(r["value_cny"] for r in rows)
     for r in rows:
         r["weight_pct"] = r["value_cny"] / total_value_cny * 100 if total_value_cny else 0
+        r["gross_exposure_cny"] = r["value_cny"] * r["leverage"]
 
     rows.sort(key=lambda r: r["value_cny"], reverse=True)
     hhi = sum((r["weight_pct"] / 100) ** 2 for r in rows)
     top1_pct = rows[0]["weight_pct"]
     top3_pct = sum(r["weight_pct"] for r in rows[:3])
+    gross_exposure_cny = sum(r["gross_exposure_cny"] for r in rows)
+    leveraged_value_cny = sum(r["value_cny"] for r in rows if r["leverage"] > 1)
 
     _report("正在计算集中度、市场与行业敞口…")
     # 只算市场敞口，不算币种敞口——这个项目里market跟currency是一一对应的
@@ -3670,6 +3746,14 @@ def advise_portfolio(email: str, progress=None) -> dict | None:
     # 口径一致。逐支并发取，单支慢/失败不拖累其它持仓（跟_judge_one并发
     # 判断候选池同一个模式）。
     def _fetch_holding_context(r):
+        if r["instrument_kind"] == "场外基金":
+            # QDII/联接基金的净值通常是 T-1，拿它跑盘中技术指标会制造精确但
+            # 无意义的信号；基金保留新闻背景，技术面明确降级。
+            return {
+                "price_position": "场外基金按最新披露净值计，不作为盘中价位信号",
+                "technical": "不适用盘中技术面；以配置比例和净值更新为准",
+                "news": _news_summary_text(r["symbol"], r["market"], r["name"]),
+            }
         return {
             "price_position": _price_position_text(r["symbol"], r["market"]),
             "technical": _technical_summary_text(r["symbol"], r["market"]),
@@ -3691,10 +3775,12 @@ def advise_portfolio(email: str, progress=None) -> dict | None:
         per_pct_shares = r["shares"] / r["weight_pct"] if r["weight_pct"] else 0
         per_pct_cny = r["value_cny"] / r["weight_pct"] if r["weight_pct"] else 0
         holdings_lines.append(
-            f"- {r['name']}（{r['symbol']}·{r['market']}·{r.get('industry') or '行业未知'}）：仓位占比{r['weight_pct']:.1f}%，"
+            f"- {r['name']}（{r['symbol']}·{r['market']}·{r.get('industry') or '行业未知'}）：{r['instrument_kind']}，"
+            f"仓位占比{r['weight_pct']:.1f}%，"
             f"当前持有{r['shares']:g}股，现价{r['price']:.2f}，浮动盈亏{r['pnl_pct']:+.1f}%，"
             f"单支AI最近判断：{adv_action}\n"
             f"  每变动1个百分点仓位≈{per_pct_shares:.0f}股（约¥{per_pct_cny:,.0f}）\n"
+            f"  产品口径：{r['quote_note'] or '普通证券口径'}；杠杆穿透市值约¥{r['gross_exposure_cny']:,.0f}\n"
             f"  价格位置：{ctx.get('price_position') or '（数据不足）'}\n"
             f"  技术面：{ctx.get('technical') or '（数据不足）'}\n"
             f"  近期新闻：{ctx.get('news') or '（暂无相关新闻）'}"
@@ -3743,6 +3829,8 @@ def advise_portfolio(email: str, progress=None) -> dict | None:
         f"{capital_line}\n\n"
         f"集中度：最大单一持仓占比{top1_pct:.1f}%，前三大合计占比{top3_pct:.1f}%，"
         f"HHI指数{hhi:.3f}（0-1，越接近1越集中，0.15以下通常认为分散度尚可）\n\n"
+        f"杠杆穿透：账面市值¥{total_value_cny:,.0f}；按产品杠杆折算后的总风险敞口约¥{gross_exposure_cny:,.0f}；"
+        f"其中杠杆产品账面市值¥{leveraged_value_cny:,.0f}。这是风险口径，不是额外投入资金。\n\n"
         f"市场敞口：{'，'.join(f'{m} {w:.1f}%' for m, w in sorted(by_market.items(), key=lambda x: -x[1]))}\n\n"
         f"行业敞口：{industry_line}\n\n"
         f"当前宏观环境（判断这个组合在当下的利率/通胀环境里是否站对了位置）：\n{_macro_text}\n\n"
@@ -3773,7 +3861,7 @@ def advise_portfolio(email: str, progress=None) -> dict | None:
           "value_cny": round(r["value_cny"], 2), "pnl_pct": round(r["pnl_pct"], 2)} for r in rows],
         ensure_ascii=False,
     )
-    signals = _parse_trade_signals(text)
+    signals = _validate_portfolio_signals(_parse_trade_signals(text), rows, max_capital, total_value_cny)
     signals_json = json.dumps(signals, ensure_ascii=False)
     # 展示用的正文不带"交易信号"那段原始竖线分隔文本——那段是给程序解析的，
     # 直接混在叙述性文字里显示很生硬，已经解析成signals结构化数据单独展示，
