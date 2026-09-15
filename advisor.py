@@ -330,7 +330,7 @@ def sync_futu_watchlist(market: str) -> None:
         print(f"（{market}自选同步：新增{added}支，移除{removed}支，与Futu实时自选对齐）")
 
 
-def build_market_watchlist(market: str) -> list[dict]:
+def build_market_watchlist(market: str, *, include_crypto: bool = False) -> list[dict]:
     """单市场版的_build_watchlist，给09:00/21:00盘前推荐用——推荐要
     港股/美股分开出榜，不能像_build_watchlist那样把三个市场混在一个池子
     里判断再拆开看，那样每个市场实际参与打分的样本数不可控。
@@ -344,7 +344,8 @@ def build_market_watchlist(market: str) -> list[dict]:
     产品形态，这个报告不做）。现在池子就是自选（仅该市场）本身，没有
     target_size上限、也不再用热门榜凑数——有多少自选就判断多少支，用户
     加/删自选，这份报告的范围跟着变。同时先调用sync_futu_watchlist把本地
-    自选跟Futu账户实时对齐，不用再手动维护本地数据。
+    自选跟Futu账户实时对齐，不用再手动维护本地数据。美股晚间简报可以显式
+    带上用户的加密自选；它们随后使用独立模型判断，也不会混入美股股票候选池。
     """
     sync_futu_watchlist(market)
     items: list[dict] = []
@@ -352,12 +353,13 @@ def build_market_watchlist(market: str) -> list[dict]:
 
     try:
         for p in tracker.get_positions(_EMAIL):
-            if p.get("market") != market:
+            item_market = p.get("market")
+            if item_market != market and not (include_crypto and item_market == "CC"):
                 continue
-            key = (str(p.get("symbol")), market)
+            key = (str(p.get("symbol")), item_market)
             if key[0] and key not in seen:
                 seen.add(key)
-                items.append({"symbol": key[0], "market": market,
+                items.append({"symbol": key[0], "market": item_market,
                               "name": p.get("name") or key[0]})
     except Exception as e:
         print(f"（{market}自选拉取失败：{e}）")
@@ -367,11 +369,13 @@ def build_market_watchlist(market: str) -> list[dict]:
 def judge_market_watchlist(market: str) -> list[dict]:
     """build_market_watchlist的AI判断版本，跟judge_watchlist同一套并发/
     超时/供应商健康度处理逻辑，只是候选池换成单市场版。结果落库到
-    source=f"watchlist_{market.lower()}"（watchlist_hk/watchlist_us），
+    股票/杠杆产品落库到source=f"watchlist_{market.lower()}"
+    （watchlist_hk/watchlist_us）；美股晚报附带的加密自选单独落库到
+    watchlist_crypto，避免被daily_plan误当成美股股票候选。
     跟原有source="watchlist"（三市场混排，首页/老简报用）是独立批次，
     互不干扰，daily_plan.py的市场专属Top3从这个新source读。
     """
-    watchlist = build_market_watchlist(market)
+    watchlist = build_market_watchlist(market, include_crypto=(market == "US"))
     print(f"（{market}候选池取到{len(watchlist)}支，开始逐支AI判断…）")
     results = _run_concurrent_with_deadline(
         watchlist, lambda it: _judge_one(it, f"watchlist_{market.lower()}"), timeout=1500,
@@ -383,7 +387,9 @@ def judge_market_watchlist(market: str) -> list[dict]:
         tracker.log_advice(
             _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
             e["technical_signal"], e["action"], e["market"], e["name"],
-            source=f"watchlist_{market.lower()}", score=e.get("score"),
+            source=("watchlist_crypto" if e.get("market") == "CC"
+                    else f"watchlist_{market.lower()}"),
+            score=e.get("score"),
         )
     return judged
 
