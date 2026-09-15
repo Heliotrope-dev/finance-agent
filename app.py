@@ -3188,6 +3188,9 @@ def _render_home_map():
       /* 窄屏切换为点选详情：地理位置仍完整呈现，文字改由浮层卡片承载，
          不再让密集市场的标签彼此覆盖。 */
       @media (max-width: 640px) {{
+          /* 卡片属于地图组件的一部分：外层也必须扩高，否则 iframe 虽然变高，
+             但卡片仍落在固定 300px 容器外而被裁掉。 */
+          #home-map-wrap {{ height: 392px !important; }}
           /* 手机上的命中区必须就是可见圆点：旧版隐藏文字标签仍占着一块偏移的
              68×38px 热区，导致点圆点经常没有反应。 */
           #home-map .leaflet-marker-icon {{
@@ -3348,6 +3351,10 @@ def _render_home_map():
     // 手机上先给出最常用的上证指数，避免首屏只有一张没有说明的点阵图。
     showMobileDetail(mobileMapData["上证指数"] ? "上证指数" : Object.keys(mobileMapData)[0]);
     syncFrameHeight();
+    // iframe 初次挂载时宽度会经历一次从窄到实际列宽的变化；延后一帧和 100ms
+    // 再测一次，避免桌面端被首次错误判作窄屏而留下空白。
+    requestAnimationFrame(syncFrameHeight);
+    setTimeout(syncFrameHeight, 100);
     // 容器尺寸变化时让Leaflet重新测量（否则瓦片留白），重新适配视野并收边。
     window.addEventListener('resize', function() {{
         map.invalidateSize(); fitAll(); clampLabels();
