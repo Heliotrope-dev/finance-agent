@@ -3204,9 +3204,9 @@ def _render_home_map():
       #home-map .leaflet-control-attribution a {{ color: #7E828D !important; }}
       #home-map .leaflet-control-attribution {{ color: #7E828D !important; }}
     </style>
-    <div id="home-map-wrap" style="position:relative;height:300px">
+    <div id="home-map-wrap" style="height:300px">
       <div id="home-map" style="height:300px;border-radius:2px;overflow:hidden"></div>
-      <div id="mobile-map-detail" style="display:none;position:absolute;left:10px;right:10px;bottom:10px;z-index:1000;padding:12px 14px;border:1px solid rgba(23,24,28,.12);border-radius:10px;background:rgba(255,255,255,.96);box-shadow:0 6px 20px rgba(23,24,28,.12);min-height:58px"></div>
+      <div id="mobile-map-detail" style="display:none;margin-top:10px;padding:12px 14px;border:1px solid rgba(23,24,28,.12);border-radius:10px;background:#FFF;box-shadow:0 4px 14px rgba(23,24,28,.08);min-height:58px"></div>
     </div>
     <script>
     // 这张图是"一张会自己刷新数字的静态图"，不是可操作的地图——所有交互
@@ -3249,6 +3249,15 @@ def _render_home_map():
     var mobileMapData = {json.dumps(mobile_map_data)};
     var activeMobileName = null;
     function mobileMapMode() {{ return window.matchMedia('(max-width: 640px)').matches; }}
+    // Streamlit 的 html 组件默认高度只够地图本身。手机卡片在地图下方时通知
+    // 父页面扩高 iframe；宽屏仍保持原来的 316px，不留多余空白。
+    function syncFrameHeight() {{
+        window.parent.postMessage({{
+            isStreamlitMessage: true,
+            type: 'streamlit:setFrameHeight',
+            height: mobileMapMode() ? 392 : 316,
+        }}, '*');
+    }}
     function paintMobileDots() {{
         if (!mobileMapMode()) return;
         Object.keys(mobileDots).forEach(function(key) {{
@@ -3338,10 +3347,12 @@ def _render_home_map():
     fitAll();
     // 手机上先给出最常用的上证指数，避免首屏只有一张没有说明的点阵图。
     showMobileDetail(mobileMapData["上证指数"] ? "上证指数" : Object.keys(mobileMapData)[0]);
+    syncFrameHeight();
     // 容器尺寸变化时让Leaflet重新测量（否则瓦片留白），重新适配视野并收边。
     window.addEventListener('resize', function() {{
         map.invalidateSize(); fitAll(); clampLabels();
         if (mobileMapMode()) showMobileDetail(activeMobileName || (mobileMapData["上证指数"] ? "上证指数" : Object.keys(mobileMapData)[0]));
+        syncFrameHeight();
     }});
     // 拖动地图会把原本在中间的标记带到边界上，同样要重新收边。
     map.on('moveend', clampLabels);
