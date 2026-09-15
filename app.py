@@ -1140,6 +1140,7 @@ def _fmt_price(value, default: str = "—") -> str:
 
 
 _MARKET_CURRENCY_LABEL = {"A": "¥", "HK": "HK$", "US": "US$", "CC": "US$"}
+_MARKET_CURRENCY_HTML_LABEL = {"A": "¥", "HK": "HK&#36;", "US": "US&#36;", "CC": "US&#36;"}
 
 
 def _market_currency_label(market: str) -> str:
@@ -1151,10 +1152,27 @@ def _market_currency_label(market: str) -> str:
     return _MARKET_CURRENCY_LABEL.get(str(market or "A").upper(), "¥")
 
 
+def _market_currency_label_html(market: str) -> str:
+    """HTML-safe currency label for Markdown blocks with KaTeX enabled.
+
+    A literal dollar sign is an inline-math delimiter in Streamlit's Markdown
+    pipeline. Two foreign-currency prices in one HTML block could therefore
+    make every intervening tag appear as source text. Use an HTML entity here:
+    the browser still displays ``$``, but KaTeX never sees a delimiter.
+    """
+    return _MARKET_CURRENCY_HTML_LABEL.get(str(market or "A").upper(), "¥")
+
+
 def _fmt_market_price(value, market: str, default: str = "—") -> str:
     """Format a quote with its native currency, rather than a bare number."""
     text = _fmt_price(value, default=default)
     return text if text == default else f"{_market_currency_label(market)}{text}"
+
+
+def _fmt_market_price_html(value, market: str, default: str = "—") -> str:
+    """HTML-safe companion to _fmt_market_price for st.markdown HTML."""
+    text = _fmt_price(value, default=default)
+    return text if text == default else f"{_market_currency_label_html(market)}{text}"
 
 
 def _fmt_usd_signed(value, decimals: int = 0, default: str = "—") -> str:
@@ -1905,7 +1923,7 @@ def _render_price_header(symbol: str, market: str):
 
     st.markdown(
         f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:2px'>"
-        + f"<span style='font-size:var(--fs-2xl);font-weight:600;color:{color}'>{_fmt_market_price(spot['最新价'], market)}</span>&nbsp;&nbsp;"
+        + f"<span style='font-size:var(--fs-2xl);font-weight:600;color:{color}'>{_fmt_market_price_html(spot['最新价'], market)}</span>&nbsp;&nbsp;"
         + f"<span style='font-size:var(--fs-lg);color:{color}'>{change:+.2f} ({change_pct:+.2f}%)</span>"
         + "</div>",
         unsafe_allow_html=True,
@@ -1990,7 +2008,7 @@ def _render_stock_movers_cards(df, market: str):
                 f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:2px'>"
                 f"<div style='flex:2;font-weight:600;color:var(--fa-text);text-decoration:none'>"
                 f"{_esc(_clean_name(row['名称']))}（{_esc(mv_symbol)}）</div>"
-                f"<div style='flex:1;text-align:right;font-weight:600;color:{mv_color}'>{_fmt_market_price(row['最新价'], market)}</div>"
+                f"<div style='flex:1;text-align:right;font-weight:600;color:{mv_color}'>{_fmt_market_price_html(row['最新价'], market)}</div>"
                 f"<div style='flex:1;text-align:right;color:{mv_color}'>{row['涨跌幅']:+.2f}%</div>"
                 f"</div></a>",
                 unsafe_allow_html=True,
@@ -3801,6 +3819,20 @@ def _load_watch_only_items(market: str) -> list[dict]:
     return [item for item in (plan.get("关注候选") or []) if not _is_order_ready(item)]
 
 
+def _portfolio_advice_is_current(advice: dict, positions: list[dict]) -> bool:
+    """Whether a portfolio analysis still matches the live recorded holdings."""
+    try:
+        snapshot_symbols = {h["symbol"] for h in json.loads(advice.get("holdings_json") or "[]")}
+    except Exception:
+        return False
+    current = [p for p in positions if (p.get("shares") or 0) > 0]
+    current_symbols = {p["symbol"] for p in current}
+    if not snapshot_symbols or snapshot_symbols != current_symbols:
+        return False
+    generated_at = str(advice.get("created_at") or "")
+    return not any(str(p.get("updated_at") or "") > generated_at for p in current)
+
+
 @st.fragment
 def _render_home_portfolio_action():
     """首页"资产配置行动清单"——2026-09-14替换掉原来那版"今日可执行清单"
@@ -3852,13 +3884,9 @@ def _render_home_portfolio_action():
     created = advice["created_at"][:19].replace("T", " ")
     st.caption(f"更新于 {created}（UTC）· 完整分析、逐支跟踪与交易信号见「持仓」页")
 
-    try:
-        snapshot_symbols = {h["symbol"] for h in json.loads(advice.get("holdings_json") or "[]")}
-    except Exception:
-        snapshot_symbols = set()
-    current_symbols = {p["symbol"] for p in holding_items}
-    if snapshot_symbols and snapshot_symbols != current_symbols:
-        st.warning("持仓自这份分析生成后已发生变化（加仓/减仓/清仓），下面内容可能已过期——去「持仓」页重新分析。")
+    if not _portfolio_advice_is_current(advice, holding_items):
+        st.warning("持仓记录已在这份分析后变化，旧交易信号已失效；请到「持仓」页重新分析。")
+        return
 
     # 首页只摘"这个组合现在该怎么办"最相关的几段——总体结论、集中度是
     # 不是问题、要不要对冲/保险、下一步操作。行业集中/宏观适配/逐支跟踪/
@@ -3990,7 +4018,7 @@ def _render_advice_section():
             parts = _parse_advice_text(_vtext)
             action = row.get("action", "观望")
             price = row.get("price_at_advice")
-            price_text = _fmt_market_price(price, market_key) if price else "—"
+            price_text = _fmt_market_price_html(price, market_key) if price else "—"
             # 2026-09-11修：现价标注取价时间——这是这次判断生成那一刻的价格
             # 快照，不是此刻的实时价，"今日可执行清单"用的是当天另一次单独
             # 取数（daily_plan.py），两边时间点不同、数字天然可能不一样。
@@ -4007,6 +4035,7 @@ def _render_advice_section():
             # 跟"今日可执行清单"同一个数），AI在理由段落里自己另外写的目标价
             # 不再单独展示成一个可能对不上的数字——见_daily_plan_item_for。
             _plan_item = _daily_plan_item_for(row.get("symbol", ""))
+            target_text_is_html = False
             if _plan_item and isinstance(_plan_item.get("目标价"), (int, float)):
                 # 目标价旁边补上相对现价的空间。一个孤立的"目标价 650"要求读者
                 # 自己拿它去除现价——而"还有多少空间"才是这个数存在的理由，
@@ -4014,7 +4043,8 @@ def _render_advice_section():
                 # 只在两个数都来自这条记录时才算：拿别处的现价去除这里的目标价
                 # 会得到一个谁都对不上的百分比。
                 _tgt = _plan_item["目标价"]
-                target_text = f"{_fmt_market_price(_tgt, market_key)}（系统计算）"
+                target_text = f"{_fmt_market_price_html(_tgt, market_key)}（系统计算）"
+                target_text_is_html = True
                 if isinstance(price, (int, float)) and price > 0:
                     target_text += f"，较现价{(_tgt - price) / price * 100:+.1f}%"
             else:
@@ -4061,7 +4091,7 @@ def _render_advice_section():
                     f" · 置信度{_esc(parts.get('置信度','—'))}"
                     # 目标价和投资期限是研报格式里最该被一眼看到的两项——"买入"
                     # 如果不带目标价和时间尺度，就是一句没有可检验内容的话。
-                    + (f" · 目标价{_esc(target_text)}" if target_text else "")
+                    + (f" · 目标价{target_text if target_text_is_html else _esc(target_text)}" if target_text else "")
                     + (f" · {_esc(parts['投资期限'])}" if parts.get("投资期限") else "")
                     + "</div>"
                     # 每张卡末尾那句"仅供参考，不构成投资建议"是advisor的prompt里
@@ -7819,38 +7849,32 @@ def _render_portfolio_advice(email: str, positions: list):
         # 金额是基于生成那一刻的持仓快照(holdings_json)算的，持仓一旦变化
         # （加仓/减仓/清仓）这些具体数字就直接过期了——拿当前真实持仓的
         # symbol集合跟落库时的快照比对，不一致就强提醒，不能沉默展示。
-        try:
-            snapshot_symbols = {h["symbol"] for h in json.loads(advice.get("holdings_json") or "[]")}
-        except Exception:
-            snapshot_symbols = set()
-        current_symbols = {p["symbol"] for p in positions if (p.get("shares") or 0) > 0}
-        if snapshot_symbols and snapshot_symbols != current_symbols:
+        if not _portfolio_advice_is_current(advice, positions):
             st.warning(
-                "你的持仓自这份分析生成后已经变化（加仓/减仓/清仓），"
-                "下面提到的具体股数/金额操作建议很可能已经过期，不要直接照做——"
-                "建议先看一眼下方持仓列表，再点击下方「立即重新分析」刷新。"
+                "你的持仓自这份分析生成后已经变化，旧交易信号不会显示；"
+                "请先看一眼下方持仓列表，再点击下方「立即重新分析」刷新。"
             )
-
-        _render_trade_signals(advice.get("signals_json", ""))
+        else:
+            _render_trade_signals(advice.get("signals_json", ""))
         # 分小节渲染而不是把整段AI原文糊成一片。2026-09-04用户反馈组合分析
         # "说的都没啥逻辑"——内容本来就是分段生成的(总体评估/集中度/行业集中/
         # 市场敞口/宏观适配/逐支跟踪/...)，但渲染时全是同一号字的连续段落，
         # 段名混在正文里，看上去就是一大坨，读者根本分不出哪句是结论哪句是
         # 依据。按段名切开、段名用小标题样式，层次一出来"有没有逻辑"就看得见了。
-        _parts = _parse_portfolio_text(advice["analysis_text"])
-        if _parts:
-            for _name in _PORTFOLIO_SECTIONS:
-                _body = _parts.get(_name)
-                if not _body:
-                    continue
-                st.markdown(
-                    f"<div style='font-size:var(--fs-xs);letter-spacing:var(--ls-label);color:var(--fa-muted);"
-                    f"text-transform:none;margin:16px 0 6px'>{_name}</div>",
-                    unsafe_allow_html=True,
-                )
-                st.markdown(_render_bold_as_red(_body), unsafe_allow_html=True)
-        else:
-            st.markdown(_render_bold_as_red(advice["analysis_text"]), unsafe_allow_html=True)
+            _parts = _parse_portfolio_text(advice["analysis_text"])
+            if _parts:
+                for _name in _PORTFOLIO_SECTIONS:
+                    _body = _parts.get(_name)
+                    if not _body:
+                        continue
+                    st.markdown(
+                        f"<div style='font-size:var(--fs-xs);letter-spacing:var(--ls-label);color:var(--fa-muted);"
+                        f"text-transform:none;margin:16px 0 6px'>{_name}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(_render_bold_as_red(_body), unsafe_allow_html=True)
+            else:
+                st.markdown(_render_bold_as_red(advice["analysis_text"]), unsafe_allow_html=True)
     else:
         st.caption("AI 组合分析还没生成过。")
 
@@ -8134,7 +8158,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
             )
             price_html = (
                 f"<div class='{flash_class}' style='text-align:right;border-radius:2px'>"
-                f"<div style='font-weight:600;color:{color}'>{_fmt_market_price(wspot['最新价'], item_market)}{stale_tag}</div>"
+                f"<div style='font-weight:600;color:{color}'>{_fmt_market_price_html(wspot['最新价'], item_market)}{stale_tag}</div>"
                 f"{_turnover_line}</div>"
             )
             # 涨跌幅改成纯文字着色，去掉色块。
@@ -8159,8 +8183,8 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                 pnl_color = UP_COLOR if pnl >= 0 else DOWN_COLOR
                 pnl_html = (
                     f"<div style='text-align:right;font-size:var(--fs-xs);margin-top:2px'>"
-                    f"<span style='color:var(--fa-muted)'>{shares:g}股 · 市值{_market_currency_label(item_market)}{market_value:,.0f}</span> "
-                    f"<span style='color:{pnl_color}'>{pnl:+,.0f} {_market_currency_label(item_market)}（{pnl_pct:+.1f}%）</span></div>"
+                    f"<span style='color:var(--fa-muted)'>{shares:g}股 · 市值{_market_currency_label_html(item_market)}{market_value:,.0f}</span> "
+                    f"<span style='color:{pnl_color}'>{pnl:+,.0f} {_market_currency_label_html(item_market)}（{pnl_pct:+.1f}%）</span></div>"
                 )
         else:
             price_html = "<div style='text-align:right;color:var(--fa-muted)'>—</div>"
@@ -8436,7 +8460,7 @@ def _confirm_sell_dialog(email: str, item: dict, market: str, cur_price: float |
         pnl = (cur_price - avg_cost) * shares
         pnl_color = UP_COLOR if pnl >= 0 else DOWN_COLOR
         st.markdown(
-            f"浮动盈亏：<span style='color:{pnl_color}'>{pnl:+,.2f} {_market_currency_label(market)}</span>",
+            f"浮动盈亏：<span style='color:{pnl_color}'>{pnl:+,.2f} {_market_currency_label_html(market)}</span>",
             unsafe_allow_html=True,
         )
 
