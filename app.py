@@ -1139,6 +1139,24 @@ def _fmt_price(value, default: str = "—") -> str:
     return f"{v:,.6f}"
 
 
+_MARKET_CURRENCY_LABEL = {"A": "¥", "HK": "HK$", "US": "US$", "CC": "US$"}
+
+
+def _market_currency_label(market: str) -> str:
+    """Return the native quotation currency label for a tradable instrument.
+
+    Prices must retain their source currency. A Hong Kong share quoted in HKD
+    is not a CNY amount, and omitting the unit makes a trading screen ambiguous.
+    """
+    return _MARKET_CURRENCY_LABEL.get(str(market or "A").upper(), "¥")
+
+
+def _fmt_market_price(value, market: str, default: str = "—") -> str:
+    """Format a quote with its native currency, rather than a bare number."""
+    text = _fmt_price(value, default=default)
+    return text if text == default else f"{_market_currency_label(market)}{text}"
+
+
 def _fmt_usd_signed(value, decimals: int = 0, default: str = "—") -> str:
     """带正负号的美元金额，负号写在货币符号外面。
 
@@ -1887,7 +1905,7 @@ def _render_price_header(symbol: str, market: str):
 
     st.markdown(
         f"<div class='{flash_class}' style='margin:12px 0;padding:4px 8px;border-radius:2px'>"
-        + f"<span style='font-size:var(--fs-2xl);font-weight:600;color:{color}'>{'US$' if market == 'CC' else ''}{_fmt_price(spot['最新价'])}</span>&nbsp;&nbsp;"
+        + f"<span style='font-size:var(--fs-2xl);font-weight:600;color:{color}'>{_fmt_market_price(spot['最新价'], market)}</span>&nbsp;&nbsp;"
         + f"<span style='font-size:var(--fs-lg);color:{color}'>{change:+.2f} ({change_pct:+.2f}%)</span>"
         + "</div>",
         unsafe_allow_html=True,
@@ -1972,7 +1990,7 @@ def _render_stock_movers_cards(df, market: str):
                 f"<div class='fa-flex-row {flash_class}' style='display:flex;align-items:center;border-radius:2px'>"
                 f"<div style='flex:2;font-weight:600;color:var(--fa-text);text-decoration:none'>"
                 f"{_esc(_clean_name(row['名称']))}（{_esc(mv_symbol)}）</div>"
-                f"<div style='flex:1;text-align:right;font-weight:600;color:{mv_color}'>{_fmt_price(row['最新价'])}</div>"
+                f"<div style='flex:1;text-align:right;font-weight:600;color:{mv_color}'>{_fmt_market_price(row['最新价'], market)}</div>"
                 f"<div style='flex:1;text-align:right;color:{mv_color}'>{row['涨跌幅']:+.2f}%</div>"
                 f"</div></a>",
                 unsafe_allow_html=True,
@@ -2278,6 +2296,7 @@ def _render_crypto_overview():
     _render_stock_movers_cards(df[["代码", "名称", "最新价", "涨跌幅"]], "CC")
 
 
+@st.fragment
 def _render_hk_overview():
     """港股南向资金+核心股，独立fragment，原因同_render_a_share_overview
     （包括撤回run_every=3的原因——切到持仓页面残留）。"""
@@ -3884,7 +3903,7 @@ def _render_advice_section():
             parts = _parse_advice_text(_vtext)
             action = row.get("action", "观望")
             price = row.get("price_at_advice")
-            price_text = f"{price:.2f}" if price else "—"
+            price_text = _fmt_market_price(price, market_key) if price else "—"
             # 2026-09-11修：现价标注取价时间——这是这次判断生成那一刻的价格
             # 快照，不是此刻的实时价，"今日可执行清单"用的是当天另一次单独
             # 取数（daily_plan.py），两边时间点不同、数字天然可能不一样。
@@ -3908,7 +3927,7 @@ def _render_advice_section():
                 # 只在两个数都来自这条记录时才算：拿别处的现价去除这里的目标价
                 # 会得到一个谁都对不上的百分比。
                 _tgt = _plan_item["目标价"]
-                target_text = f"{_tgt:.2f}（系统计算）"
+                target_text = f"{_fmt_market_price(_tgt, market_key)}（系统计算）"
                 if isinstance(price, (int, float)) and price > 0:
                     target_text += f"，较现价{(_tgt - price) / price * 100:+.1f}%"
             else:
@@ -4539,10 +4558,12 @@ def _render_my_page():
         for _o in _outcomes:
             _ret = _o["return_pct"]
             _ret_color = UP_COLOR if _ret > 0 else (DOWN_COLOR if _ret < 0 else "var(--fa-muted)")
+            # 涨跌遵循全站的红涨绿跌；这里表达模型判断是否命中，不能再借用
+            # 红绿，否则“绿的下跌”紧挨“红的判断偏差”会混淆两套语义。
             if _o["hit"] is True:
-                _mark, _mark_color = "说对", OK_COLOR
+                _mark, _mark_color = "判断正确", "var(--fa-text-2)"
             elif _o["hit"] is False:
-                _mark, _mark_color = "说错", BAD_COLOR
+                _mark, _mark_color = "判断偏差", "var(--fa-text-2)"
             else:
                 _mark, _mark_color = "无方向", "var(--fa-faint)"
             _rows_html.append(
@@ -4554,7 +4575,7 @@ def _render_my_page():
                 f"<span style='min-width:34px;color:var(--fa-text-2)'>{_esc(_o.get('action') or '')}</span>"
                 f"<span style='min-width:30px;color:var(--fa-faint)'>{_o.get('score') if _o.get('score') is not None else '—'}</span>"
                 f"<span style='min-width:62px;text-align:right;color:{_ret_color};font-weight:600'>{_ret:+.2f}%</span>"
-                f"<span style='min-width:44px;text-align:right;color:{_mark_color};font-size:var(--fs-xs)'>{_mark}</span>"
+                f"<span style='min-width:56px;text-align:right;color:{_mark_color};font-size:var(--fs-xs)'>{_mark}</span>"
                 "</div>"
             )
         st.markdown("".join(_rows_html), unsafe_allow_html=True)
@@ -8026,7 +8047,7 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
             )
             price_html = (
                 f"<div class='{flash_class}' style='text-align:right;border-radius:2px'>"
-                f"<div style='font-weight:600;color:{color}'>{wspot['最新价']:.2f}{stale_tag}</div>"
+                f"<div style='font-weight:600;color:{color}'>{_fmt_market_price(wspot['最新价'], item_market)}{stale_tag}</div>"
                 f"{_turnover_line}</div>"
             )
             # 涨跌幅改成纯文字着色，去掉色块。
@@ -8051,8 +8072,8 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                 pnl_color = UP_COLOR if pnl >= 0 else DOWN_COLOR
                 pnl_html = (
                     f"<div style='text-align:right;font-size:var(--fs-xs);margin-top:2px'>"
-                    f"<span style='color:var(--fa-muted)'>{shares:g}股 · 市值{market_value:,.0f}</span> "
-                    f"<span style='color:{pnl_color}'>{pnl:+,.0f}（{pnl_pct:+.1f}%）</span></div>"
+                    f"<span style='color:var(--fa-muted)'>{shares:g}股 · 市值{_market_currency_label(item_market)}{market_value:,.0f}</span> "
+                    f"<span style='color:{pnl_color}'>{pnl:+,.0f} {_market_currency_label(item_market)}（{pnl_pct:+.1f}%）</span></div>"
                 )
         else:
             price_html = "<div style='text-align:right;color:var(--fa-muted)'>—</div>"
@@ -8321,13 +8342,16 @@ def _confirm_sell_dialog(email: str, item: dict, market: str, cur_price: float |
     avg_cost = cost_total / shares
     st.write(f"**{name}**（{symbol}·{market}）")
     st.caption(
-        f"持仓 {shares:g} 股 · 均价 {avg_cost:.2f} · 现价 "
-        f"{f'{cur_price:.2f}' if cur_price else '—'}"
+        f"持仓 {shares:g} 股 · 均价 {_fmt_market_price(avg_cost, market)} · 现价 "
+        f"{_fmt_market_price(cur_price, market) if cur_price else '—'}"
     )
     if cur_price:
         pnl = (cur_price - avg_cost) * shares
         pnl_color = UP_COLOR if pnl >= 0 else DOWN_COLOR
-        st.markdown(f"浮动盈亏：<span style='color:{pnl_color}'>{pnl:+,.2f}</span>", unsafe_allow_html=True)
+        st.markdown(
+            f"浮动盈亏：<span style='color:{pnl_color}'>{pnl:+,.2f} {_market_currency_label(market)}</span>",
+            unsafe_allow_html=True,
+        )
 
     sell_shares = st.number_input("卖出股数", min_value=0.0, max_value=float(shares), value=float(shares), step=1.0, key=f"_sell_shares_{symbol}")
     default_amount = sell_shares * cur_price if cur_price else sell_shares * avg_cost
@@ -8513,14 +8537,16 @@ def _show_add_position_dialog(email: str):
 
     # 第二阶段：标的已确认，填股数/金额（不填股数=只关注不持仓）
     if confirmed:
-        st.write(f"**{confirmed['name']}**（{confirmed['symbol']}·{confirmed['market']}） 现价 {confirmed['price']:.2f}")
+        st.write(
+            f"**{confirmed['name']}**（{confirmed['symbol']}·{confirmed['market']}） "
+            f"现价 {_fmt_market_price(confirmed['price'], confirmed['market'])}"
+        )
         # 金额的币种是标的所在市场的原始币种，不是人民币——HK股买入金额是
         # 港币、US股是美元，upsert_position存的cost_total也是原始币种（跟
         # positions表的currency字段一致）。之前这里无条件写"¥"，港美股用户
         # 照着标签心算成人民币填进去，会把成本按错误币种存进去，均价/浮盈
         # 全部跟着错且没法自动发现——这是真实的资金核算bug，不是措辞问题。
-        _CURRENCY_LABEL = {"A": "¥", "HK": "HK$", "US": "US$"}
-        cur_label = _CURRENCY_LABEL.get(confirmed["market"], "¥")
+        cur_label = _market_currency_label(confirmed["market"])
 
         # 真实故障记录（2026-08-25）：原来的实现是两个number_input在表单外，
         # 靠on_change互相同步（改股数自动算金额、反之亦然），"确认添加"是
