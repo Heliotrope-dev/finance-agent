@@ -4718,6 +4718,17 @@ def _render_my_page():
             else:
                 st.caption("日内截面 IC 尚无足够的五日回填样本；离线任务会在收盘后更新。")
 
+            _diagnosis = _diag.get("cross_sectional_diagnosis_5d") or {}
+            if _diagnosis:
+                st.caption(
+                    "选股/择时拆解："
+                    f"{_diagnosis.get('diagnosis', '尚未验证')}；"
+                    f"平均五日超额 "
+                    f"{_diagnosis['avg_excess_pct']:+.2f}%"
+                    if _diagnosis.get("avg_excess_pct") is not None
+                    else "选股/择时拆解：尚未验证"
+                )
+
             _dimension_stats = _diag.get("dimension_horizon") or []
             if _dimension_stats:
                 st.markdown("**维度 × 窗口（Bootstrap + FDR）**")
@@ -4730,6 +4741,7 @@ def _render_my_page():
                     "维度": _dim_names.get(x["dimension"], x["dimension"]),
                     "窗口": f"{x['horizon_days']}日", "样本": x["sample_count"],
                     "结论": x["verdict"],
+                    "分档单调性": (x.get("monotonicity") or {}).get("verdict", "尚未验证"),
                     "Rank IC": f"{x['ic']:+.3f}" if x.get("ic") is not None else "—",
                     "95% CI": (
                         f"[{x['ci_low']:+.3f}, {x['ci_high']:+.3f}]"
@@ -4750,6 +4762,19 @@ def _render_my_page():
                         if x.get("avg_signed_excess_pct") is not None else "—"
                     ),
                 } for x in _confidence], hide_index=True, use_container_width=True)
+                _confidence_assessment = _diag.get("confidence_assessment_5d") or {}
+                st.caption(f"高、中、低排序总评：{_confidence_assessment.get('verdict', '尚未验证')}")
+
+            _weights = _diag.get("monthly_weight_suggestion") or {}
+            if _weights:
+                st.markdown("**月度 ICIR 权重建议**")
+                _suggested = _weights.get("suggested_weights_pct") or {}
+                st.caption(_weights.get("verdict", "样本不足、不建议调权"))
+                if _suggested:
+                    st.dataframe([{
+                        "维度": _dim_names.get(key, key), "建议权重": f"{value:.2f}%",
+                    } for key, value in _suggested.items()], hide_index=True, use_container_width=True)
+                st.caption("仅展示离线建议，系统不会自动修改线上评分权重。")
 
         if stats.get("总数"):
             # 按市场/按方向拆开——笼统一个数看不出"在哪个市场准""偏多还是偏空准"。

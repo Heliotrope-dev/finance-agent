@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 _HORIZONS = (1, 5, 20, 60)
 
 
+def _history_date(value: date) -> str:
+    """Use the compact format accepted by every A/HK/US history backend."""
+    return value.strftime("%Y%m%d")
+
+
 def _column(df: pd.DataFrame, *names: str) -> str | None:
     return next((name for name in names if name in df.columns), None)
 
@@ -118,7 +123,7 @@ def run(*, write: bool = False, limit: int = 500) -> dict:
             continue
         oldest = min(_created_date(row["created_at"]) for row in rows if row.get("market", "A") == market)
         benchmark_by_market[market] = ds.get_benchmark_history(
-            (oldest - timedelta(days=10)).isoformat(), today.isoformat(), market=market
+            _history_date(oldest - timedelta(days=10)), _history_date(today), market=market
         )
 
     updated_records = 0
@@ -127,8 +132,15 @@ def run(*, write: bool = False, limit: int = 500) -> dict:
     for row in rows:
         try:
             advice_date = _created_date(row["created_at"])
+            market = row.get("market", "A")
+            # 2026-09-22：港美股的默认日线接口会把实时价拼成“今天”一根
+            # 合成 K 线。18:30 北京时间美股尚未开盘，那根其实仍是上一交易日
+            # 的价格，却会被误当作下一个交易日并永久写入。非 "d" 对港美股
+            # 仍返回相同的原始日线，只是不拼实时 bar；沪深必须继续传 "d"。
+            frequency = "d" if market == "A" else "historical"
             history = ds.get_stock_history(
-                row["symbol"], advice_date.isoformat(), today.isoformat(), market=row.get("market", "A")
+                row["symbol"], _history_date(advice_date), _history_date(today),
+                frequency=frequency, market=market,
             )
             values = calculate_outcomes(
                 row, history, benchmark_by_market.get(row.get("market", "A"), pd.DataFrame())

@@ -1729,16 +1729,17 @@ def get_advice_for_outcome_backfill(limit: int = 500) -> list[dict]:
     and benchmark requests so importing tracker never performs network I/O.
     """
     init_db()
-    # stop_hit_day=NULL is a valid completed result (“20 days passed without a
-    # hit”), and benchmark/metadata can legitimately be unavailable.  Those
-    # fields therefore cannot drive the due query or the same old rows would
-    # occupy every batch forever.  Price horizons and path extrema become
-    # non-NULL once their windows mature and provide an unambiguous cursor.
-    due_columns = (
-        "review_price_1d", "review_price_5d", "review_price_20d", "review_price_60d",
-        "mfe_pct_20d", "mae_pct_20d",
+    # 2026-09-22：不能简单取“任一窗口为空的最老500条”。60日窗口成熟前，
+    # 同一批近期记录每天都会占满 LIMIT，后来的记录连1日/5日结果都补不到。
+    # 用宽松的日历天成熟门槛挡住明显未到期的窗口，再优先补最短窗口；节假日
+    # 导致仍未凑够交易日时本轮保持 NULL，下一次自然重试，不会阻塞整个队列。
+    due = (
+        "(review_price_1d IS NULL AND julianday(created_at) <= julianday('now', '-2 days')) OR "
+        "(review_price_5d IS NULL AND julianday(created_at) <= julianday('now', '-10 days')) OR "
+        "((review_price_20d IS NULL OR mfe_pct_20d IS NULL OR mae_pct_20d IS NULL) "
+        " AND julianday(created_at) <= julianday('now', '-35 days')) OR "
+        "(review_price_60d IS NULL AND julianday(created_at) <= julianday('now', '-100 days'))"
     )
-    missing = " OR ".join(f"{column} IS NULL" for column in due_columns)
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
         rows = c.execute(
@@ -1748,7 +1749,11 @@ def get_advice_for_outcome_backfill(limit: int = 500) -> list[dict]:
             "mfe_pct_20d, mae_pct_20d, stop_hit_day, "
             "bench_ret_1d, bench_ret_5d, bench_ret_20d, bench_ret_60d "
             "FROM advice WHERE price_at_advice IS NOT NULL AND price_at_advice > 0 "
-            f"AND ({missing}) ORDER BY created_at ASC LIMIT ?",
+            f"AND ({due}) ORDER BY "
+            "CASE WHEN review_price_1d IS NULL THEN 0 "
+            "WHEN review_price_5d IS NULL THEN 1 "
+            "WHEN review_price_20d IS NULL OR mfe_pct_20d IS NULL OR mae_pct_20d IS NULL THEN 2 "
+            "ELSE 3 END, created_at ASC LIMIT ?",
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
@@ -2177,10 +2182,10 @@ def get_latest_advice(limit_per_market: int = 3) -> dict:
         if latest is None:
             return {"run_date": None, "US": [], "HK": [], "A": []}
         run_date = latest["created_at"][:10]
-        _cutoff = _latest_run_cutoff(c, source) or (run_date + "T00:00:00")
+        _cutoff = _latest_run_cutoff(c, "screen") or (run_date + "T00:00:00")
         rows = c.execute(
-            "SELECT * FROM advice WHERE source = 'screen' AND created_at LIKE ? ORDER BY created_at",
-            (f"{run_date}%",),
+            "SELECT * FROM advice WHERE source = 'screen' AND created_at >= ? ORDER BY created_at",
+            (_cutoff,),
         ).fetchall()
     rows = [dict(r) for r in rows]
 

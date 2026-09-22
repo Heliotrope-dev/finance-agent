@@ -24,6 +24,10 @@ import tracker
 DIMENSIONS = ("fundamental", "price_position", "technical", "chips", "analyst", "data_certainty")
 HORIZONS = (1, 5, 20, 60)
 SCORE_BANDS = ((90, 100, "90-100"), (70, 89, "70-89"), (50, 69, "50-69"), (30, 49, "30-49"), (0, 29, "0-29"))
+DIMENSION_DEFAULT_HORIZON = {
+    "technical": 5, "price_position": 5, "chips": 20,
+    "fundamental": 60, "analyst": 60, "data_certainty": 20,
+}
 
 
 def _excess_return(row: dict, horizon: int) -> float | None:
@@ -77,6 +81,7 @@ def dimension_horizon_stats(rows: list[dict], *, bootstrap_samples: int = 2000, 
                 "dimension": dimension, "horizon_days": horizon, "sample_count": len(pairs),
                 "ic": None, "ci_low": None, "ci_high": None, "fdr_p": None,
                 "verdict": "尚未验证",
+                "monotonicity": dimension_band_monotonicity(rows, dimension, horizon),
             }
             if len(pairs) >= 30:
                 scores = np.asarray([pair[0] for pair in pairs], dtype=float)
@@ -136,6 +141,31 @@ def daily_cross_sectional_ic(rows: list[dict], horizon: int = 5) -> dict:
     }
 
 
+def cross_sectional_diagnosis(rows: list[dict], horizon: int = 5) -> dict:
+    """Separate stock-selection quality from the aggregate timing result."""
+    daily = daily_cross_sectional_ic(rows, horizon)
+    excess = [value for row in rows for value in [_excess_return(row, horizon)] if value is not None]
+    avg_excess = statistics.mean(excess) if excess else None
+    ic = daily["ic_mean"]
+    if daily["count"] < 5 or avg_excess is None:
+        label = "尚未验证"
+    elif ic is not None and ic >= 0.03 and avg_excess < 0:
+        label = "选股有效、择时无效"
+    elif ic is not None and ic <= -0.03:
+        label = "分数方向反了"
+    elif (ic is None or abs(ic) < 0.03) and avg_excess < 0:
+        label = "选股也无效"
+    elif ic is not None and ic >= 0.03:
+        label = "选股与总量均为正"
+    else:
+        label = "总量为正、选股未验证"
+    return {
+        "horizon_days": horizon, "diagnosis": label,
+        "daily_ic_count": daily["count"], "daily_ic_mean": ic,
+        "avg_excess_pct": avg_excess, "sample_count": len(excess),
+    }
+
+
 def score_band_monotonicity(rows: list[dict], horizon: int) -> dict:
     bands = []
     for low, high, label in SCORE_BANDS:
@@ -151,6 +181,32 @@ def score_band_monotonicity(rows: list[dict], horizon: int) -> dict:
     usable = [band["avg_excess_pct"] for band in bands if band["avg_excess_pct"] is not None]
     monotonic = len(usable) >= 3 and all(usable[index] >= usable[index + 1] for index in range(len(usable) - 1))
     return {"horizon_days": horizon, "monotonic": monotonic, "bands": bands}
+
+
+def dimension_band_monotonicity(rows: list[dict], dimension: str, horizon: int) -> dict:
+    """Apply the same five normalized score bands to every dimension/horizon."""
+    bands = []
+    for low, high, label in SCORE_BANDS:
+        values = []
+        for row in rows:
+            ratio = _dimension_ratio(row, dimension)
+            excess = _excess_return(row, horizon)
+            if ratio is not None and excess is not None and low <= ratio * 100 <= high:
+                values.append(excess)
+        bands.append({
+            "band": label, "count": len(values),
+            "avg_excess_pct": statistics.mean(values) if values else None,
+        })
+    usable = [item["avg_excess_pct"] for item in bands if item["avg_excess_pct"] is not None]
+    enough = len(usable) >= 3
+    monotonic = enough and all(
+        usable[index] >= usable[index + 1] for index in range(len(usable) - 1)
+    )
+    return {
+        "verdict": "单调" if monotonic else "不单调" if enough else "尚未验证",
+        "monotonic": monotonic if enough else None,
+        "bands": bands,
+    }
 
 
 def confidence_calibration(rows: list[dict], horizon: int = 5,
@@ -190,17 +246,85 @@ def confidence_calibration(rows: list[dict], horizon: int = 5,
     return out
 
 
+def confidence_assessment(calibration: list[dict]) -> dict:
+    """Only claim ordered confidence when all three levels have mature evidence."""
+    by_level = {item["level"]: item for item in calibration}
+    if any(by_level.get(level, {}).get("verdict") != "已验证" for level in ("高", "中", "低")):
+        return {"verdict": "尚未验证", "ordered": None}
+    rates = [by_level[level]["hit_rate_pct"] for level in ("高", "中", "低")]
+    ordered = rates[0] > rates[1] > rates[2]
+    return {"verdict": "排序有效" if ordered else "排序无效", "ordered": ordered}
+
+
+def _daily_dimension_ic(rows: list[dict], dimension: str, horizon: int) -> list[float]:
+    groups: dict[tuple[str, str], list[tuple[float, float]]] = defaultdict(list)
+    for row in rows:
+        ratio = _dimension_ratio(row, dimension)
+        excess = _excess_return(row, horizon)
+        if ratio is None or excess is None:
+            continue
+        groups[(str(row.get("created_at") or "")[:10], row.get("market") or "A")].append((ratio, excess))
+    values = []
+    for pairs in groups.values():
+        if len(pairs) < 5:
+            continue
+        ic = spearmanr([pair[0] for pair in pairs], [pair[1] for pair in pairs]).statistic
+        if not math.isnan(ic):
+            values.append(float(ic))
+    return values
+
+
+def monthly_weight_suggestion(rows: list[dict]) -> dict:
+    """Suggest, but never apply, weights proportional to positive dimension ICIR."""
+    dimensions = []
+    positive = {}
+    for dimension in DIMENSIONS:
+        horizon = DIMENSION_DEFAULT_HORIZON[dimension]
+        values = _daily_dimension_ic(rows, dimension, horizon)
+        mean = statistics.mean(values) if values else None
+        std = statistics.pstdev(values) if len(values) > 1 else None
+        # A perfectly stable non-zero daily IC has zero measured volatility.
+        # Keep it finite so one dimension cannot create infinity/NaN weights.
+        icir = (
+            mean / std * math.sqrt(len(values)) if std
+            else mean * math.sqrt(len(values)) if mean is not None and len(values) > 1
+            else None
+        )
+        dimensions.append({
+            "dimension": dimension, "horizon_days": horizon,
+            "cross_section_count": len(values), "ic_mean": mean, "icir": icir,
+        })
+        if len(values) >= 20 and icir is not None and icir > 0:
+            positive[dimension] = icir
+    total = sum(positive.values())
+    weights = {}
+    if total:
+        ordered = list(positive.items())
+        for dimension, value in ordered[:-1]:
+            weights[dimension] = round(value / total * 100, 2)
+        # Put the rounding residual in the final dimension so the report is a
+        # usable 100% allocation rather than e.g. 100.02%.
+        last_dimension = ordered[-1][0]
+        weights[last_dimension] = round(100 - sum(weights.values()), 2)
+    return {
+        "verdict": "仅建议、不自动修改" if weights else "样本不足、不建议调权",
+        "suggested_weights_pct": weights, "dimensions": dimensions,
+    }
+
+
 def build_report(source: str | None = None, *, bootstrap_samples: int = 2000) -> dict:
     rows = tracker.get_advice_diagnostic_rows(source=source)
+    calibration = confidence_calibration(rows, bootstrap_samples=bootstrap_samples)
     return {
         "source": source or "all", "records": len(rows),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "daily_cross_sectional_ic_5d": daily_cross_sectional_ic(rows, 5),
+        "cross_sectional_diagnosis_5d": cross_sectional_diagnosis(rows, 5),
         "dimension_horizon": dimension_horizon_stats(rows, bootstrap_samples=bootstrap_samples),
         "score_band_monotonicity": [score_band_monotonicity(rows, horizon) for horizon in HORIZONS],
-        "confidence_calibration_5d": confidence_calibration(
-            rows, bootstrap_samples=bootstrap_samples,
-        ),
+        "confidence_calibration_5d": calibration,
+        "confidence_assessment_5d": confidence_assessment(calibration),
+        "monthly_weight_suggestion": monthly_weight_suggestion(rows),
     }
 
 

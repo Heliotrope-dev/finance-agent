@@ -8,6 +8,24 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build static React frontend
+        working-directory: web
+        run: npm ci && npm run build
+      - name: Upload static frontend release
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: web/out/*
+          target: /tmp/invest-next-${{ github.sha }}
+          strip_components: 2
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -18,14 +36,64 @@ jobs:
             set -e
             cd /root/finance-agent
             OLD=$(git rev-parse HEAD)
+            WEB_RELEASE=/var/www/invest-next/releases/${{ github.sha }}
+            OLD_WEB=$(readlink /var/www/invest-next/next 2>/dev/null || true)
+            OLD_CRON=$(mktemp /tmp/fa-deploy-cron.XXXXXX)
+            crontab -l >"$OLD_CRON" 2>/dev/null || true
+            rollback() {
+              echo "Deployment failed; rolling back to $OLD"
+              # Rollback is best-effort and must attempt every restoration step;
+              # one failed dependency install must not skip cron/service recovery.
+              set +e
+              git reset --hard "$OLD"
+              timeout 10m venv/bin/pip install -r requirements.txt
+              crontab "$OLD_CRON"
+              systemctl restart finance-agent
+              systemctl restart finance-agent-api
+              if [ -n "$OLD_WEB" ]; then ln -sfn "$OLD_WEB" /var/www/invest-next/next; fi
+              rm -f "$OLD_CRON"
+              set -e
+            }
             git fetch origin main
             git reset --hard origin/main
-            systemctl restart finance-agent
-            sleep 20
-            if ! curl -fsS --max-time 10 http://127.0.0.1:8503/_stcore/health >/dev/null; then
-              echo "Health check failed; rolling back to $OLD"
-              git reset --hard "$OLD"
-              systemctl restart finance-agent
+            if ! timeout 10m venv/bin/pip install -r requirements.txt; then
+              rollback
               exit 1
             fi
+            if ! systemctl restart finance-agent; then
+              rollback
+              exit 1
+            fi
+            if ! bash ops/install_web_runtime.sh /root/finance-agent; then
+              rollback
+              exit 1
+            fi
+            if ! systemctl enable --now finance-agent-api; then
+              rollback
+              exit 1
+            fi
+            mkdir -p "$WEB_RELEASE"
+            cp -a /tmp/invest-next-${{ github.sha }}/. "$WEB_RELEASE/"
+            chown -R www-data:www-data "$WEB_RELEASE"
+            if [ -d /var/www/invest-next/next ] && [ ! -L /var/www/invest-next/next ]; then
+              # First managed release: preserve the old directory as a rollback
+              # target instead of deleting it.
+              OLD_WEB=/var/www/invest-next/releases/pre-${OLD}
+              mv /var/www/invest-next/next "$OLD_WEB"
+            fi
+            ln -sfn "$WEB_RELEASE" /var/www/invest-next/next
+            sleep 20
+            if ! curl -fsS --max-time 10 http://127.0.0.1:8503/_stcore/health >/dev/null; then
+              rollback
+              exit 1
+            fi
+            if ! curl -fsS --max-time 10 http://127.0.0.1:8600/api/health >/dev/null; then
+              rollback
+              exit 1
+            fi
+            if ! bash ops/install_managed_cron.sh /root/finance-agent; then
+              rollback
+              exit 1
+            fi
+            rm -f "$OLD_CRON"
             echo "Deployed $(git rev-parse --short HEAD) at $(date)"

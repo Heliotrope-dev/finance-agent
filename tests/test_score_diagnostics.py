@@ -38,6 +38,7 @@ def test_dimension_tests_apply_fdr_and_keep_significant_signal():
     assert all(item["sample_count"] == 60 for item in result)
     assert all(item["verdict"] == "有信号" for item in result)
     assert all(item["fdr_p"] <= 0.05 for item in result)
+    assert all("monotonicity" in item for item in result)
 
 
 def test_public_report_hides_unverified_estimates():
@@ -61,3 +62,24 @@ def test_confidence_calibration_reports_only_mature_groups():
     assert high["sample_count"] == 60
     assert high["hit_rate_pct"] > 0
     assert medium["verdict"] == low["verdict"] == "尚未验证"
+    assert score_diagnostics.confidence_assessment(result) == {
+        "verdict": "尚未验证", "ordered": None,
+    }
+
+
+def test_cross_sectional_diagnosis_distinguishes_selection_from_timing():
+    rows = _rows()
+    for row in rows:
+        rank = int((row["score"] - 45) / 10)
+        row["review_price_5d"] = 96 + rank
+    result = score_diagnostics.cross_sectional_diagnosis(rows)
+    assert result["daily_ic_mean"] == 1
+    assert result["avg_excess_pct"] < 0
+    assert result["diagnosis"] == "选股有效、择时无效"
+
+
+def test_monthly_weight_suggestion_is_advisory_and_normalized():
+    result = score_diagnostics.monthly_weight_suggestion(_rows(days=25))
+    assert result["verdict"] == "仅建议、不自动修改"
+    assert round(sum(result["suggested_weights_pct"].values()), 6) == 100
+    assert all(item["cross_section_count"] == 25 for item in result["dimensions"])

@@ -1,0 +1,15 @@
+[Unit]
+Description=Invest Agent read-only API
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/finance-agent
+ExecStart=/root/finance-agent/venv/bin/uvicorn api:app --host 127.0.0.1 --port 8600 --workers 1
+Restart=on-failure
+RestartSec=5
+MemoryMax=300M
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

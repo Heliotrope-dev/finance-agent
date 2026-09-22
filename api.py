@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import time
+from datetime import date, timedelta
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -439,3 +440,87 @@ def news(limit: int = 12, _: str = Depends(require_user)) -> dict:
         return df.to_dict("records")
 
     return {"items": _cached(f"news_{limit}", 900, _load, default=[])}
+
+
+# ── 第二批静态前端只读接口 ──────────────────────────────────────────────
+@app.get("/api/macro")
+def macro(_: str = Depends(require_user)) -> dict:
+    """Return precomputed macro briefs; never trigger an LLM from a page view."""
+    return {"items": _cached("macro", 900, tracker.get_latest_macro_briefs, default=[]) or []}
+
+
+@app.get("/api/calendar")
+def calendar(_: str = Depends(require_user)) -> dict:
+    """Upcoming exchange events assembled from deterministic IPO calendars."""
+    def _load() -> list[dict]:
+        items = []
+        for market in ("A", "HK", "US"):
+            for event in ds.get_ipo_calendar(market, limit=12):
+                items.append({**event, "market": market, "kind": "IPO"})
+        return sorted(items, key=lambda item: item.get("list_date") or "9999-99-99")
+    return {"items": _cached("calendar", 21600, _load, default=[]) or []}
+
+
+@app.get("/api/ipo")
+def ipo(_: str = Depends(require_user)) -> dict:
+    """Precomputed IPO research plus deterministic offer facts."""
+    def _load() -> dict:
+        return {
+            market: {
+                "calendar": ds.get_ipo_calendar(market, limit=12),
+                "briefs": tracker.get_latest_ipo_briefs(limit=12, market=market),
+            }
+            for market in ("A", "HK", "US")
+        }
+    return {"markets": _cached("ipo", 21600, _load, default={}) or {}}
+
+
+@app.get("/api/quote/{market}/{symbol}")
+def quote(market: str, symbol: str, _: str = Depends(require_user)) -> dict:
+    mk = _check_market(market)
+    quote_data = _cached(
+        f"quote:{mk}:{symbol.upper()}", 3,
+        lambda: ds.get_stock_realtime(symbol, "CC" if mk == "CRYPTO" else mk),
+        default={},
+    ) or {}
+    return {"market": mk, "symbol": symbol.upper(), "quote": quote_data}
+
+
+@app.get("/api/kline/{market}/{symbol}")
+def kline(market: str, symbol: str, days: int = 180,
+          _: str = Depends(require_user)) -> dict:
+    mk = _check_market(market)
+    safe_days = min(max(days, 30), 730)
+    end = date.today()
+    start = end - timedelta(days=safe_days * 2)
+
+    def _load() -> list[dict]:
+        frame = ds.get_stock_history(
+            symbol, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"),
+            market="CC" if mk == "CRYPTO" else mk,
+        )
+        rows = _df_records(frame)
+        return [{
+            "time": str(row.get("日期") or row.get("date") or "")[:10],
+            "open": row.get("开盘", row.get("open")),
+            "high": row.get("最高", row.get("high")),
+            "low": row.get("最低", row.get("low")),
+            "close": row.get("收盘", row.get("close")),
+            "volume": row.get("成交量", row.get("volume")),
+        } for row in rows[-safe_days:]]
+
+    bars = _cached(f"kline:{mk}:{symbol.upper()}:{safe_days}", 1800, _load, default=[]) or []
+    return {"market": mk, "symbol": symbol.upper(), "items": bars}
+
+
+@app.get("/api/analysis/{market}/{symbol}")
+def stock_analysis(market: str, symbol: str,
+                   _: str = Depends(require_user)) -> dict:
+    """Read the latest completed screen/watchlist judgment without running AI."""
+    mk = _check_market(market)
+    result = _cached(
+        f"analysis:{mk}:{symbol.upper()}", 300,
+        lambda: tracker.get_watchlist_verdict_for_symbol(symbol.upper()),
+        default={"in_pool": False, "run_date": None, "pool_size": 0},
+    )
+    return {"market": mk, "symbol": symbol.upper(), "analysis": result}

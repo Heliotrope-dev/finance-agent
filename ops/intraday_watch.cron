@@ -1,6 +1,6 @@
 # 盘中盯盘（intraday_watch.py）的定时任务 —— 已于 2026-09-12 12:39 安装到系统
 # crontab（安装前备份在 /root/crontab.bak-20260912-123940，原有11条→14条）。
-# 这个文件保留下来作为这三行的出处和依据，不要重复安装。
+# 这个文件是受管任务的唯一来源，由 install_managed_cron.sh 幂等安装。
 #
 # 2026-09-12 查证：这个脚本在系统 crontab、systemd timer、以及 OpenClaw 自己的
 # 调度表 /root/.openclaw/state/openclaw.sqlite 的 cron_jobs 里都没有任何条目
@@ -9,7 +9,7 @@
 # 止损/目标价/急涨急跌/回到买点/到价提醒这几类推送一条都不会触发，
 # 而页面上完全看不出来（功能是齐的，只是没有东西按时叫它）。
 #
-# ⚠️ 这个项目有两套调度器并存，改之前先搞清楚东西在哪一套里：
+# 注意：这个项目有两套调度器并存，改之前先搞清楚东西在哪一套里：
 #   - 系统 crontab：warm_home_cache / advisor / expectancy / macro_brief /
 #     ipo_brief / market_recommendation
 #   - OpenClaw cron（openclaw.sqlite 的 cron_jobs 表）：ai-sim-agent、
@@ -44,10 +44,20 @@
 #
 # flock 防重入：某一轮卡住时不会越堆越多进程——这台机器只有 1.9G 内存，
 # 2026-09-11 刚因为内存打满触发过一次 OOM。timeout 3m 是第二道保险。
+CRON_TZ=Asia/Shanghai
 */10 9-16 * * 1-5 cd /root/finance-agent && flock -n /tmp/finance-agent-intraday.lock timeout 3m venv/bin/python3 intraday_watch.py >> /var/log/finance-agent-intraday.log 2>&1
 */10 21-23 * * 1-5 cd /root/finance-agent && flock -n /tmp/finance-agent-intraday.lock timeout 3m venv/bin/python3 intraday_watch.py >> /var/log/finance-agent-intraday.log 2>&1
 */10 0-5 * * 2-6 cd /root/finance-agent && flock -n /tmp/finance-agent-intraday.lock timeout 3m venv/bin/python3 intraday_watch.py >> /var/log/finance-agent-intraday.log 2>&1
 
+# 持仓净值是曲线数据，不是提醒消息，按任务书要求每5分钟采一格；脚本自己
+# 保证只有全部真实持仓均成功取价时才写，缺一支就整轮放弃。
+*/5 9-16 * * 1-5 cd /root/finance-agent && flock -n /tmp/finance-agent-portfolio-snapshot.lock timeout 2m venv/bin/python3 portfolio_snapshot.py >> /var/log/finance-agent-portfolio-snapshot.log 2>&1
+*/5 21-23 * * 1-5 cd /root/finance-agent && flock -n /tmp/finance-agent-portfolio-snapshot.lock timeout 2m venv/bin/python3 portfolio_snapshot.py >> /var/log/finance-agent-portfolio-snapshot.log 2>&1
+*/5 0-5 * * 2-6 cd /root/finance-agent && flock -n /tmp/finance-agent-portfolio-snapshot.lock timeout 2m venv/bin/python3 portfolio_snapshot.py >> /var/log/finance-agent-portfolio-snapshot.log 2>&1
+
 # 2026-09-22：多窗口回看只需收盘后跑一次。行情请求全部在脚本里，tracker.py
 # 仍然只碰 SQLite；flock 和 timeout 防止慢数据源在小内存主机上重叠堆积。
 30 18 * * 1-5 cd /root/finance-agent && flock -n /tmp/fa-outcomes.lock timeout 20m sh -c 'venv/bin/python3 backfill_outcomes.py --write && venv/bin/python3 score_diagnostics.py --source screen --output data/score_diagnostics.json' >> /var/log/fa-outcomes.log 2>&1
+
+# 每月只给出 ICIR 权重建议并推送，脚本不会改线上评分权重。
+45 18 1 * * cd /root/finance-agent && flock -n /tmp/fa-monthly-score.lock timeout 20m venv/bin/python3 monthly_score_report.py --source screen --send >> /var/log/fa-monthly-score.log 2>&1

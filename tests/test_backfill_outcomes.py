@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -106,3 +106,51 @@ def test_record_outcomes_only_fills_null_cells(isolated_tracker):
             (advice_id,),
         ).fetchone()
     assert row == (101, 105, "低")
+
+
+def test_run_uses_compact_dates_and_never_synthesizes_hk_us_daily_bar(monkeypatch):
+    calls = []
+    row = {
+        "id": 7, "symbol": "AAPL", "market": "US",
+        "created_at": "2026-01-01T09:00:00+00:00", "price_at_advice": 100,
+    }
+    monkeypatch.setattr(tracker, "get_advice_for_outcome_backfill", lambda limit=500: [row])
+    monkeypatch.setattr(tracker, "record_advice_outcomes", lambda *args: None)
+    monkeypatch.setattr(
+        backfill_outcomes.ds, "get_benchmark_history",
+        lambda start, end, market: calls.append(("benchmark", start, end, market)) or pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        backfill_outcomes.ds, "get_stock_history",
+        lambda symbol, start, end, frequency, market: calls.append(
+            ("stock", symbol, start, end, frequency, market)
+        ) or pd.DataFrame(),
+    )
+
+    backfill_outcomes.run()
+
+    benchmark = next(call for call in calls if call[0] == "benchmark")
+    stock = next(call for call in calls if call[0] == "stock")
+    assert benchmark[1:3] == ("20251222", date.today().strftime("%Y%m%d"))
+    assert stock[2:4] == ("20260101", date.today().strftime("%Y%m%d"))
+    assert stock[4:] == ("historical", "US")
+
+
+def test_due_selector_prioritizes_short_mature_window_without_starvation(isolated_tracker):
+    now = datetime.now(timezone.utc)
+    old_id = tracker.log_advice("u@example.com", "OLD", 100, "", "测试", market="US")
+    recent_id = tracker.log_advice("u@example.com", "NEW", 100, "", "测试", market="US")
+    with tracker._conn() as connection:
+        connection.execute(
+            "UPDATE advice SET created_at=?, review_price_1d=101, review_price_5d=102, "
+            "review_price_20d=103, mfe_pct_20d=5, mae_pct_20d=-2 WHERE id=?",
+            ((now - timedelta(days=50)).isoformat(), old_id),
+        )
+        connection.execute(
+            "UPDATE advice SET created_at=? WHERE id=?",
+            ((now - timedelta(days=3)).isoformat(), recent_id),
+        )
+
+    selected = tracker.get_advice_for_outcome_backfill(limit=1)
+
+    assert [row["id"] for row in selected] == [recent_id]

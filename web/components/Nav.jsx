@@ -9,6 +9,10 @@ import { usePathname } from "next/navigation";
 const TABS = [
   { href: "/", label: "首页" },
   { href: "/market/", label: "行情" },
+  { href: "/stock/", label: "个股" },
+  { href: "/macro/", label: "宏观" },
+  { href: "/ipo/", label: "新股" },
+  { href: "/calendar/", label: "日历" },
   { href: "/sim/", label: "AI模拟炒股" },
   { href: "/record/", label: "AI战绩墙" },
 ];
