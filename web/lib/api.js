@@ -1,10 +1,32 @@
+import { getToken, clearToken } from "./auth";
+
 // 接口基地址。构建成静态文件之后跟 API 同源（nginx 把 /api 反代到
 // uvicorn），所以默认空前缀；本地 npm run dev 时前端在 3000、API 在 8600，
 // 用环境变量指过去。
 const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
 
+// 未登录/登录过期时抛这个，让调用方能跟"接口挂了"区分开：前者该退回登录页，
+// 后者该显示降级内容。判断用 instanceof 而不是比字符串。
+export class UnauthorizedError extends Error {
+  constructor(path) {
+    super(`${path} -> 401`);
+    this.name = "UnauthorizedError";
+  }
+}
+
 export async function apiGet(path) {
-  const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
+  const token = getToken();
+  const res = await fetch(`${BASE}${path}`, {
+    cache: "no-store",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    // 同源部署时带上 Streamlit 写的那份 cookie，见 lib/auth.js 的说明。
+    credentials: "include",
+  });
+  if (res.status === 401) {
+    // token 已经没用了，清掉，否则每个组件都会各自再撞一次 401。
+    clearToken();
+    throw new UnauthorizedError(path);
+  }
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
   return res.json();
 }
