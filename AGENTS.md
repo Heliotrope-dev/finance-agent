@@ -14,11 +14,11 @@
                    invest.heliotrope.online）
 ```
 
-改完代码要**手动同步到 VPS**（`scp` 或者 `git push` 之后到 VPS 上
-`git pull`），本地改完不会自动生效。改完影响正在跑的服务的文件，记得
-`systemctl restart finance-agent`。`.streamlit/secrets.toml`（API key 这些）
-只在 VPS 上有，是 `.gitignore` 掉的，不要以为本地能读到它、也不要把它
-的内容写死进代码里。
+推送到 main 会触发 `.github/workflows/deploy.yml` 自动部署（`git reset
+--hard` + 重启 + 健康检查，失败自动回滚），不需要手动 `scp`。只改不影响
+运行服务的文件时也一样会重启，注意不要在盘中推非必要改动。
+`.streamlit/secrets.toml`（API key 这些）只在 VPS 上有，是 `.gitignore`
+掉的，不要以为本地能读到它、也不要把它的内容写死进代码里。
 
 ## AI 判断链路：四家供应商轮流顶，不是只有一家
 
