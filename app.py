@@ -88,6 +88,7 @@ from tracker import (
     get_advice_accuracy, get_recent_advice_outcomes, get_advice_outcome_summary,
     get_recent_advice_changes,
     get_advice_outcome_windows,
+    get_score_band_backtest,
     extract_score_breakdown,
     get_accuracy_trend, get_daily_accuracy, add_watch_only, is_position_tracked,
     add_search_history, get_search_history, get_latest_leaderboard, get_user_overview,
@@ -115,6 +116,8 @@ from charts import (
 import portfolio_risk
 import sim_metrics
 import ipo_calc
+from diagnostics_store import load_score_diagnostics
+from expectancy import dimension_edge
 from auth import (
     _check_user, _register_user, _create_token, _validate_token,
     _invalidate_token, _hash_pw, _user_exists,
@@ -4646,6 +4649,107 @@ def _render_my_page():
             "详见打分体系的事后实证说明。</div>",
             unsafe_allow_html=True,
         )
+
+        # 2026-09-22：分档回测和维度边际原来只有命令行能看，模型也从未读过。
+        # 现在 prompt 与这里共用 tracker 的当前权重口径筛选；UI 不 import
+        # score_diagnostics，避免把 SciPy 常驻进 1.9G 主机上的 Streamlit 进程。
+        with st.expander("打分体系校准与统计诊断", expanded=False):
+            st.caption(
+                "只展示当前权重口径。每档少于 30 条不作结论；绝对收益与相对各市场基准的五日超额分开列。"
+            )
+            _market_label = {"A": "沪深", "HK": "港股", "US": "美股", "CC": "加密资产"}
+            for _market in ("US", "HK", "A", "CC"):
+                try:
+                    _bt = get_score_band_backtest(
+                        source="screen", min_sample=30, market=_market,
+                        current_scheme_only=True,
+                    )
+                except Exception:
+                    _bt = {}
+                _bands = [b for b in (_bt.get("bands") or []) if b.get("count")]
+                if not _bands:
+                    continue
+                st.markdown(f"**{_market_label.get(_market, _market)}**")
+                _table = []
+                for _band in _bands:
+                    _table.append({
+                        "分档": _band["band"],
+                        "样本": _band["count"],
+                        "平均绝对收益": (
+                            f"{_band['avg_return_pct']:+.2f}%"
+                            if _band.get("avg_return_pct") is not None else "样本不足"
+                        ),
+                        "平均五日超额": (
+                            f"{_band['avg_excess_pct']:+.2f}%"
+                            if _band.get("avg_excess_pct") is not None else "样本不足"
+                        ),
+                        "超额胜率": (
+                            f"{_band['excess_win_rate_pct']:.0f}%"
+                            if _band.get("excess_win_rate_pct") is not None else "—"
+                        ),
+                    })
+                st.dataframe(_table, hide_index=True, use_container_width=True)
+            try:
+                _edges = dimension_edge("screen")
+            except Exception:
+                _edges = {}
+            if _edges:
+                st.markdown("**旧口径维度高低分组对照**")
+                _edge_rows = []
+                for _dimension, _edge in _edges.items():
+                    _edge_rows.append({
+                        "维度": _dimension, "状态": _edge.get("状态", "尚未验证"),
+                        "样本": _edge.get("样本", 0),
+                        "高分减低分": (
+                            f"{_edge['差值']:+.2f}%" if _edge.get("状态") == "已验证" else "—"
+                        ),
+                    })
+                st.dataframe(_edge_rows, hide_index=True, use_container_width=True)
+
+            _diag = load_score_diagnostics()
+            _daily_ic = _diag.get("daily_cross_sectional_ic_5d") or {}
+            if _daily_ic.get("count"):
+                st.markdown("**日内截面选股能力**")
+                _ic1, _ic2, _ic3 = st.columns(3)
+                _ic1.metric("五日 IC 均值", f"{_daily_ic['ic_mean']:+.3f}")
+                _ic2.metric("ICIR", f"{_daily_ic['icir']:.2f}" if _daily_ic.get("icir") is not None else "—")
+                _ic3.metric("有效日×市场", str(_daily_ic["count"]))
+                st.caption("同一天同一市场内做秩相关，市场整体涨跌被消掉；少于 5 支的截面不计算。")
+            else:
+                st.caption("日内截面 IC 尚无足够的五日回填样本；离线任务会在收盘后更新。")
+
+            _dimension_stats = _diag.get("dimension_horizon") or []
+            if _dimension_stats:
+                st.markdown("**维度 × 窗口（Bootstrap + FDR）**")
+                _dim_names = {
+                    "fundamental": "基本面", "price_position": "价格位置",
+                    "technical": "技术面", "chips": "筹码面",
+                    "analyst": "分析师预期", "data_certainty": "数据确定性",
+                }
+                st.dataframe([{
+                    "维度": _dim_names.get(x["dimension"], x["dimension"]),
+                    "窗口": f"{x['horizon_days']}日", "样本": x["sample_count"],
+                    "结论": x["verdict"],
+                    "Rank IC": f"{x['ic']:+.3f}" if x.get("ic") is not None else "—",
+                    "95% CI": (
+                        f"[{x['ci_low']:+.3f}, {x['ci_high']:+.3f}]"
+                        if x.get("ci_low") is not None else "—"
+                    ),
+                } for x in _dimension_stats], hide_index=True, use_container_width=True)
+
+            _confidence = _diag.get("confidence_calibration_5d") or []
+            if _confidence:
+                st.markdown("**置信度校准**")
+                st.dataframe([{
+                    "置信度": x["level"], "样本": x["sample_count"], "结论": x["verdict"],
+                    "方向命中率": (
+                        f"{x['hit_rate_pct']:.1f}%" if x.get("hit_rate_pct") is not None else "—"
+                    ),
+                    "平均方向超额": (
+                        f"{x['avg_signed_excess_pct']:+.2f}%"
+                        if x.get("avg_signed_excess_pct") is not None else "—"
+                    ),
+                } for x in _confidence], hide_index=True, use_container_width=True)
 
         if stats.get("总数"):
             # 按市场/按方向拆开——笼统一个数看不出"在哪个市场准""偏多还是偏空准"。

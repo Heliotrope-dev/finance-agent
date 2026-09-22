@@ -390,6 +390,8 @@ def judge_market_watchlist(market: str) -> list[dict]:
             source=("watchlist_crypto" if e.get("market") == "CC"
                     else f"watchlist_{market.lower()}"),
             score=e.get("score"),
+            score_technical_code=e.get("score_technical_code"),
+            score_price_position_code=e.get("score_price_position_code"),
         )
     return judged
 
@@ -2421,15 +2423,54 @@ def _build_judge_user_content(symbol: str, market: str, name: str, financial_sum
     )
 
 
+def _calibration_block(market: str, source: str = "screen") -> str:
+    """Return this scorer's own five-day evidence for the active weight scheme.
+
+    2026-09-22：数据库早已在记录分数和事后表现，但判断 prompt 从来没有读过
+    这些记录，模型每次都像第一次打分。这里只取同一市场、同一来源和当前
+    ``*_max`` 权重签名；跨市场候选池、旧权重与当前 75 分都不是同一个量尺。
+    """
+    try:
+        bt = tracker.get_score_band_backtest(
+            source=source, min_sample=30, market=market, current_scheme_only=True,
+        )
+    except Exception:
+        return ""
+    lines = []
+    for band in bt.get("bands") or []:
+        count = band.get("count") or 0
+        if not count:
+            continue
+        if count >= 30 and band.get("avg_excess_pct") is not None:
+            lines.append(
+                f"  {band['band']}分：样本{count}，平均五日超额"
+                f"{band['avg_excess_pct']:+.1f}%，超额胜率"
+                f"{band['excess_win_rate_pct']:.0f}%"
+            )
+        else:
+            lines.append(f"  {band['band']}分：样本{count}（样本不足，不作结论）")
+    if not lines:
+        return ""
+    return (
+        "【你自己的历史校准数据】\n"
+        f"你过去在这个市场的打分事后表现（当前权重口径：{bt.get('current_scheme') or '未知'}；"
+        "五日超额收益）：\n" + "\n".join(lines) +
+        "\n给分时请据此校准尺度。若高分档没有优于中分档，把80分以上留给证据链"
+        "真正完整且多个维度互相印证的情况。这是你自己的历史记录，不是外部意见。"
+    )
+
+
 def judge_stock_with_debate(symbol: str, market: str, name: str, financial_summary: str,
                              technical_summary: str, news_summary: str, position_summary: str = "",
                              valuation_summary: str = "", holding: bool = True,
                              chips_summary: str = "", analyst_view: str = "",
-                             asset_kind: str = "equity") -> dict:
+                             asset_kind: str = "equity", calibration: str = "") -> dict:
     """带多空辩论的判断——只给持仓用（见上面的成本考量注释）。bull/bear两个
     论证并发生成（互不依赖，同时发也不影响独立性——两边都只能看到原始数据，
     看不到对方的论证，这才是真正各自独立的论据，不是一个抄另一个）。"""
     data_context = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary, chips_summary, analyst_view)
+    if calibration:
+        data_context += "\n\n" + calibration
 
     def _call_stance(client, model, system_prompt, who=""):
         # 真实故障(2026-09-02)：持仓页"英伟达/阿里巴巴/美光科技/亚马逊/
@@ -2570,8 +2611,10 @@ def judge_stock(symbol: str, market: str, name: str, financial_summary: str,
                  technical_summary: str, news_summary: str, position_summary: str = "",
                  valuation_summary: str = "", holding: bool = False,
                  chips_summary: str = "", analyst_view: str = "",
-                 asset_kind: str = "equity") -> dict:
+                 asset_kind: str = "equity", calibration: str = "") -> dict:
     user_content = _build_judge_user_content(symbol, market, name, financial_summary, technical_summary, news_summary, position_summary, valuation_summary, chips_summary, analyst_view)
+    if calibration:
+        user_content += "\n\n" + calibration
     system_prompt = _JUDGE_SYSTEM + _asset_scoring_addendum(asset_kind) + (_HOLDING_ADDENDUM if holding else "")
     # max_retries=0+timeout=90：真实故障(2026-09-02)排查judge_stock_with_
     # debate那边的卡死问题时顺带发现——这里的.create()调用同样从来没设过
@@ -3049,6 +3092,61 @@ def _technical_summary_text(symbol: str, market: str) -> str:
         return ""
 
 
+def _deterministic_observation_scores(symbol: str, market: str) -> dict:
+    """Compute comparison-only technical/price-position scores from daily bars.
+
+    2026-09-22：这两维几乎全是均线、距离、MACD、量比等确定性算术，却由
+    不同 provider 自由给分。当前阶段只并排留档，不覆盖模型分；至少观察两周
+    后再用事后超额判断哪把尺更稳定，避免一次性重写评分行为。
+    """
+    try:
+        end = ds.cn_now().strftime("%Y%m%d")
+        # 与 _technical_summary_text 使用完全相同的 90 天查询键，命中现有缓存；
+        # 候选池一次上百支，若另开 420 天请求会把“只观测”变成翻倍的行情压力。
+        start = (ds.cn_now() - timedelta(days=90)).strftime("%Y%m%d")
+        hist = ds.get_stock_history(symbol, start, end, market=market)
+        if hist is None or hist.empty or "收盘" not in hist.columns:
+            return {"technical": None, "price_position": None}
+        ordered = hist.sort_values(hist.columns[0])
+        close = ordered["收盘"].astype(float).dropna()
+        if len(close) < 30 or close.iloc[-1] <= 0:
+            return {"technical": None, "price_position": None}
+        ma20 = close.rolling(20).mean()
+        current_ma = float(ma20.iloc[-1])
+        previous_ma = float(ma20.iloc[-6])
+        if current_ma <= 0 or previous_ma <= 0:
+            return {"technical": None, "price_position": None}
+        slope_pct = (current_ma / previous_ma - 1) * 100
+        deviation_pct = abs(float(close.iloc[-1]) / current_ma - 1) * 100
+        change_pct = (float(close.iloc[-1]) / float(close.iloc[-2]) - 1) * 100
+        fast = close.ewm(span=12, adjust=False).mean()
+        slow = close.ewm(span=26, adjust=False).mean()
+        macd = fast - slow
+        macd_hist = float((macd - macd.ewm(span=9, adjust=False).mean()).iloc[-1])
+
+        volume_ratio = 0.0
+        if "成交量" in ordered.columns:
+            volume = ordered["成交量"].astype(float).dropna()
+            if len(volume) >= 21 and float(volume.iloc[-21:-1].mean()) > 0:
+                volume_ratio = float(volume.iloc[-1] / volume.iloc[-21:-1].mean())
+
+        technical = 8 if slope_pct > 0.5 else (4 if slope_pct > -0.5 else 0)
+        technical += 6 if deviation_pct <= 3 else (3 if deviation_pct <= 8 else 0)
+        technical += 3 if macd_hist > 0 else 0
+        technical += 3 if volume_ratio > 1.2 and change_pct > 0 else 0
+
+        # 短线价格位置按 MA20 方向和离均线距离定，不再用“越接近52周低点
+        # 越安全”的均值回归假设；后者会给下跌趋势里的接刀位置奖励。
+        price_position = 10 if slope_pct > 0.5 else (5 if slope_pct > -0.5 else 0)
+        price_position += 10 if deviation_pct <= 3 else (5 if deviation_pct <= 8 else 0)
+        return {
+            "technical": min(20, technical),
+            "price_position": min(20, price_position),
+        }
+    except Exception:
+        return {"technical": None, "price_position": None}
+
+
 # 做空/监管/诉讼类关键词——命中就单独标记出来，防止这类真正的黑天鹅信息
 # 被"只展示最近5条"的排序悄悄挤出去（比如最新5条都是股价异动播报，但3天前
 # 有一条监管立案调查被排到第6条，原来的逻辑会直接漏掉）。
@@ -3242,6 +3340,7 @@ def _judge_one(item: dict, source: str) -> dict | None:
         fin = (fin + "\n\n" if fin else "") + _q
     valuation = _valuation_text(symbol, market)
     tech = _technical_summary_text(symbol, market)
+    code_scores = _deterministic_observation_scores(symbol, market)
     news = _news_summary_text(symbol, market, name)
     position = _price_position_text(symbol, market)
     # 近期结构跟52周位置拼在一起送进去（2026-09-06）。分成两句而不是塞进
@@ -3304,14 +3403,15 @@ def _judge_one(item: dict, source: str) -> dict | None:
     if _web:
         analyst_view = (analyst_view + "\n\n" if analyst_view else "") + \
             "公开网页材料（来源已标注，只能引用其中真实出现的内容）：\n" + _web
+    calibration = _calibration_block(market, source)
     try:
         # 持仓判断走多空辩论版本（更扎实但3倍AI调用），候选池初筛(source=
         # "screen")继续用单次判断——几十支候选一天判断一遍，辩论版本的
         # 调用量级在那个场景下不划算，见judge_stock_with_debate上面的注释。
         if holding:
-            verdict = judge_stock_with_debate(symbol, market, name, fin, tech, news, position, valuation, holding=True, chips_summary=chips, analyst_view=analyst_view, asset_kind=asset_kind)
+            verdict = judge_stock_with_debate(symbol, market, name, fin, tech, news, position, valuation, holding=True, chips_summary=chips, analyst_view=analyst_view, asset_kind=asset_kind, calibration=calibration)
         else:
-            verdict = judge_stock(symbol, market, name, fin, tech, news, position, valuation, holding=False, chips_summary=chips, analyst_view=analyst_view, asset_kind=asset_kind)
+            verdict = judge_stock(symbol, market, name, fin, tech, news, position, valuation, holding=False, chips_summary=chips, analyst_view=analyst_view, asset_kind=asset_kind, calibration=calibration)
     except Exception as e:
         return {"symbol": symbol, "market": market, "name": name, "error": str(e)}
     return {
@@ -3319,6 +3419,8 @@ def _judge_one(item: dict, source: str) -> dict | None:
         "action": verdict["action"], "score": verdict.get("score"),
         "fundamental_verdict": verdict["fundamental_verdict"],
         "technical_signal": tech, "source": source, "asset_kind": asset_kind,
+        "score_technical_code": code_scores["technical"],
+        "score_price_position_code": code_scores["price_position"],
     }
 
 
@@ -3959,6 +4061,8 @@ def run_positions_advice():
             _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
             e["technical_signal"], e["action"], e["market"], e["name"], source="position",
             score=e.get("score"),
+            score_technical_code=e.get("score_technical_code"),
+            score_price_position_code=e.get("score_price_position_code"),
         )
     # 2026-09-02用户改主意，明确要求这份12:30的持仓/自选判断也要同步进
     # 微信（之前那句"不进微信简报"是更早一次明确要求，这次是新的明确
@@ -4060,6 +4164,8 @@ def main():
             _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
             e["technical_signal"], e["action"], e["market"], e["name"], source="watchlist",
             score=e.get("score"),
+            score_technical_code=e.get("score_technical_code"),
+            score_price_position_code=e.get("score_price_position_code"),
         )
     # 2026-09-02从market_cap=3升级成明确配额——用户反馈过两次"首页推荐股
     # 排行榜怎么全是港股"，market_cap只保证"不被单一市场包圆"，不保证
@@ -4097,6 +4203,8 @@ def main():
             _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
             e["technical_signal"], e["action"], e["market"], e["name"], source="screen",
             score=e.get("score"),
+            score_technical_code=e.get("score_technical_code"),
+            score_price_position_code=e.get("score_price_position_code"),
         )
 
     # 2026-09-02用户明确要求"首页推荐股排行榜不要只盯着今日热门股，扩大到
@@ -4122,6 +4230,8 @@ def main():
             _EMAIL, e["symbol"], e.get("price"), e["fundamental_verdict"],
             e["technical_signal"], e["action"], e["market"], e["name"], source="watchlist",
             score=e.get("score"),
+            score_technical_code=e.get("score_technical_code"),
+            score_price_position_code=e.get("score_price_position_code"),
         )
     print(f"（全市场量化筛选的{len(judged)}支候选已并入首页推荐股候选池，不再只从今日热门股里选）\n")
 

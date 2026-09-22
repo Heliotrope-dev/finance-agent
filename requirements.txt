@@ -6,3 +6,4 @@ requests==2.34.2
 openai==2.45.0
 plotly==6.9.0
 futu-api==10.9.6908
+scipy==1.18.1

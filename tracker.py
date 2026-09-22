@@ -126,7 +126,23 @@ def init_db():
                 action TEXT NOT NULL DEFAULT '观望',
                 source TEXT NOT NULL DEFAULT 'position',
                 review_price REAL,
-                review_at TEXT
+                review_at TEXT,
+                review_price_1d REAL,
+                review_price_5d REAL,
+                review_price_20d REAL,
+                review_price_60d REAL,
+                mfe_pct_20d REAL,
+                mae_pct_20d REAL,
+                stop_hit_day INTEGER,
+                bench_ret_1d REAL,
+                bench_ret_5d REAL,
+                bench_ret_20d REAL,
+                bench_ret_60d REAL,
+                stop_loss REAL,
+                target_price REAL,
+                confidence TEXT,
+                score_technical_code INTEGER,
+                score_price_position_code INTEGER
             )
             """
         )
@@ -170,6 +186,29 @@ def init_db():
         for _dim in ("fundamental", "price_position", "technical",
                      "chips", "analyst", "data_certainty"):
             _col = f"score_{_dim}_max"
+            if _col not in _advice_cols:
+                c.execute(f"ALTER TABLE advice ADD COLUMN {_col} INTEGER")
+
+        # 2026-09-22：原来的回看只存第七天附近一个价格，既看不到不同维度
+        # 各自真正起作用的周期，也会把“中途击穿止损、后来反弹”的路径错记成
+        # 判断正确。这里仅建列；行情和基准取数放在 backfill_outcomes.py，
+        # tracker.py 继续严格保持只读写 SQLite、不发网络请求的边界。
+        _outcome_columns = {
+            "review_price_1d": "REAL", "review_price_5d": "REAL",
+            "review_price_20d": "REAL", "review_price_60d": "REAL",
+            "mfe_pct_20d": "REAL", "mae_pct_20d": "REAL",
+            "stop_hit_day": "INTEGER",
+            "bench_ret_1d": "REAL", "bench_ret_5d": "REAL",
+            "bench_ret_20d": "REAL", "bench_ret_60d": "REAL",
+            "stop_loss": "REAL", "target_price": "REAL", "confidence": "TEXT",
+        }
+        for _col, _type in _outcome_columns.items():
+            if _col not in _advice_cols:
+                c.execute(f"ALTER TABLE advice ADD COLUMN {_col} {_type}")
+        # 2026-09-22：先把代码分与模型分并排观察两周，不改排行榜行为。
+        # 直接覆盖模型分会让新旧样本不可比，也无法回答分歧时究竟谁更接近
+        # 事后结果；先留两列，等样本说话后再决定是否接管某个维度。
+        for _col in ("score_technical_code", "score_price_position_code"):
             if _col not in _advice_cols:
                 c.execute(f"ALTER TABLE advice ADD COLUMN {_col} INTEGER")
 
@@ -1563,13 +1602,53 @@ def extract_score_breakdown(text: str) -> dict:
     return result
 
 
+def extract_advice_metadata(text: str) -> dict:
+    """Parse only explicitly labelled risk facts from an advice report.
+
+    These values used to be shown in the UI and then discarded, which made it
+    impossible to test confidence calibration or whether a stop was breached.
+    The parser intentionally stays conservative: an unlabelled number is not a
+    stop or target, and an unparseable value remains NULL rather than guessed.
+    """
+    text = text or ""
+
+    confidence = None
+    match = re.search(r"置信度(?:\*{1,2})?\s*[：:]\s*(?:\*{1,2})?\s*([高中低])", text)
+    if match:
+        confidence = match.group(1)
+
+    def _labelled_price(label_pattern: str, prefix_pattern: str) -> float | None:
+        match = re.search(
+            rf"(?:{label_pattern})(?:\*{{1,2}})?\s*[：:]\s*"
+            rf"(?:{prefix_pattern})?\s*(?:HK\$|US\$|CN¥|[$¥￥])?\s*"
+            rf"([\d,]+(?:\.\d+)?)",
+            text,
+        )
+        if not match:
+            return None
+        try:
+            value = float(match.group(1).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    return {
+        "stop_loss": _labelled_price(r"止损参考位|止损位", r"若?跌破|设为|约|为"),
+        "target_price": _labelled_price(r"目标价", r"约|为"),
+        "confidence": confidence,
+    }
+
+
 def log_advice(
     email: str, symbol: str, price_at_advice: float, fundamental_verdict: str,
     technical_signal: str, action: str = "观望", market: str = "A", name: str = "",
     source: str = "position", score: int | None = None,
+    score_technical_code: int | None = None,
+    score_price_position_code: int | None = None,
 ) -> int:
     init_db()
     breakdown = extract_score_breakdown(fundamental_verdict)
+    metadata = extract_advice_metadata(fundamental_verdict)
     with closing(_conn()) as c:
         cur = c.execute(
             "INSERT INTO advice (email, symbol, market, name, created_at, price_at_advice, "
@@ -1577,8 +1656,10 @@ def log_advice(
             "score_fundamental, score_price_position, score_technical, score_data_certainty, "
             "score_chips, score_analyst, "
             "score_fundamental_max, score_price_position_max, score_technical_max, "
-            "score_data_certainty_max, score_chips_max, score_analyst_max) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "score_data_certainty_max, score_chips_max, score_analyst_max, "
+            "stop_loss, target_price, confidence, score_technical_code, "
+            "score_price_position_code) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (email, symbol, market, name, datetime.now(timezone.utc).isoformat(), price_at_advice,
              fundamental_verdict, technical_signal, action, source, score,
              breakdown["fundamental"], breakdown["price_position"],
@@ -1586,7 +1667,9 @@ def log_advice(
              breakdown["chips"], breakdown["analyst"],
              breakdown["fundamental_max"], breakdown["price_position_max"],
              breakdown["technical_max"], breakdown["data_certainty_max"],
-             breakdown["chips_max"], breakdown["analyst_max"]),
+             breakdown["chips_max"], breakdown["analyst_max"],
+             metadata["stop_loss"], metadata["target_price"], metadata["confidence"],
+             score_technical_code, score_price_position_code),
         )
         c.commit()
         return cur.lastrowid
@@ -1631,10 +1714,106 @@ def record_advice_review(advice_id: int, review_price: float):
         c.commit()
 
 
+_ADVICE_OUTCOME_COLUMNS = (
+    "review_price_1d", "review_price_5d", "review_price_20d", "review_price_60d",
+    "mfe_pct_20d", "mae_pct_20d", "stop_hit_day",
+    "bench_ret_1d", "bench_ret_5d", "bench_ret_20d", "bench_ret_60d",
+    "stop_loss", "target_price", "confidence",
+)
+
+
+def get_advice_for_outcome_backfill(limit: int = 500) -> list[dict]:
+    """Return records with at least one missing outcome field, oldest first.
+
+    This is deliberately a database-only function.  The caller owns all price
+    and benchmark requests so importing tracker never performs network I/O.
+    """
+    init_db()
+    # stop_hit_day=NULL is a valid completed result (“20 days passed without a
+    # hit”), and benchmark/metadata can legitimately be unavailable.  Those
+    # fields therefore cannot drive the due query or the same old rows would
+    # occupy every batch forever.  Price horizons and path extrema become
+    # non-NULL once their windows mature and provide an unambiguous cursor.
+    due_columns = (
+        "review_price_1d", "review_price_5d", "review_price_20d", "review_price_60d",
+        "mfe_pct_20d", "mae_pct_20d",
+    )
+    missing = " OR ".join(f"{column} IS NULL" for column in due_columns)
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT id, symbol, market, created_at, price_at_advice, "
+            "fundamental_verdict, stop_loss, target_price, confidence, "
+            "review_price_1d, review_price_5d, review_price_20d, review_price_60d, "
+            "mfe_pct_20d, mae_pct_20d, stop_hit_day, "
+            "bench_ret_1d, bench_ret_5d, bench_ret_20d, bench_ret_60d "
+            "FROM advice WHERE price_at_advice IS NOT NULL AND price_at_advice > 0 "
+            f"AND ({missing}) ORDER BY created_at ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_advice_outcomes(advice_id: int, values: dict) -> int:
+    """Fill previously missing outcome cells without overwriting known facts."""
+    init_db()
+    candidates = {
+        key: value for key, value in values.items()
+        if key in _ADVICE_OUTCOME_COLUMNS and value is not None
+    }
+    if not candidates:
+        return 0
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        existing = c.execute(
+            f"SELECT {', '.join(candidates)} FROM advice WHERE id = ?", (advice_id,)
+        ).fetchone()
+        if existing is None:
+            return 0
+        usable = {key: value for key, value in candidates.items() if existing[key] is None}
+        if not usable:
+            return 0
+        sets = [f"{key} = ?" for key in usable]
+        c.execute(
+            f"UPDATE advice SET {', '.join(sets)} WHERE id = ?",
+            [*usable.values(), advice_id],
+        )
+        c.commit()
+    return len(usable)
+
+
+def get_advice_diagnostic_rows(source: str | None = None) -> list[dict]:
+    """Return structured scores and outcomes for offline statistical analysis."""
+    init_db()
+    where = "WHERE score IS NOT NULL AND price_at_advice IS NOT NULL AND price_at_advice > 0"
+    params: list[object] = []
+    if source:
+        where += " AND source = ?"
+        params.append(source)
+    dimension_columns = ", ".join(
+        f"score_{name}, score_{name}_max"
+        for name in ("fundamental", "price_position", "technical", "chips", "analyst", "data_certainty")
+    )
+    with closing(_conn()) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT id, created_at, market, source, action, score, price_at_advice, "
+            f"{dimension_columns}, "
+            "score_technical_code, score_price_position_code, "
+            "review_price_1d, review_price_5d, review_price_20d, review_price_60d, "
+            "bench_ret_1d, bench_ret_5d, bench_ret_20d, bench_ret_60d, "
+            "confidence FROM advice " + where,
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 _SCORE_BANDS = [(90, 100, "90-100"), (70, 89, "70-89"), (50, 69, "50-69"), (30, 49, "30-49"), (0, 29, "0-29")]
 
 
-def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict:
+def get_score_band_backtest(source: str = "screen", min_sample: int = 5,
+                            market: str | None = None,
+                            current_scheme_only: bool = False) -> dict:
     """按综合得分分档统计事后真实收益——参考开源项目TradingAgents(TauricResearch)
     v0.2.4"结果驱动复盘日志"的思路(2026-08-26)：排行榜的0-100分打分体系上线以来
     从未被拿去跟事后价格核对过，是这套系统当时最大的可信度缺口(排行榜本身分数
@@ -1665,6 +1844,10 @@ def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict
     维护"哪次改动哪天生效"的日期表——签名直接从每条记录自带的六个*_max
     列拼出来，权重以后再怎么调整都能自动区分成新的一组，不用记得回来
     改这个函数。
+
+    2026-09-22：每档同时保留绝对收益和五日超额收益。只看绝对收益会把
+    市场 beta 当成打分能力：高分档碰巧集中在大盘下跌周时，即使相对大盘
+    更抗跌也会被判成差。bench_ret_5d 缺失时绝不估算，超额样本数单独展示。
     """
     def _compute_bands(rows: list[dict]) -> list[dict]:
         bands = []
@@ -1672,29 +1855,71 @@ def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict
             band_rows = [r for r in rows if lo <= r["score"] <= hi]
             n = len(band_rows)
             if n == 0:
-                bands.append({"band": label, "count": 0, "avg_return_pct": None, "win_rate_pct": None})
+                bands.append({
+                    "band": label, "count": 0, "avg_return_pct": None,
+                    "win_rate_pct": None, "excess_count": 0,
+                    "avg_excess_pct": None, "excess_win_rate_pct": None,
+                })
                 continue
-            returns = [(r["review_price"] - r["price_at_advice"]) / r["price_at_advice"] * 100 for r in band_rows]
-            entry = {"band": label, "count": n, "avg_return_pct": None, "win_rate_pct": None}
+            returns = [
+                (r["review_price"] - r["price_at_advice"]) / r["price_at_advice"] * 100
+                for r in band_rows
+            ]
+            excess = [
+                value - r["bench_ret_5d"] for r, value in zip(band_rows, returns)
+                if r.get("bench_ret_5d") is not None
+            ]
+            entry = {
+                "band": label, "count": n, "avg_return_pct": None,
+                "win_rate_pct": None, "excess_count": len(excess),
+                "avg_excess_pct": None, "excess_win_rate_pct": None,
+            }
             if n >= min_sample:
                 entry["avg_return_pct"] = round(sum(returns) / n, 2)
                 entry["win_rate_pct"] = round(sum(1 for x in returns if x > 0) / n * 100, 1)
+            if len(excess) >= min_sample:
+                entry["avg_excess_pct"] = round(sum(excess) / len(excess), 2)
+                entry["excess_win_rate_pct"] = round(
+                    sum(1 for value in excess if value > 0) / len(excess) * 100, 1
+                )
             bands.append(entry)
         return bands
 
     init_db()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
+        market_sql = " AND market = ?" if market else ""
+        params: list[object] = [source]
+        if market:
+            params.append(market)
         rows = c.execute(
-            "SELECT score, market, price_at_advice, review_price, "
+            "SELECT score, market, created_at, price_at_advice, "
+            "COALESCE(review_price_5d, review_price) AS review_price, bench_ret_5d, "
             "score_fundamental_max, score_price_position_max, score_technical_max, "
             "score_chips_max, score_analyst_max, score_data_certainty_max "
             "FROM advice WHERE source = ? "
-            "AND score IS NOT NULL AND review_price IS NOT NULL "
-            "AND price_at_advice IS NOT NULL AND price_at_advice > 0",
-            (source,),
+            "AND score IS NOT NULL AND COALESCE(review_price_5d, review_price) IS NOT NULL "
+            "AND price_at_advice IS NOT NULL AND price_at_advice > 0" + market_sql,
+            params,
         ).fetchall()
+        # 2026-09-22：当前口径不能从“最近一条已经回填的记录”猜。新权重上线
+        # 后至少要等五个交易日才有结果，那段过渡期里最近的已回填记录仍然是旧
+        # 口径。另查最新一条原始判断，宁可返回“当前口径暂无样本”，也不把旧
+        # 权重的历史表现冒充成当前校准数据。
+        latest_params: list[object] = [source]
+        if market:
+            latest_params.append(market)
+        latest = c.execute(
+            "SELECT score_fundamental_max, score_price_position_max, score_technical_max, "
+            "score_chips_max, score_analyst_max, score_data_certainty_max "
+            "FROM advice WHERE source = ? AND score IS NOT NULL" + market_sql +
+            " ORDER BY created_at DESC, id DESC LIMIT 1",
+            latest_params,
+        ).fetchone()
     rows = [dict(r) for r in rows]
+    current_scheme = _weight_scheme_label(dict(latest)) if latest else None
+    if current_scheme_only:
+        rows = [r for r in rows if _weight_scheme_label(r) == current_scheme]
 
     by_market = {
         m: {"total_reviewed": len(mrows), "bands": _compute_bands(mrows)}
@@ -1709,6 +1934,7 @@ def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict
     return {
         "total_reviewed": len(rows), "min_sample": min_sample,
         "bands": _compute_bands(rows), "按市场": by_market, "按打分口径": by_scheme,
+        "current_scheme": current_scheme,
     }
 
 

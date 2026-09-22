@@ -47,3 +47,7 @@
 */10 9-16 * * 1-5 cd /root/finance-agent && flock -n /tmp/finance-agent-intraday.lock timeout 3m venv/bin/python3 intraday_watch.py >> /var/log/finance-agent-intraday.log 2>&1
 */10 21-23 * * 1-5 cd /root/finance-agent && flock -n /tmp/finance-agent-intraday.lock timeout 3m venv/bin/python3 intraday_watch.py >> /var/log/finance-agent-intraday.log 2>&1
 */10 0-5 * * 2-6 cd /root/finance-agent && flock -n /tmp/finance-agent-intraday.lock timeout 3m venv/bin/python3 intraday_watch.py >> /var/log/finance-agent-intraday.log 2>&1
+
+# 2026-09-22：多窗口回看只需收盘后跑一次。行情请求全部在脚本里，tracker.py
+# 仍然只碰 SQLite；flock 和 timeout 防止慢数据源在小内存主机上重叠堆积。
+30 18 * * 1-5 cd /root/finance-agent && flock -n /tmp/fa-outcomes.lock timeout 20m sh -c 'venv/bin/python3 backfill_outcomes.py --write && venv/bin/python3 score_diagnostics.py --source screen --output data/score_diagnostics.json' >> /var/log/fa-outcomes.log 2>&1
