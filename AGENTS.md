@@ -9,7 +9,7 @@
 
 ```
 本地（这台 Mac）   /Users/heliotrope/Projects/finance-agent   开发、改代码
-线上（VPS）        root@179.255.101.244:/root/finance-agent   真实跑着的服务
+线上（VPS）        <VPS_USER>@<VPS_HOST>:/root/finance-agent   真实跑着的服务
                    systemd 服务名: finance-agent（8503 端口，nginx 反代到
                    invest.heliotrope.online）
 ```
