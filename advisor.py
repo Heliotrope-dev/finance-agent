@@ -3556,6 +3556,37 @@ def _portfolio_instrument_profile(symbol: str, market: str, name: str) -> dict:
     return {"kind": "普通证券", "leverage": 1.0, "quote_note": ""}
 
 
+def _reconcile_narrative_amounts(text: str, signals: list[dict]) -> str:
+    """2026-09-22（前端审计P1-4）：'逐支跟踪'里的金额是模型在自由文本里现编的，
+    '交易信号'的amount_cny是_validate_portfolio_signals用真实股数×真实价格×
+    汇率算出来、经过资金上限校验的——同一支标的，两处金额经常对不上
+    （真实故障：07788一处¥3,581、另一处¥8,947）。用户该信哪个不该信哪个，
+    自己是分不出来的，实际上代码算的那个才是真的会被拿去下单的数字。
+
+    这里不改prompt禁止模型写金额（模型写"约¥X买入Y股"是叙述里天然的一部分，
+    去掉会让"逐支跟踪"读起来生硬），而是让叙述里的金额跟signals对齐：拿
+    每条signal的symbol去narrative里定位它所在的那一行，把行内"约¥数字"这个
+    模式换成经过校验的真实amount_cny。只替换成功校验过的信号（signals已经
+    是_validate_portfolio_signals筛过的），没进signals的（比如超出资金上限
+    被丢弃的）不动它——那种情况叙述里的金额本来就只是模型的"建议"，没有一个
+    "更真"的数字可以拿来对齐。
+    """
+    for sig in signals:
+        symbol = sig.get("symbol")
+        amount = sig.get("amount_cny")
+        if not symbol or amount is None:
+            continue
+        pattern = re.compile(rf"^.*（{re.escape(symbol)}）.*$", re.MULTILINE)
+
+        def _fix_line(m: "re.Match", _amount=amount):
+            line = m.group(0)
+            new_line, n = re.subn(r"约?¥[\d,]+(?:\.\d+)?", f"约¥{_amount:,.0f}", line, count=1)
+            return new_line if n else line
+
+        text = pattern.sub(_fix_line, text, count=1)
+    return text
+
+
 def _validate_portfolio_signals(signals: list[dict], rows: list[dict], max_capital: float | None,
                                 total_value_cny: float) -> list[dict]:
     """把模型文本解析出的交易信号降到可执行安全边界内。
@@ -3870,6 +3901,7 @@ def advise_portfolio(email: str, progress=None) -> dict | None:
     if sig_idx == -1:
         sig_idx = text.find("交易信号:")
     analysis_text = text[:sig_idx].rstrip() if sig_idx != -1 else text
+    analysis_text = _reconcile_narrative_amounts(analysis_text, signals)
 
     tracker.log_portfolio_advice(email, total_value_cny, holdings_json, analysis_text, signals_json)
 
