@@ -17,7 +17,15 @@ jobs:
           script: |
             set -e
             cd /root/finance-agent
+            OLD=$(git rev-parse HEAD)
             git fetch origin main
             git reset --hard origin/main
             systemctl restart finance-agent
-            echo "Deployed at $(date)"
+            sleep 20
+            if ! curl -fsS --max-time 10 http://127.0.0.1:8503/_stcore/health >/dev/null; then
+              echo "Health check failed; rolling back to $OLD"
+              git reset --hard "$OLD"
+              systemctl restart finance-agent
+              exit 1
+            fi
+            echo "Deployed $(git rev-parse --short HEAD) at $(date)"
