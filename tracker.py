@@ -449,6 +449,25 @@ def init_db():
             "ON portfolio_equity_snapshots(email, snapshot_at)"
         )
 
+        # ai_call_failures：2026-09-22（前端审计P0-5）新增。「数据源状态」
+        # 面板一直只监控sim_agent那条链路（get_sim_agent_runs），标签却写
+        # 死"Gemini AI 决策"——AI咨询浮窗、个股详情页"AI分析"是另外两条完全
+        # 独立的调用路径（assistant.py/analysis.py，同一次审计发现这两处
+        # 之前根本没接故障转移，见_create_stream_with_failover的改动），
+        # 它们整条链路全挂时，这个面板一直显示"正常"，误导用户以为AI一切
+        # 正常。这张表只记"最后一次全部供应商都失败"这一件事，不是完整的
+        # 调用日志——面板要回答的问题只是"这条链路上次失败是什么时候"，不
+        # 需要记录每一次成功调用。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_call_failures (
+                module TEXT PRIMARY KEY,
+                failed_at TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
         # sim_agent_lessons：AI模拟盘的长期经验教训——2026-09-02用户明确要求
         # "他也要学习，想让他变强大"。sim_agent.py每次决策时能看到的历史只有
         # 最近_HISTORY_CONTEXT_SIZE(5)次的短期战绩，跨天/跨周的规律性教训看
@@ -1072,6 +1091,39 @@ def log_portfolio_equity_snapshot(email: str, net_value_cny: float, min_interval
         )
         c.commit()
         return True
+
+
+def log_ai_call_failure(module: str, error: str) -> None:
+    """记一条"这条AI调用链路刚刚整体失败了"（P0-5）。故意用REPLACE：只关心
+    最近一次，不是日志表，调用方（assistant.py/analysis.py的故障转移全部
+    失败时）每次都覆盖同一行。"""
+    init_db()
+    with closing(_conn()) as c:
+        c.execute(
+            "INSERT INTO ai_call_failures (module, failed_at, error) VALUES (?, ?, ?) "
+            "ON CONFLICT(module) DO UPDATE SET failed_at = excluded.failed_at, error = excluded.error",
+            (module, datetime.now(timezone.utc).isoformat(), error[:500]),
+        )
+        c.commit()
+
+
+def get_ai_call_failure(module: str) -> dict | None:
+    """读某条AI调用链路最后一次整体失败的记录，给「数据源状态」面板用。"""
+    init_db()
+    with closing(_conn()) as c:
+        row = c.execute(
+            "SELECT failed_at, error FROM ai_call_failures WHERE module = ?", (module,)
+        ).fetchone()
+    return {"failed_at": row[0], "error": row[1]} if row else None
+
+
+def clear_ai_call_failure(module: str) -> None:
+    """某条链路重新成功一次后，把上一条失败记录清掉——面板要回答的是
+    "现在还坏着吗"，不是"历史上坏过吗"。"""
+    init_db()
+    with closing(_conn()) as c:
+        c.execute("DELETE FROM ai_call_failures WHERE module = ?", (module,))
+        c.commit()
 
 
 def get_portfolio_equity_snapshots(email: str, limit: int = 500) -> list[dict]:

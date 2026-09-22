@@ -31,12 +31,38 @@ def _client() -> OpenAI:
 def _create_stream_with_failover(**kwargs):
     """建流时的供应商故障转移，跟 assistant.py 里同名函数同一套逻辑。
 
+    2026-09-22（前端审计P0-3）：这里同样是"文档字符串写着复用
+    advisor._is_failover_worthy，函数体却只调用了_client()这一家"——
+    跟assistant.py那处是同一个坑，一起补上。个股详情页"AI分析"这条链路
+    之前单点依赖付费Gemini，那把key欠费时整块报402。
+
     两个模块各留一份而不是抽公共函数：它们各自有自己的 _client() 和 _MODEL
     （assistant 那个客户端是 st.cache_resource 缓存的会话级单例，这个不是），
     抽出去就要把客户端当参数传进传出，反而绕。转移判据复用
     advisor._is_failover_worthy，保证全项目一套标准。
     """
-    return _client().chat.completions.create(model=_MODEL, **kwargs)
+    import advisor
+    import tracker
+
+    errors: list[Exception] = []
+    for client_fn in (advisor._client_free, _client):
+        try:
+            client = client_fn()
+        except Exception as e:
+            errors.append(e)
+            continue
+        try:
+            result = client.chat.completions.create(model=_MODEL, **kwargs)
+            tracker.clear_ai_call_failure("analysis")
+            return result
+        except Exception as e:
+            errors.append(e)
+            if not advisor._is_failover_worthy(e):
+                tracker.log_ai_call_failure("analysis", f"{type(e).__name__}: {e}")
+                raise
+    final = errors[-1] if errors else RuntimeError("没有可用的AI供应商。")
+    tracker.log_ai_call_failure("analysis", f"{type(final).__name__}: {final}")
+    raise final
 
 
 def _stream_chat(system_prompt: str, user_content: str, max_tokens: int = 2000):

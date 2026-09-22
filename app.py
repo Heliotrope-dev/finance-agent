@@ -3883,8 +3883,13 @@ def _render_home_portfolio_action():
         st.caption("AI 组合分析还没生成过——去「持仓」页点击「立即重新分析」，1-3 分钟生成第一份。")
         return
 
-    created = advice["created_at"][:19].replace("T", " ")
-    st.caption(f"更新于 {created}（UTC）· 完整分析、逐支跟踪与交易信号见「持仓」页")
+    # 2026-09-22（前端审计P1-9）：全站时间格式六套并存，这是仅有的两处直接
+    # 打印UTC原始时间还标"（UTC）"的地方（其余全站都是北京时间）——数据库里
+    # created_at存的确实是UTC，但这里应该跟全站一致转成北京时间再显示，不是
+    # 把UTC暴露给用户自己换算。复用app.py已有的_to_cn_dt()。
+    _created_cn = _to_cn_dt(advice["created_at"])
+    created = _created_cn.strftime("%Y-%m-%d %H:%M:%S") if _created_cn else advice["created_at"][:19].replace("T", " ")
+    st.caption(f"更新于 {created} · 完整分析、逐支跟踪与交易信号见「持仓」页")
 
     if not _portfolio_advice_is_current(advice, holding_items):
         st.warning("持仓记录已在这份分析后变化，旧交易信号已失效；请到「持仓」页重新分析。")
@@ -4264,7 +4269,7 @@ def _render_data_source_health():
                 _ok_when = _to_cn_dt(_sim_ok.get("run_at")) if _sim_ok else None
                 _ok_text = _ok_when.strftime("%m-%d %H:%M") if _ok_when else "最近200次内没有成功记录"
                 st.markdown(
-                    f"**Gemini AI 决策**：<span style='color:{BAD_COLOR}'>不可用</span>"
+                    f"**AI 决策链路**（模拟盘/组合分析/投研计划）：<span style='color:{BAD_COLOR}'>不可用</span>"
                     f"（最近一次失败 {_when_text}；最后一次成功 {_ok_text}）",
                     unsafe_allow_html=True,
                 )
@@ -4272,14 +4277,42 @@ def _render_data_source_health():
                 _when = _to_cn_dt(_sim_latest.get("run_at"))
                 _when_text = _when.strftime("%m-%d %H:%M") if _when else "未知时间"
                 st.markdown(
-                    f"**Gemini AI 决策**：<span style='color:{OK_COLOR}'>正常</span>"
+                    f"**AI 决策链路**（模拟盘/组合分析/投研计划）：<span style='color:{OK_COLOR}'>正常</span>"
                     f"（最近一次 {_when_text}：{_esc(str(_sim_latest.get('status') or '完成'))}）",
                     unsafe_allow_html=True,
                 )
             else:
-                st.markdown("**Gemini AI 决策**：暂无运行记录")
+                st.markdown("**AI 决策链路**（模拟盘/组合分析/投研计划）：暂无运行记录")
         except Exception:
-            st.markdown("**Gemini AI 决策**：状态暂时读取不到")
+            st.markdown("**AI 决策链路**（模拟盘/组合分析/投研计划）：状态暂时读取不到")
+
+        # 2026-09-22（前端审计P0-5）：上面这块一直标着"Gemini AI 决策"，但
+        # 只读sim_agent那条链路——AI咨询浮窗、个股详情页"AI分析"是完全独立
+        # 的另外两条调用路径（assistant.py/analysis.py），之前这两处压根
+        # 没接故障转移、单点依赖付费Gemini，那把key欠费时用户在这两处看到
+        # 一堆402报错，这个面板却一直显示"AI决策链路：正常"——因为它监控的
+        # 根本不是同一条链路。现在两条链路分开展示，各自说各自的状态。
+        try:
+            import tracker as _tracker_health
+
+            _chat_labels = (("assistant", "AI 咨询"), ("analysis", "个股 AI 分析"))
+            _chat_fail_texts = []
+            for _mod, _label in _chat_labels:
+                _fail = _tracker_health.get_ai_call_failure(_mod)
+                if _fail:
+                    _fail_when = _to_cn_dt(_fail.get("failed_at"))
+                    _fail_when_text = _fail_when.strftime("%m-%d %H:%M") if _fail_when else "未知时间"
+                    _chat_fail_texts.append(f"{_label}（最近一次失败 {_fail_when_text}）")
+            if _chat_fail_texts:
+                st.markdown(
+                    f"**AI 对话/分析链路**：<span style='color:{BAD_COLOR}'>部分不可用</span>"
+                    f"（{'、'.join(_chat_fail_texts)}）",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(f"**AI 对话/分析链路**：<span style='color:{OK_COLOR}'>正常</span>", unsafe_allow_html=True)
+        except Exception:
+            st.markdown("**AI 对话/分析链路**：状态暂时读取不到")
 
         _breakers = _health["熔断记录"]
         if _breakers:
@@ -4490,7 +4523,17 @@ def _render_my_page():
         by_market = ov.get("by_market") or {}
         total_mkt = sum(by_market.values())
         if total_mkt:
-            st.markdown("**关注的市场**")
+            # 2026-09-22（前端审计P1-7）：这个统计口径一直是"自选+持仓一起按
+            # market分组"（tracker.py get_user_overview的by_market查询没按
+            # shares区分），但标题只写"关注的市场"，紧挨着上面"自选:55/
+            # 持仓:3"两个分开的数字，看着像是在描述"自选"那一项，合计却是
+            # 55+3=58——数字对不上不是算错了，是这行的统计范围本来就比"自选"
+            # 更大，只是没在标题里说清楚。真查过数据库：58里那"1支沪深"是
+            # 持仓表里的012805（A股），自选表里其实一支沪深都没有，去自选页
+            # 找它当然点不出来，它压根就在"持仓"里。改标题把范围说清楚，
+            # 不改统计口径本身——"关注"这个词本来就该包含正在持有的。
+            st.markdown("**自选 + 持仓 · 市场分布**")
+            st.caption(f"共 {total_mkt} 支（自选 {ov.get('watch_count', 0)} + 持仓 {ov.get('hold_count', 0)}），按市场统计。")
             _label = {"A": "沪深", "HK": "港股", "US": "美股"}
             # 一根横向占比条 + 一行图例。比三个数字更直观地回答"我主要在看哪个
             # 市场"，配色走图表那套去饱和色板，不引入新颜色。
@@ -4917,9 +4960,28 @@ def _render_ai_assistant():
                         placeholder.markdown(_chat_bubble("assistant", reply + " ▌"), unsafe_allow_html=True)
                     placeholder.markdown(_chat_bubble("assistant", reply), unsafe_allow_html=True)
                 except Exception as e:
-                    reply = f"回答失败：{e}"
+                    # 2026-09-22（前端审计P0-1a）：这里原来是 f"回答失败：{e}"，
+                    # 把上游异常的repr原样吐给用户——AI供应商额度耗尽时那是
+                    # 一整段Python dict：provider名、账单管理链接、
+                    # RESOURCE_EXHAUSTED状态码，用户在聊天气泡里看到这些没有
+                    # 任何意义，还暴露了后端用的是哪家供应商。统一换成对用户
+                    # 友好的文案，原始异常只留在服务端日志（print到stdout，
+                    # systemd journal能看到），排障时上服务器查journalctl，
+                    # 不指望前端替用户翻译这些底层错误。
+                    print(f"[assistant] AI回复失败: {type(e).__name__}: {e}", flush=True)
+                    reply = "AI暂时不可用，可能是接口繁忙或额度用尽，过一会儿再试试。"
                     placeholder.markdown(_chat_bubble("assistant", reply), unsafe_allow_html=True)
             st.session_state["_assistant_messages"].append({"role": "assistant", "content": reply})
+            # 2026-09-22（前端审计P0-1b）：st.popover 包着 @st.fragment 时，
+            # 示例问题按钮（st.button）触发的这一轮fragment重跑虽然把消息
+            # 处理完、算出了回复，但popover的可见内容没有在这一轮刷到前端——
+            # 现场实测点击后气泡完全不出现，直到用户之后随便再触发一次交互
+            # （比如自己手打一句话回车），上一轮按钮点击的问答才"迟到"式地
+            # 冒出来。这是 st.popover 的浮层内容和 fragment 局部重跑没对齐
+            # 导致的一轮显示延迟，不是没处理、也不是没调用AI。显式再触发一次
+            # fragment重跑，让这一轮的最终状态立刻反映到popover里，不用等
+            # 用户凑巧再点别的东西。
+            st.rerun(scope="fragment")
 
 
 _MACRO_SECTIONS = ("一句话结论", "现状", "影响", "盯什么")
@@ -6824,9 +6886,14 @@ def _render_positions_today_pnl(positions: list, email: str):
     pnl_pct = total_pnl / (total_value - total_pnl) * 100 if (total_value - total_pnl) else 0
     pnl_color = UP_COLOR if total_pnl >= 0 else DOWN_COLOR
     st.markdown(
+        # 2026-09-22（前端审计P1-5）：total_pnl是多个市场折算成人民币后的
+        # 合计（见上面_fetch_today里的to_cny），一直没加货币符号，显示
+        # "+504"看不出是哪国钱。跟_fmt_usd_signed同一套约定——符号写在货币
+        # 符号外面（-¥504而不是¥-504）。
         f"<div style='font-size:var(--fs-sm);color:var(--fa-muted)'>今日收益</div>"
         f"<div style='font-size:var(--fs-xl);font-weight:600;color:{pnl_color}'>"
-        f"{total_pnl:+,.0f} <span style='font-size:var(--fs-md)'>（{pnl_pct:+.2f}%）</span></div>",
+        f"{'-' if total_pnl < 0 else '+'}¥{abs(total_pnl):,.0f} "
+        f"<span style='font-size:var(--fs-md)'>（{pnl_pct:+.2f}%）</span></div>",
         unsafe_allow_html=True,
     )
     if skipped:
@@ -6835,13 +6902,39 @@ def _render_positions_today_pnl(positions: list, email: str):
         st.caption(f"其中 {stale_count} 支场外基金/贵金属现货用的是上一披露日净值（非实时），已计入合计。")
     # 真实快照只在实际取到完整市值时记录；页面每 10 秒刷新，但五分钟最多一条，
     # 不能用相邻渲染的同一个数字硬填一条“走势”。
-    log_portfolio_equity_snapshot(email, total_value)
+    #
+    # 2026-09-22（前端审计P0-2）：上面这句注释一直是这么写的，但代码从来没
+    # 真的照做过——之前只在 total_value<=0（一支都没取到）时不记，只要有
+    # 任意一支成功、哪怕其余全部 skipped，也会把这个"部分市值"当完整快照
+    # 存进去。真实故障：09-16~09-22某次广发QDII取价失败（skipped=1），
+    # 07788+ORCX两支成功算出的¥15,057被当成当时的"真实市值"写库，趋势图上
+    # 就是从¥52,000突然砸到¥15,057再垂直拉回¥56,148——图上出现的不是
+    # 真实波动，是残缺数据。现在补上真正的完整性校验：只要有一支持仓没取到
+    # 价（skipped>0），这次就不算数，不写快照，宁可这5分钟窗口空一格，
+    # 也不能让"少算的"冒充"真实的"。
+    if skipped:
+        st.caption("行情不完整，本次未计入市值趋势（避免残缺数据污染走势图）。")
+    else:
+        log_portfolio_equity_snapshot(email, total_value)
     snapshots = get_portfolio_equity_snapshots(email)
     if len(snapshots) >= 2:
         st.markdown("**持仓市值趋势**")
         st.plotly_chart(build_portfolio_value_curve(snapshots), use_container_width=True,
                         config=_PLOTLY_CONFIG, key="_portfolio_value_curve")
-        st.caption("按已获取行情折算人民币，每约 5 分钟记录一个真实快照；线条不补造休市期间数据。")
+        # 2026-09-22（前端审计P0-2）：原文案"每约5分钟记录一个真实快照"暗示
+        # 这是个独立定时任务，实际不是——log_portfolio_equity_snapshot只在
+        # 有人打开持仓页时才会被调用，5分钟只是同一个人反复刷新页面时的限频
+        # 上限，不是保证的采样频率。没人看这个页面的几个小时里，趋势图上就是
+        # 空的，不是任务没跑，是没人触发。改成如实描述，别让用户以为背后有个
+        # 一直在跑的后台任务。
+        # 2026-09-22（前端审计P0-2，第三版文案）：第一版"每约5分钟记录一个
+        # 真实快照"暗示有个一直在跑的定时任务，但当时其实只在有人开着持仓页
+        # 时才会写；第二版改成"打开本页时最多每5分钟记一条"，如实但显得
+        # 寒酸。现在portfolio_snapshot.py已经接入crontab（盘中每10分钟一次，
+        # 跟intraday_watch.py同一批时间窗口），双路径共写同一张表：定时任务
+        # 保证曲线不会因为没人看页面就开天窗，用户打开页面时的即时快照负责
+        # 补上任意时刻的细节。
+        st.caption("按已获取行情折算人民币；盘中每 10 分钟自动记一条快照，打开本页时最多再补记一条（5 分钟内最多一条）；线条不补造休市期间数据。")
     else:
         st.caption("持仓市值趋势已开始记录；积累第二个真实快照后显示曲线。")
 
@@ -7422,13 +7515,18 @@ def _render_ai_sim_dashboard():
         st.markdown("**资产分布**")
         donut_col1, donut_col2 = st.columns(2)
         with donut_col1:
-            st.caption("港股 / 美股 / 剩余现金")
             allocation_rows = [
                 {"label": "港股持仓", "value_cny": _hk_value / _usd_rate},
                 {"label": "美股持仓", "value_cny": _us_value / _usd_rate},
                 {"label": "剩余现金", "value_cny": _donut_cash / _usd_rate},
             ]
             allocation_rows = [r for r in allocation_rows if r["value_cny"] > 0]
+            # 2026-09-22（前端审计P1-11）：这行caption原来是写死的"港股/美股/
+            # 剩余现金"，但上面这行过滤会把值为0的类别拿掉——账户里没有港股
+            # 持仓时（真实情况：这个模拟盘目前只买美股ETF），过滤完只剩美股+
+            # 现金两项，标题却还在说三项。改成从过滤后的allocation_rows现读
+            # 标签，图例写什么，标题就说什么。
+            st.caption(" / ".join(r["label"] for r in allocation_rows) or "暂无数据")
             if allocation_rows and _total_usd > 0:
                 st.plotly_chart(
                     build_position_donut(allocation_rows, _total_usd, currency_symbol="$", show_legend=True),
@@ -7888,12 +7986,44 @@ def _render_portfolio_analysis_progress(email: str):
         st.rerun(scope="app")
 
 
+def _normalize_bullets(text: str) -> str:
+    """2026-09-22（前端审计P1-10）：'逐支跟踪''操作建议'这类段落，prompt里
+    要求的是"每条一行"，没有强制模型给每行加"- "前缀，模型经常自己起了个
+    头（第一行没有、后面几行有，或者反过来）——而_render_bold_as_red不是
+    真正的markdown渲染器（是手写的**加粗**替换+\n转<br>），不会像
+    st.markdown原生解析那样自动补全列表项，模型漏加的"- "就原样显示成
+    裸文本，前后行看着不统一。
+
+    这里不改prompt（改了不能保证模型100%照做，治标不治本），而是在渲染前
+    按行规整：如果这一段里超过一半的非空行本来就带"-"/"•"/"·"这类列表
+    前缀，就认定这是个列表段落，把所有非空行统一成"- "开头（先去掉已有的
+    各种前缀再重新加，不会因为已经有前缀就跳过，也不会重复叠加）。不是
+    列表段落（比如'总体评估'这种整段叙述）就原样不动，不强行拆行。
+    """
+    lines = text.split("\n")
+    non_empty = [ln for ln in lines if ln.strip()]
+    if not non_empty:
+        return text
+    bulleted = sum(1 for ln in non_empty if re.match(r"^\s*[-•・*]\s+", ln))
+    if bulleted < max(2, len(non_empty) // 2):
+        return text
+    fixed = []
+    for ln in lines:
+        if not ln.strip():
+            fixed.append(ln)
+            continue
+        stripped = re.sub(r"^\s*[-•・*]\s+", "", ln)
+        fixed.append(f"- {stripped}")
+    return "\n".join(fixed)
+
+
 def _render_bold_as_red(text: str) -> str:
     """把AI分析文本里的**加粗**改成红色高亮——用户明确要求"重点标红"。AI
     在_PORTFOLIO_SYSTEM里已经被要求用**加粗**标关键结论，复用这个已有的
     标记习惯改渲染方式，不用再发明新的自定义标记语法。非加粗部分照常转义
     （AI生成文本理论上不该有恶意内容，但统一走_esc()是这个项目一贯的
     习惯，不因为"来源可信"就破例）。"""
+    text = _normalize_bullets(text)
     parts = re.split(r"(\*\*.+?\*\*)", text)
     html_parts = []
     for part in parts:
@@ -7974,8 +8104,11 @@ def _render_portfolio_advice(email: str, positions: list):
 
     is_current = bool(advice and _portfolio_advice_is_current(advice, positions))
     if advice:
-        created = advice["created_at"][:19].replace("T", " ")
-        st.caption(f"更新于 {created}（UTC）")
+        # 2026-09-22（前端审计P1-9）：跟上面另一处（_render_home_portfolio_
+        # advice附近）同一个问题，统一转北京时间显示，别再直接甩UTC原始值。
+        _created_cn = _to_cn_dt(advice["created_at"])
+        created = _created_cn.strftime("%Y-%m-%d %H:%M:%S") if _created_cn else advice["created_at"][:19].replace("T", " ")
+        st.caption(f"更新于 {created}")
 
         # 持仓变化检测——2026-08-26真实复现过的bug：用户已经清仓腾讯，但
         # 这张卡片还在展示几天前生成的分析，文字里具体写着"减仓腾讯40股"，
@@ -8325,8 +8458,13 @@ def _render_position_rows(position_items: list, _email: str, sort_mode: str = "�
                 pnl_color = UP_COLOR if pnl >= 0 else DOWN_COLOR
                 pnl_html = (
                     f"<div style='text-align:right;font-size:var(--fs-xs);margin-top:2px'>"
+                    # 2026-09-22（前端审计P1-6）：市值这一段是"符号在数字前"
+                    # （市值US$868），浮盈这一段原来是"符号在数字后"
+                    # （-92 US$）——同一行两种写法，看着像符号被打印了两次。
+                    # 统一成_fmt_usd_signed那套约定：符号+正负号都在数字外侧。
                     f"<span style='color:var(--fa-muted)'>{shares:g}股 · 市值{_market_currency_label_html(item_market)}{market_value:,.0f}</span> "
-                    f"<span style='color:{pnl_color}'>{pnl:+,.0f} {_market_currency_label_html(item_market)}（{pnl_pct:+.1f}%）</span></div>"
+                    f"<span style='color:{pnl_color}'>{'-' if pnl < 0 else '+'}{_market_currency_label_html(item_market)}{abs(pnl):,.0f}"
+                    f"（{pnl_pct:+.1f}%）</span></div>"
                 )
         else:
             price_html = "<div style='text-align:right;color:var(--fa-muted)'>—</div>"
@@ -8601,8 +8739,11 @@ def _confirm_sell_dialog(email: str, item: dict, market: str, cur_price: float |
     if cur_price:
         pnl = (cur_price - avg_cost) * shares
         pnl_color = UP_COLOR if pnl >= 0 else DOWN_COLOR
+        # 2026-09-22（前端审计P1-6）：同一处货币符号写在数字后面的写法，
+        # 跟持仓行那边（市值{符号}{数字}）不一致，统一成符号在前。
         st.markdown(
-            f"浮动盈亏：<span style='color:{pnl_color}'>{pnl:+,.2f} {_market_currency_label_html(market)}</span>",
+            f"浮动盈亏：<span style='color:{pnl_color}'>"
+            f"{'-' if pnl < 0 else '+'}{_market_currency_label_html(market)}{abs(pnl):,.2f}</span>",
             unsafe_allow_html=True,
         )
 

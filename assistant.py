@@ -609,19 +609,47 @@ _TOOLS = [
 
 
 def _create_stream_with_failover(**kwargs):
-    """建流时的供应商故障转移：千问顶不住就改用智谱。
+    """建流时的供应商故障转移：免费档顶不住就改用付费档。
 
-    2026-09-04千问周额度耗尽，整条AI链路停摆——内置AI这个页面尤其致命，
-    它不是后台定时任务，是用户点开就要立刻有反应的地方，挂了就是白屏。
+    2026-09-22（前端审计P0-3）：这个函数的名字和文档字符串从2026-09-04起
+    就写着"故障转移"，但函数体一直只有`return _client().chat.completions.
+    create(...)`一行——只调用付费Gemini这一家，从来没有真的转移过。跟
+    advisor.chat_with_failover（同一个项目、同一批Gemini key）完全脱节：
+    组合分析/推荐榜走chat_with_failover能扛住免费档限流，AI咨询这个窗口
+    却直接把整条链焊死在一把key上，一旦这把key欠费/限流，用户点开AI咨询
+    看到的就是Python dict原样报错——2026-09-22的402
+    "prepayment credits are depleted"就是这么暴露到聊天气泡里的。
 
-    只在"建流那一刻"转移：create()本身要等服务端接受请求才返回，配额耗尽
-    /限流/鉴权这类问题都在这一步就暴露，失败得快也切得干净。已经开始吐字
-    之后再中断不在这里处理——那时前端已经显示了半截回答，静默换一家重说
-    一遍反而更怪，交给上层的异常提示。
-
-    转移条件复用advisor._is_failover_worthy，跟其余调用点保持同一套判断。
+    现在真正接上故障转移，复用advisor.py已经在用的免费档/付费档客户端和
+    转移判断（同一套_is_failover_worthy逻辑，不用自己再写一遍）：免费档
+    优先（配额每天重置，大多数时候够用），付费档兜底。只在"建流那一刻"
+    转移——create()本身要等服务端接受请求才返回，配额耗尽/限流/鉴权这类
+    问题都在这一步就暴露，失败得快也切得干净。已经开始吐字之后再中断不在
+    这里处理——那时前端已经显示了半截回答，静默换一家重说一遍反而更怪，
+    交给上层的异常提示（app.py的"AI暂时不可用"文案）。
     """
-    return _client().chat.completions.create(model=_MODEL, **kwargs)
+    import advisor
+    import tracker
+
+    errors: list[Exception] = []
+    for client_fn in (advisor._client_free, _client):
+        try:
+            client = client_fn()
+        except Exception as e:
+            errors.append(e)
+            continue
+        try:
+            result = client.chat.completions.create(model=_MODEL, **kwargs)
+            tracker.clear_ai_call_failure("assistant")
+            return result
+        except Exception as e:
+            errors.append(e)
+            if not advisor._is_failover_worthy(e):
+                tracker.log_ai_call_failure("assistant", f"{type(e).__name__}: {e}")
+                raise
+    final = errors[-1] if errors else RuntimeError("没有可用的AI供应商。")
+    tracker.log_ai_call_failure("assistant", f"{type(final).__name__}: {final}")
+    raise final
 
 
 def _execute_tool(name: str, args: dict) -> str:
