@@ -27,7 +27,7 @@ jobs:
             systemctl restart finance-agent invest-api
             sleep 20
             if ! curl -fsS --max-time 10 http://127.0.0.1:8503/_stcore/health >/dev/null \
-               || ! curl -fsS --max-time 10 http://127.0.0.1:8600/api/health | grep -q '"artifacts_ok": *true'; then
+               || ! curl -fsS --max-time 10 http://127.0.0.1:8600/api/health | grep -q '"ok": *true'; then
               echo "Health check failed; rolling back to $OLD"
               git reset --hard "$OLD"
               systemctl restart finance-agent invest-api
