@@ -21,6 +21,7 @@ from pathlib import Path
 import advisor
 import data_sources as ds
 import tracker
+import trading_calendar
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -67,26 +68,12 @@ def _load_plan(market: str) -> dict:
         return {}
 
 
-_TRADING_CAL = Path("/root/.openclaw/workspace/scripts/trading_cal.py")
-
-
 def _is_trading_day(market: str) -> bool:
-    """复用项目里已经在用的trading_cal.py（港交所/纽交所2026官方节假日表），
-    不新建一份日历——cron本身的星期几过滤（1-5）已经挡掉周末，这里补上
-    法定假日落在工作日的情况（比如国庆、圣诞）。trading_cal.py不在
-    finance-agent仓库里，是OpenClaw workspace那边的脚本，跑不通/找不到
-    时保守当成交易日处理，不要因为这一步失败就整天不盯盘。
-    """
-    if not _TRADING_CAL.exists():
-        return True
+    """Use the repository-owned calendar; unknown coverage skips work."""
     try:
-        import subprocess
-        r = subprocess.run(
-            ["python3", str(_TRADING_CAL), market], capture_output=True, text=True, timeout=10,
-        )
-        return r.stdout.strip() != "False"
+        return trading_calendar.is_trading_day(market)
     except Exception:
-        return True
+        return False
 
 
 def scan(market: str) -> dict:

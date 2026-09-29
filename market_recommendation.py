@@ -11,35 +11,28 @@ advisor._judge_one()现成的完整数据收集（财务+季度趋势+估值+技
 ≥3:1才能进Top3——用户反馈两个问题都是真的：(1)天天在扫一堆自己根本不
 关心的热门股，白费token；(2)盈亏比闸门太严，连续好几天Top3是空的，报告
 变成"无"，等于没有产出。现在改成：候选池就是自选本身（不再补热门股），
-每一支仍完整评分，但微信只播报综合得分前三名；盈亏比仍属于可执行计划的
+每一支仍完整评分，但通知只播报综合得分前三名；盈亏比仍属于可执行计划的
 确定性风控闸门，不混进研究排名。
 
 默认只把正文打印到 stdout，方便人工排查；加 ``--deliver`` 后，由项目内
-已验证回执的微信桥直接投递。不要经由 OpenClaw agentTurn 转发：这份扫描
-会超过通用 exec 工具的 300 秒上限，代理会卡住，结果既不落地也不送达。
+通知适配层处理；若通知功能已停用，正文仍会完整落盘并显示在网站。扫描
+可能超过通用执行工具的 300 秒上限，因此不依赖外部代理转发。
 非交易日（周末或法定假日）打印 NO_REPLY 且不投递。真正的交易日但 AI 判断
 全部失败仍打印说明（不是 NO_REPLY）——那是真出问题了，用户在等这份报告，
 不能悄无声息地什么都不说。
 """
-import subprocess
 import sys
-from pathlib import Path
 
 import advisor
 import tracker
-
-_TRADING_CAL = Path("/root/.openclaw/workspace/scripts/trading_cal.py")
+import trading_calendar
 
 def _is_trading_day(market: str) -> bool:
-    if not _TRADING_CAL.exists():
-        return True
     try:
-        r = subprocess.run(
-            ["python3", str(_TRADING_CAL), market], capture_output=True, text=True, timeout=10,
-        )
-        return r.stdout.strip() != "False"
+        return trading_calendar.is_trading_day(market)
     except Exception:
-        return True
+        # Unknown calendar coverage must not start scheduled market work.
+        return False
 
 
 def _extract_report_reason(text: str, max_len: int = 420) -> str:

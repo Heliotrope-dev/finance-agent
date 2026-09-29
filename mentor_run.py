@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """盘中导师式推荐——把mentor_scan(机械盯盘)和mentor_interpret(AI解读)串起来
-的CLI入口，给OpenClaw cron的exec步骤调用。
+的独立 CLI 入口，供系统定时任务或人工运行。
 
 默认只打印结果——没有事件时打印"NO_REPLY"。加 ``--deliver`` 时，真实
-事件直接通过已验证回执的微信桥投递，不再让 OpenClaw 的 agentTurn 先读
-stdout 再决定是否发送。机械盯盘每 15 分钟都会运行，若每次都唤醒模型，
+事件可交给项目的通知适配层处理。机械盯盘每 15 分钟都会运行，若每次都唤醒模型，
 安静时也会浪费额度；现在只有 mentor_interpret 真正解释事件时才调用 AI。
 
 平静期（scan返回"静默"）：不调用mentor_interpret，零AI调用，打印NO_REPLY。
