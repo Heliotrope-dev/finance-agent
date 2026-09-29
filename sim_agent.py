@@ -1043,7 +1043,7 @@ def _run_cycle_locked(email: str) -> dict:
     # 恰恰是止盈止损判断最需要的那条信息。
     try:
         import data_sources as _ds2
-        for _p in (holdings or []):
+        for _p in (snapshot.get("positions") or []):          # 'holdings' was undefined (Codex #17)
             _cap = _ds2.get_capital_distribution(_p.get("symbol", ""), _p.get("market", ""))
             if _cap and _cap.get("main_net") is not None:
                 _p["_main_net_pct"] = _cap.get("main_net_pct")

@@ -139,6 +139,7 @@ def run_premarket(market: str, *, deliver: bool = False) -> int:
 
     import datetime as _dt
     import json
+    from pathlib import Path          # was missing: the 2026-09-29 HK run crashed here after scoring (Codex #01)
     data_dir = Path(__file__).resolve().parent / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 

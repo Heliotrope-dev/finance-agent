@@ -58,7 +58,7 @@ def main() -> int:
                 "今天没有达到阈值的标的，持仓也没有需要处理的。\n"
                 "空仓是一种决定，不必为了有事做而下单。")
         ok = _send(text)
-        print("已推送（空清单）" if ok else "推送失败")
+        print(f"{wechat_delivery.status_word()}（空清单）" if ok else "推送失败")
         return 0 if ok else 1
 
     text = daily_plan.render_text(plan)
@@ -67,7 +67,7 @@ def main() -> int:
         tag = f"（{i}/{len(parts)}）" if len(parts) > 1 else ""
         if not _send(p if not tag else f"{p}\n{tag}"):
             return 1
-    print(f"已推送 {len(parts)} 段，持仓{n_pos}支 候选{n_watch}支")
+    print(f"{wechat_delivery.status_word()} {len(parts)} 段，持仓{n_pos}支 候选{n_watch}支")
     return 0
 
 

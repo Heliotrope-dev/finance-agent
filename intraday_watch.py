@@ -273,7 +273,7 @@ def check() -> dict:
         if alert_queue.status(f"用户提醒:{alert_id}") == "delivered":
             tracker.mark_price_alert_triggered(alert_id, hit_price)
     print(f"盘中提醒：新增{len(alerts)}条，送达{delivery['delivered']}条，失败{delivery['failed']}条")
-    return {"状态": "已推送" if delivery["failed"] == 0 else "待重试", "条数": len(alerts),
+    return {"状态": wechat_delivery.status_word() if delivery["failed"] == 0 else "待重试", "条数": len(alerts),
             "送达": delivery["delivered"], "重试": retried}
 
 

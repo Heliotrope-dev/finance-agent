@@ -33,3 +33,4 @@ build/
 
 # SQLite database file (lives at repo root, not under data/)
 *.db
+.squad/

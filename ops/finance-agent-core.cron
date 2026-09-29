@@ -1,0 +1,21 @@
+# Core finance-agent schedules owned directly by the operating system.
+# All commands update local data and the web dashboard only. They do not send
+# WeChat messages or accept remote commands.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+CRON_TZ=Asia/Shanghai
+
+# Market data, simulation state, and Futu availability.
+*/10 * * * * root cd /root/finance-agent && flock -n /tmp/finance-agent-futu-watchdog.lock timeout 1m venv/bin/python3 futu_opend_watchdog.py >> /var/log/finance-agent-futu-watchdog.log 2>&1
+*/2 0-5,9-16,21-23 * * 1-6 root cd /root/finance-agent && flock -n /tmp/finance-agent-sim-watch.lock timeout 10m venv/bin/python3 sim_watch.py >> data/last_sim_agent_run.log 2>&1
+*/5 * * * * root cd /root/finance-agent && flock -n /tmp/finance-agent-sim-snapshot.lock timeout 2m venv/bin/python3 sim_snapshot.py >> /var/log/finance-agent-sim-snapshot.log 2>&1
+
+# Research and dashboard data. Each process has an explicit lock and limit.
+0 9 * * 1-5 root cd /root/finance-agent && flock -n /tmp/finance-agent-hk-score.lock timeout 30m venv/bin/python3 market_recommendation.py --market HK >> /var/log/finance-agent-hk-score.log 2>&1
+0 21 * * 1-5 root cd /root/finance-agent && flock -n /tmp/finance-agent-us-score.lock timeout 30m venv/bin/python3 market_recommendation.py --market US >> /var/log/finance-agent-us-score.log 2>&1
+15 7,19 * * 1-5 root cd /root/finance-agent && flock -n /tmp/finance-agent-macro.lock timeout 15m venv/bin/python3 macro_brief.py >> /var/log/finance-agent-macro-brief.log 2>&1
+30 12 * * 1-5 root cd /root/finance-agent && flock -n /tmp/finance-agent-positions-noon.lock timeout 20m venv/bin/python3 advisor.py --positions-only > data/last_positions_advice.log 2>&1
+30 17 * * 1-5 root cd /root/finance-agent && flock -n /tmp/finance-agent-advisor.lock timeout 40m venv/bin/python3 advisor.py > data/last_advisor_run.log 2>&1
+40 20 * * 1-5 root cd /root/finance-agent && flock -n /tmp/finance-agent-positions-evening.lock timeout 20m venv/bin/python3 advisor.py --positions-only > data/last_positions_advice_evening.log 2>&1
+30 12 * * 1-5 root cd /root/finance-agent && flock -n /tmp/finance-agent-portfolio-noon.lock timeout 10m venv/bin/python3 portfolio_action_push.py >> /var/log/finance-agent-portfolio-action.log 2>&1
+0 22 * * 1-5 root cd /root/finance-agent && flock -n /tmp/finance-agent-portfolio-evening.lock timeout 10m venv/bin/python3 portfolio_action_push.py >> /var/log/finance-agent-portfolio-action.log 2>&1

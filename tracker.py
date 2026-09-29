@@ -1951,7 +1951,7 @@ def get_latest_advice(limit_per_market: int = 3) -> dict:
         if latest is None:
             return {"run_date": None, "US": [], "HK": [], "A": []}
         run_date = latest["created_at"][:10]
-        _cutoff = _latest_run_cutoff(c, source) or (run_date + "T00:00:00")
+        _cutoff = _latest_run_cutoff(c, "screen") or (run_date + "T00:00:00")   # 'source' was undefined here (Codex #17)
         rows = c.execute(
             "SELECT * FROM advice WHERE source = 'screen' AND created_at LIKE ? ORDER BY created_at",
             (f"{run_date}%",),

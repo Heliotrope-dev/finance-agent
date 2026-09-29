@@ -505,7 +505,7 @@ def _build_item(rec: dict) -> dict | None:
     execution_reasons: list[str] = []
     is_new_buy = rec.get("action") == "买入" and not (rec.get("shares") or 0)
     decision = risk_policy.validate_new_position(
-        market=market, entry=last, stop=stop, target=target, reward_risk=rr,
+        market=market, entry=last, stop=stop, target=target, reward_risk=rr, day_pnl_pct=_DAY_PNL_PCT,
     ) if is_new_buy else None
     if decision and not decision.allowed:
         execution_reasons.extend(decision.reasons)
@@ -520,9 +520,13 @@ def _build_item(rec: dict) -> dict | None:
             lot = ds.get_hk_lot_size(symbol) or 0
         except Exception:
             lot = 0
+    lot_unknown = not lot and market == "HK"
+    if lot_unknown:
+        # Codex #12: never size an HK order on a guessed board lot. Unknown lot -> watch only, no share count.
+        execution_reasons.append("港股每手股数暂时查不到：只提供观察，不给出可执行股数。")
     if not lot:
-        lot = _HK_LOT_FALLBACK if market == "HK" else 1
-    if cap > 0 and fx > 0 and stop_pct < 0 and (not decision or decision.allowed):
+        lot = 1
+    if cap > 0 and fx > 0 and stop_pct < 0 and (not decision or decision.allowed) and not lot_unknown:
         # A new-buy size uses only an explicit risk profile.  Existing holding
         # reports retain their historical sizing display, but are not orders.
         risk_pct = decision.max_risk_per_trade_pct if decision else _RISK_PER_TRADE_PCT
@@ -698,8 +702,35 @@ def _research_top_candidates(items: list[dict], top_n: int = 2) -> list[dict]:
     )[:top_n]
 
 
+_DAY_PNL_PCT: float | None = None     # today's portfolio change for the daily-loss gate, set per build
+_BJ_TZ = dt.timezone(dt.timedelta(hours=8))
+
+
+def _day_pnl_pct(email: str) -> float | None:
+    """Today's (Beijing date) portfolio change vs the last snapshot before today, in percent; None if unknown."""
+    try:
+        snaps = tracker.get_portfolio_equity_snapshots(email, limit=600)
+        today = dt.datetime.now(_BJ_TZ).date().isoformat()
+        before = [s for s in snaps if _bj_date(s["snapshot_at"]) < today]
+        todays = [s for s in snaps if _bj_date(s["snapshot_at"]) == today]
+        if not before or not todays or not before[-1]["net_value_cny"]:
+            return None
+        return (todays[-1]["net_value_cny"] / before[-1]["net_value_cny"] - 1) * 100
+    except Exception:
+        return None
+
+
+def _bj_date(ts: str) -> str:
+    t = dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=dt.timezone.utc)
+    return t.astimezone(_BJ_TZ).date().isoformat()
+
+
 def build_plan(email: str | None = None) -> dict:
+    global _DAY_PNL_PCT
     email = email or advisor._EMAIL
+    _DAY_PNL_PCT = _day_pnl_pct(email)
     today = dt.date.today().isoformat()
 
     # AI 可用性探测。放在最前面是因为它决定清单该怎么被读——评分是旧的
@@ -807,6 +838,7 @@ def build_plan(email: str | None = None) -> dict:
 
 
 def build_market_plan(market: str, email: str | None = None, top_n: int = 3) -> dict:
+    global _DAY_PNL_PCT
     """单市场版的build_plan，给09:00/21:00盘前Top3推荐用——港股/美股分开出
     报告，不是从三市场混排的清单里各挑几支凑数。
 
@@ -819,6 +851,7 @@ def build_market_plan(market: str, email: str | None = None, top_n: int = 3) -> 
     达标数量。同时单列评分前两名做完整研究分析，不能把它们伪装成正式推荐。
     """
     email = email or advisor._EMAIL
+    _DAY_PNL_PCT = _day_pnl_pct(email)
     today = dt.date.today().isoformat()
 
     ai_status = "正常"

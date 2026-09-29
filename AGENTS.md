@@ -88,3 +88,8 @@ squad 经常掉线/认错工作目录（见 ai-squad-hub 项目里的踩坑记�
 进程状态。给你的文件叫 `to-codex_<时间戳>.md`，你回的叫
 `to-claude_<时间戳>.md`，写完30分钟自动删（有cron清理），别当持久存储用。
 开新会话时，squad receive 之外，顺手看一眼这个目录里有没有属于你的新文件。
+
+## Squad Collaboration
+
+This project uses squad for multi-agent collaboration. Run `squad help` for all commands and usage guide.
+

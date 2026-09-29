@@ -563,6 +563,27 @@ def _client_free() -> OpenAI:
 # 200 万 tokens 免费额度，够跑一轮完整观察池（136支约需200万）。
 
 
+_DEEPSEEK_BASE = "https://api.deepseek.com"
+_DEEPSEEK_MODEL = "deepseek-chat"
+_DEEPSEEK_ENV_FILE = "/opt/htrader/.config/heliotrope-trader/deepseek.env"
+
+
+def _deepseek_client() -> OpenAI | None:
+    """第二家供应商（审计P1-03）：Gemini付费402、免费503同时出现过，同一家的两个key
+    不算冗余。key优先读环境变量，其次读HTrader的600权限env文件；都没有就返回None跳过。"""
+    key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not key:
+        try:
+            for line in open(_DEEPSEEK_ENV_FILE, encoding="utf-8"):
+                if line.startswith("DEEPSEEK_API_KEY="):
+                    key = line.split("=", 1)[1].strip().strip('"')
+        except OSError:
+            return None
+    if not key:
+        return None
+    return OpenAI(api_key=key, base_url=_DEEPSEEK_BASE, max_retries=1, timeout=60)
+
+
 def _zhipu_client() -> OpenAI | None:
     """空头辩论用的独立供应商客户端——没配key或初始化失败时返回None，
     调用方（_fetch_stance）据此回落到_client()，不让整个辩论功能因为
@@ -672,14 +693,19 @@ def chat_with_failover(messages: list[dict], *, max_tokens: int, temperature: fl
     # 踩过的坑是同一个。按调用点原样的预算转过去，思考链很容易把额度吃光、
     # 正文返回空——那就等于兜底了个寂寞。给智谱放宽到2倍，账号里air那包有
     # 1199万tokens，放宽这点量完全够烧。
-    # 免费档打头、付费档兜底（2026-09-11）。用户要求"千问换成刚开的免费
-    # Gemini"，但直接换成单独一把免费key风险太大：这个项目一轮盘前扫描要
-    # 逐支判断二三十支股票，免费档每日请求数打满之后整条链就没有下一家了，
-    # 而且同一把免费key还同时给OpenClaw用着。配成两家，免费额度耗尽时
-    # 自动落到付费那把，第二天免费额度重置又会自己走回免费。
+    # 只留免费档（2026-09-20）。付费档是09-11加的兜底，但2026-09-20预付费
+    # 余额被耗尽导致429，用户核实后判断"免费档一天用量完全够"，明确要求砍掉
+    # 付费档，不再自动落到付费。
+    #
+    # 留一个已知风险，不是没人权衡过：这把免费key跟OpenClaw共用（OpenClaw
+    # 全天回微信消息也在用它），如果某天两边加起来真把免费档的每日请求数
+    # 打满，链条上没有下一家可落，会整条断供到当天配额重置——09-11加付费档
+    # 正是为了防这个。用户决定接受这个风险，如果之后真的撞上"两次都超时/
+    # 都429"的整链失败，把这里的 _chain 加回付费档，或者去接一家免费的
+    # 第三方（智谱/硅基流动）当第二级，而不是先怀疑别的地方。
     _chain = [
         (_client_free, _MODEL, "Gemini-Free", 1.0),
-        (_client, _MODEL, "Gemini-Paid", 1.0),
+        (_deepseek_client, _DEEPSEEK_MODEL, "DeepSeek", 1.0),
     ]
     # prefer 只调整起点，不裁剪链条：把指定的那家转到队首，其余顺序不变。
     # 这是给多空辩论用的——辩论的价值建立在"两方由互相独立的模型给出"之上，

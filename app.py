@@ -94,6 +94,7 @@ from tracker import (
     get_latest_macro_briefs,
     get_position_advice, get_positions, upsert_position, reduce_position, delete_position,
     get_closure_notice_count, bump_closure_notice_count,
+    get_latest_advice,                     # used by the finance calendar; was never imported (Codex #17)
     get_latest_ipo_briefs,
     get_latest_ipo_performance,
     get_latest_portfolio_advice, get_max_capital, set_max_capital,

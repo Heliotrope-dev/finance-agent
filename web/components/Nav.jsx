@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-// 分区跟 Streamlit 那版保持一致的顺序和命名。持仓/自选需要登录态，这一版
-// 先不做（登录逻辑还在 Streamlit 那边），列在这里只会点进去是空页面，
-// 所以暂时不放——宁可少一个入口，也不要一个点了没反应的入口。
+// 分区跟 Streamlit 那版保持一致的顺序和命名。
+// 持仓/自选/我的还没迁（要先有写接口，见迁移路线图 Phase 4），列在这里
+// 只会点进去是空页面——宁可少一个入口，也不要一个点了没反应的入口。
 const TABS = [
   { href: "/", label: "首页" },
+  { href: "/market/", label: "行情" },
   { href: "/sim/", label: "AI模拟炒股" },
   { href: "/record/", label: "AI战绩墙" },
 ];

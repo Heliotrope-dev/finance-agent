@@ -48,7 +48,7 @@ def main() -> int:
     message = _build_message(result)
     if not wechat_delivery.send_text(message):
         return 1
-    print("已推送资产配置行动清单")
+    print(f"{wechat_delivery.status_word()}：资产配置行动清单")
     return 0
 
 

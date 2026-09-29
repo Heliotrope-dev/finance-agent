@@ -8,6 +8,7 @@ but cannot present a new-buy size as an executable instruction.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,7 +35,8 @@ def load_profile(path: Path | str = _PROFILE_PATH) -> dict | None:
         return None
     try:
         for key in _REQUIRED:
-            if float(profile[key]) <= 0:
+            v = float(profile[key])
+            if not math.isfinite(v) or v <= 0:        # NaN/inf would slip through "<= 0" (Codex #13)
                 return None
         if float(profile["max_risk_per_trade_pct"]) > 100 or float(profile["max_position_pct"]) > 100:
             return None
@@ -68,8 +70,8 @@ def save_profile(updates: dict, path: Path | str = _PROFILE_PATH) -> dict:
     for key in _REQUIRED:
         if key not in merged:
             raise ValueError(f"风险档案缺少必填项：{key}")
-        if float(merged[key]) <= 0:
-            raise ValueError(f"{key} 必须大于 0")
+        if not math.isfinite(float(merged[key])) or float(merged[key]) <= 0:
+            raise ValueError(f"{key} 必须是大于 0 的有限数字")
     if float(merged["max_risk_per_trade_pct"]) > 100 or float(merged["max_position_pct"]) > 100:
         raise ValueError("百分比类上限不能超过 100")
 
@@ -80,8 +82,12 @@ def save_profile(updates: dict, path: Path | str = _PROFILE_PATH) -> dict:
 
 def validate_new_position(*, market: str, entry: float | None, stop: float | None,
                           target: float | None, reward_risk: float | None,
-                          profile: dict | None = None) -> RiskDecision:
-    """Validate only deterministic facts required for a new-buy instruction."""
+                          profile: dict | None = None, day_pnl_pct: float | None = None) -> RiskDecision:
+    """Validate only deterministic facts required for a new-buy instruction.
+
+    day_pnl_pct: today's portfolio change in percent (negative = loss). When the loss reaches the profile's
+    max_daily_loss_pct, no new-buy size is given for the rest of the day (Codex #13: the setting existed only in
+    the UI and was never enforced)."""
     if profile is None:
         profile = load_profile()
     elif not isinstance(profile, dict) or not _REQUIRED.issubset(profile):
@@ -94,14 +100,21 @@ def validate_new_position(*, market: str, entry: float | None, stop: float | Non
         entry_f, stop_f, target_f, rr_f = float(entry), float(stop), float(target), float(reward_risk)
     except (TypeError, ValueError):
         return RiskDecision(False, ("执行参数不完整：缺少有效的入场、止损、目标或盈亏比。",))
+    if not all(math.isfinite(x) for x in (entry_f, stop_f, target_f, rr_f)):     # NaN compares False everywhere
+        return RiskDecision(False, ("执行参数无效：入场、止损、目标或盈亏比不是有限数字。",))
     if not (stop_f < entry_f < target_f):
         reasons.append("执行参数不一致：必须满足止损 < 入场 < 目标。")
     try:
         min_rr = float(profile["min_reward_risk"])
         max_risk = float(profile["max_risk_per_trade_pct"])
         max_position = float(profile["max_position_pct"])
-    except (TypeError, ValueError):
+        max_daily = float(profile["max_daily_loss_pct"])
+    except (TypeError, ValueError, KeyError):
         return RiskDecision(False, ("风险档案格式无效：只提供观察，不给出新开仓数量。",))
+    if not all(math.isfinite(x) for x in (min_rr, max_risk, max_position, max_daily)):
+        return RiskDecision(False, ("风险档案格式无效：只提供观察，不给出新开仓数量。",))
+    if day_pnl_pct is not None and math.isfinite(day_pnl_pct) and day_pnl_pct <= -max_daily:
+        reasons.append(f"今日组合已亏 {abs(day_pnl_pct):.1f}%，达到每日亏损上限 {max_daily:g}%，今天不再新开仓。")
     if rr_f < min_rr:
         reasons.append(f"盈亏比 {rr_f:.2f}:1 低于风险档案下限 {min_rr:g}:1。")
     allowed_markets = profile.get("allowed_markets")

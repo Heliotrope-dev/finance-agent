@@ -88,7 +88,7 @@ def main() -> int:
     # 再被推送，那正是用户明确不想要的"漏掉"；而"发出去了但销账失败"最多
     # 下一轮重复推一次，可以接受。
     n = tracker.mark_orders_notified([o["id"] for o in orders])
-    print(f"已推送 {len(orders)} 笔，销账 {n} 笔")
+    print(f"{wechat_delivery.status_word()} {len(orders)} 笔，销账 {n} 笔")
     return 0
 
 

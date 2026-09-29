@@ -17,15 +17,20 @@ jobs:
           script: |
             set -e
             cd /root/finance-agent
+            # 审计P1-15：线上有未提交改动时拒绝部署，否则reset --hard会静默抹掉热修
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+              echo "Prod tree has uncommitted changes; refusing to deploy:"; git status --short; exit 1
+            fi
             OLD=$(git rev-parse HEAD)
             git fetch origin main
             git reset --hard origin/main
-            systemctl restart finance-agent
+            systemctl restart finance-agent invest-api
             sleep 20
-            if ! curl -fsS --max-time 10 http://127.0.0.1:8503/_stcore/health >/dev/null; then
+            if ! curl -fsS --max-time 10 http://127.0.0.1:8503/_stcore/health >/dev/null \
+               || ! curl -fsS --max-time 10 http://127.0.0.1:8600/api/health | grep -q '"artifacts_ok": *true'; then
               echo "Health check failed; rolling back to $OLD"
               git reset --hard "$OLD"
-              systemctl restart finance-agent
+              systemctl restart finance-agent invest-api
               exit 1
             fi
             echo "Deployed $(git rev-parse --short HEAD) at $(date)"

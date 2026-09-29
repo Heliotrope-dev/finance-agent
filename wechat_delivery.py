@@ -10,6 +10,12 @@ being retried forever or reported as a task failure.
 from __future__ import annotations
 
 DELIVERY_ENABLED = False
+DELIVERY_STATUS = "disabled"   # disabled | queued | sent | failed (审计P2-18)
+
+
+def status_word() -> str:
+    """日志里用的动词：停用时不能写“已推送”，避免让人以为消息送达了。"""
+    return "已推送" if DELIVERY_ENABLED else "已记录（推送通道停用，未发送）"
 
 
 def send_text(message: str, *, timeout: int = 45) -> bool:
