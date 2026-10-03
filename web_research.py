@@ -35,6 +35,7 @@ import os
 import re
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -109,6 +110,28 @@ def _http(url: str, *, data: bytes | None = None, timeout: int = 25,
     return raw.decode("utf-8", "ignore")
 
 
+# 跨进程熔断（2026-10-03）：Serper 额度用完后（"Not enough credits"）每次调用都白等一个来回再回退，
+# 一天几百次，持仓判断全被拖慢。额度/鉴权这类错误不会自己好，cron 里各进程共享一个标记文件，12 小时内不再尝试。
+_SERPER_OFF = Path(__file__).resolve().parent / "data" / "serper_disabled_until"
+_SERPER_OFF_HOURS = 12
+
+
+def _serper_disabled() -> bool:
+    try:
+        return float(_SERPER_OFF.read_text().split()[0]) > time.time()
+    except (OSError, ValueError, IndexError):
+        return False
+
+
+def _serper_disable(reason: str) -> None:
+    try:
+        _SERPER_OFF.parent.mkdir(parents=True, exist_ok=True)
+        _SERPER_OFF.write_text(f"{time.time() + _SERPER_OFF_HOURS * 3600:.0f} {reason[:120]}")
+        print(f"[web_research] Serper 额度/鉴权失败，{_SERPER_OFF_HOURS}小时内所有进程改走 DuckDuckGo：{reason[:80]}")
+    except OSError:
+        pass
+
+
 def _serper(query: str, limit: int) -> list[dict]:
     """Serper（Google 搜索 API）。有 key 才走这条。
 
@@ -122,7 +145,7 @@ def _serper(query: str, limit: int) -> list[dict]:
     直接进结果，调用方不一定要再去抓正文。
     """
     key = os.environ.get("SERPER_API_KEY", "")
-    if not key:
+    if not key or _serper_disabled():
         return []
     try:
         req = urllib.request.Request(
@@ -131,6 +154,12 @@ def _serper(query: str, limit: int) -> list[dict]:
                              "num": max(limit, 6)}).encode(),
             headers={"X-API-KEY": key, "Content-Type": "application/json"})
         d = json.loads(urllib.request.urlopen(req, timeout=25).read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")[:200]
+        if e.code in (400, 401, 402, 403) and any(k in body.lower() for k in ("credit", "unauthor", "invalid api key", "forbidden")):
+            _serper_disable(body)
+        print(f"[web_research] Serper 调用失败(HTTP {e.code} {body[:80]})，回退 DuckDuckGo")
+        return []
     except Exception as e:
         print(f"[web_research] Serper 调用失败({type(e).__name__})，回退 DuckDuckGo")
         return []

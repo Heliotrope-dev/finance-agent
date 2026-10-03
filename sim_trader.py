@@ -148,10 +148,14 @@ def _get_lot_size(qot, code: str) -> int:
     if code.startswith("US."):
         return 1
     market = ft.Market.HK if code.startswith("HK.") else ft.Market.CN
+    if code in _LOT_SIZE_CACHE:
+        return _LOT_SIZE_CACHE[code]
     ret, data = qot.get_stock_basicinfo(market, ft.SecurityType.STOCK, code_list=[code])
-    if ret != ft.RET_OK or data.empty:
-        return 1
-    return int(data.iloc[0]["lot_size"]) or 1
+    if ret != ft.RET_OK or data is None or data.empty or not int(data.iloc[0]["lot_size"] or 0):
+        return 0          # 查不到：港股/A股每手股数因股而异(100/200/500/1000…)，不能猜，调用方跳过这单
+    lot = int(data.iloc[0]["lot_size"])
+    _LOT_SIZE_CACHE[code] = lot
+    return lot
 
 
 _LOT_SIZE_CACHE: dict[str, int] = {}
@@ -246,6 +250,10 @@ def _execute_one(qot, trd, email: str, market: str, acc_id: str, signal: dict) -
     code = _to_futu_code(symbol, market)
 
     lot = _get_lot_size(qot, code)
+    if lot <= 0:
+        note = "查不到这支的每手股数（富途基础信息接口失败），不猜手数，本轮跳过"
+        tracker.log_simulated_order(email, symbol, name, market, action, shares_signal, 0, "", acc_id, "跳过", note)
+        return {"symbol": symbol, "status": "跳过", "note": note}
     shares_ordered = int(shares_signal // lot) * lot
     if shares_ordered <= 0:
         note = f"按每手{lot}股取整后不足一手，金额太小（AI给的股数是{shares_signal:g}）"

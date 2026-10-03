@@ -7,6 +7,7 @@
 """
 
 import json
+import scoring
 import re
 import sqlite3
 from contextlib import closing
@@ -172,6 +173,16 @@ def init_db():
             _col = f"score_{_dim}_max"
             if _col not in _advice_cols:
                 c.execute(f"ALTER TABLE advice ADD COLUMN {_col} INTEGER")
+
+        for column, definition in {
+            "score_version": "TEXT NOT NULL DEFAULT 'legacy'",
+            "asset_kind": "TEXT NOT NULL DEFAULT 'unknown'",
+            "score_details": "TEXT",
+            "review_policy": "TEXT NOT NULL DEFAULT 'legacy'",
+            "review_recorded_at": "TEXT",
+        }.items():
+            if column not in _advice_cols:
+                c.execute(f"ALTER TABLE advice ADD COLUMN {column} {definition}")
 
         # positions：取代 watchlist 表的"持仓分析"数据模型。shares=0 表示"只
         # 关注不持仓"（详情页"关注"按钮走这个状态）。
@@ -1486,90 +1497,32 @@ def add_search_history(email: str, query: str, market: str = "A"):
 
 
 def extract_score_breakdown(text: str) -> dict:
-    """从AI判断原文里解析"维度打分：基本面X/40 · 价格位置X/30 · 技术面X/15 ·
-    数据确定性X/15"这一行，拆成四个独立数字——advisor.py的_JUDGE_SYSTEM
-    prompt里要求AI必须输出这一行，但之前从没被结构化提取过，只是混在
-    fundamental_verdict这段自由文本里，导致get_score_band_backtest永远
-    只能回测"综合得分"这一个黑箱数字，没法回答"到底哪个维度真的有预测力"
-    （2026-08-29 Fable 5复核指出的缺口）。
-
-    每个子分数独立解析、独立返回None（不是整行解析失败就全部放弃）——
-    某天AI输出格式稍微跑偏、少写了一项，不该因为这一项连累另外三项也
-    解析不出来。允许"X/40"里的"X"是"—"或空（AI偶尔会用占位符表示这项
-    没法打分），这种情况该子项返回None，不当0分处理，跟这个项目一贯
-    "解析不出来不代表0分"的原则一致。
-    """
-    result = {"fundamental": None, "price_position": None, "technical": None,
-              "chips": None, "analyst": None, "data_certainty": None,
-              "fundamental_max": None, "price_position_max": None, "technical_max": None,
-              "chips_max": None, "analyst_max": None, "data_certainty_max": None}
-    # 窗口不能限制在"维度打分"那一行以内。2026-09-06真实故障：这里原本是
-    # re.search(r"维度打分[：:]([^\n]+)")，要求六个分数跟"维度打分："在同一行。
-    # 模型实际输出有三种写法，只有第一种能被解析到：
-    #   维度打分：基本面18/22 · 价格位置12/20 · ...          （同一行，解析成功）
-    #   维度打分：\n基本面20/22（高增长但增速放缓） · ...      （换行，整行取到空）
-    #   维度打分：\n基本面 10/22（无财务数据支撑） · ...       （换行+标签后有空格）
-    #   **维度打分**：\n- 基本面 18/22（...）\n- 价格位置 12/20（...）  （markdown加粗+逐条列表）
-    # 当天642条观察池判断里只有252条落到了维度分列，其余390条六列全是NULL，
-    # 而总分照常写进去了——页面上完全看不出问题，跟09-05那次分母写死是同一
-    # 类隐性失败。
-    #
-    # 改成从"维度打分"往后取一个窗口，到"综合得分"/"置信度"为止（模板里这
-    # 两个标记必定紧跟在维度分后面），都没有就最多取600字符。不按空行截断：
-    # 模型偶尔会写成"维度打分：\n\n基本面..."，按空行截会把窗口截成空的。
-    # 定位只认"维度打分"四个字，不要求后面紧跟冒号——模型会写成
-    # "**维度打分**："（markdown加粗），冒号被两个星号隔开了。冒号本来也不
-    # 承担任何解析职责，真正的锚点是下面六个维度名，多要求一个字符只是多
-    # 一种失败方式。
-    m = re.search(r"维度打分", text)
-    if not m:
-        return result
-    tail = text[m.end():]
-    stop = min([i for i in (tail.find("综合得分"), tail.find("置信度"), 700) if i > 0]
-               or [len(tail)])
-    line = tail[:stop]
-    # 分母写成 \d+ 而不是写死具体数字。2026-09-05真实故障：09-05把打分从
-    # 四维扩到六维、并按短线重新配权（基本面40->22、价格位置30->20、
-    # 技术面15->20、数据确定性15->10），但这里的正则还写死着旧分母，
-    # 于是四个维度全部匹配失败、整列落库成NULL——总分照常写进去了，
-    # 所以从页面上完全看不出问题，直到审计时查数据库才发现。
-    #
-    # 把分母参数化掉，以后再调权重这里就不会跟着失效。分母本身对解析没有
-    # 意义（我们要的是分子），当初写死纯粹是为了让正则更"精确"，结果精确
-    # 变成了脆弱。
-    # 分母现在也捕获下来存成 *_max（2026-09-11新增，Sonnet 5复核时发现的
-    # 缺口）：09-05权重从四维40/30/15/15改成六维22/20/20/20/8/10之后，
-    # get_dimension_predictive_value 一直是拿"基本面32/40"（旧权重）跟
-    # "基本面20/22"（新权重）的原始分子32、20直接排序比高低——32>20，
-    # 但32/40只是80%，20/22其实是91%，新权重下明显更强的基本面反而被
-    # 排进了"低分组"。分母本来就写在原文里，此前只是没存下来，不需要另建
-    # 一张"哪次权重改动生效于哪个日期"的映射表去反推——那种映射表本身还要
-    # 应对未来权重再次调整时忘记更新的风险，不如直接从每条记录自己的原文
-    # 里把分母也存下来，永远知道"这条记录当时满分是多少"，比对时用比例
-    # （分子/分母）而不是原始分子，天然不受权重怎么改的影响。
-    patterns = {
-        "fundamental": r"基本面\s*(\d+)\s*/\s*(\d+)",
-        "price_position": r"价格位置\s*(\d+)\s*/\s*(\d+)",
-        "technical": r"技术面\s*(\d+)\s*/\s*(\d+)",
-        "chips": r"筹码面\s*(\d+)\s*/\s*(\d+)",
-        "analyst": r"分析师预期\s*(\d+)\s*/\s*(\d+)",
-        "data_certainty": r"数据确定性\s*(\d+)\s*/\s*(\d+)",
-    }
-    for key, pat in patterns.items():
-        pm = re.search(pat, line)
-        if pm:
-            result[key] = int(pm.group(1))
-            result[f"{key}_max"] = int(pm.group(2))
-    return result
+    """Stock columns never contain special-product scores; reject partial totals."""
+    keys = ("fundamental", "price_position", "technical", "chips", "analyst", "data_certainty")
+    out = {k: None for key in keys for k in (key, key + "_max")}
+    parsed = scoring.parse_score(text, "equity")
+    if parsed["valid"]:
+        for d in parsed["dimensions"]:
+            out[d["key"]] = d["value"]
+            out[d["key"] + "_max"] = d["max"]
+    return out
 
 
 def log_advice(
     email: str, symbol: str, price_at_advice: float, fundamental_verdict: str,
     technical_signal: str, action: str = "观望", market: str = "A", name: str = "",
-    source: str = "position", score: int | None = None,
+    source: str = "position", score: int | None = None, reused_from: int | None = None,
 ) -> int:
+    """reused_from: 这次结果是复用的已有判断（见 recent_advice），不再插入重复的一行——
+    同一份判断落两行会让复核统计把一次判断算成两次。"""
+    if reused_from:
+        return int(reused_from)
     init_db()
     breakdown = extract_score_breakdown(fundamental_verdict)
+    details = scoring.metadata(fundamental_verdict, market, name, symbol)
+    score = details["score"]
+    if not details["valid"] and action == "买入":
+        action = "观望"
     with closing(_conn()) as c:
         cur = c.execute(
             "INSERT INTO advice (email, symbol, market, name, created_at, price_at_advice, "
@@ -1577,8 +1530,8 @@ def log_advice(
             "score_fundamental, score_price_position, score_technical, score_data_certainty, "
             "score_chips, score_analyst, "
             "score_fundamental_max, score_price_position_max, score_technical_max, "
-            "score_data_certainty_max, score_chips_max, score_analyst_max) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "score_data_certainty_max, score_chips_max, score_analyst_max, score_version, asset_kind, score_details) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (email, symbol, market, name, datetime.now(timezone.utc).isoformat(), price_at_advice,
              fundamental_verdict, technical_signal, action, source, score,
              breakdown["fundamental"], breakdown["price_position"],
@@ -1586,7 +1539,8 @@ def log_advice(
              breakdown["chips"], breakdown["analyst"],
              breakdown["fundamental_max"], breakdown["price_position_max"],
              breakdown["technical_max"], breakdown["data_certainty_max"],
-             breakdown["chips_max"], breakdown["analyst_max"]),
+             breakdown["chips_max"], breakdown["analyst_max"], details["version"], details["asset_kind"],
+             json.dumps(details, ensure_ascii=False)),
         )
         c.commit()
         return cur.lastrowid
@@ -1925,6 +1879,24 @@ def get_recent_advice_changes(limit: int = 12) -> list[dict]:
             if len(changes) >= limit:
                 break
     return changes
+
+
+def recent_advice(email: str, symbol: str, market: str, since_iso: str, sources: tuple[str, ...] | None,
+                  score_version: str) -> dict | None:
+    """同一支、同一口径(score_version)在 since_iso 之后的最新一条判断；sources=None 表示任意来源。"""
+    init_db()
+    q = ("SELECT id, created_at, price_at_advice, action, score, fundamental_verdict, technical_signal, source "
+         "FROM advice WHERE email=? AND symbol=? AND market=? AND created_at>=? AND score_version=?")
+    args: list = [email, symbol, market, since_iso, score_version]
+    if sources:
+        q += f" AND source IN ({','.join('?' * len(sources))})"
+        args += list(sources)
+    with closing(_conn()) as c:
+        r = c.execute(q + " ORDER BY id DESC LIMIT 1", args).fetchone()
+    if not r:
+        return None
+    keys = ("id", "created_at", "price_at_advice", "action", "score", "fundamental_verdict", "technical_signal", "source")
+    return dict(zip(keys, r))
 
 
 def get_latest_advice(limit_per_market: int = 3) -> dict:
