@@ -33,6 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import advisor
+import scoring
 import auth
 import daily_plan  # noqa: F401  （确保它的数据文件路径常量被初始化）
 import data_sources as ds
@@ -233,23 +234,33 @@ def leaderboard(limit: int = 5, _: str = Depends(require_user)) -> dict:
     """投研观察排行榜。港股/美股各自独立一批，跟 Streamlit 那版同一个数据源。"""
     def _load() -> dict:
         out: dict[str, list[dict]] = {}
-        for mk in ("HK", "US"):
-            board = tracker.get_latest_leaderboard(limit=limit, source=f"watchlist_{mk.lower()}")
-            rows = board.get("rows") if isinstance(board, dict) else board
-            out[mk] = [
-                {
-                    "rank": i,
-                    "symbol": r.get("symbol"),
-                    "name": r.get("name"),
-                    "market": r.get("market"),
-                    "action": r.get("action"),
-                    "score": r.get("score"),
-                    "price_at_advice": r.get("price_at_advice"),
-                    "created_at": r.get("created_at"),
-                    "breakdown": tracker.extract_score_breakdown(r.get("fundamental_verdict") or ""),
-                }
-                for i, r in enumerate(rows or [], 1)
-            ]
+        for mk in ("A", "HK", "US"):
+            for kind in ("equity", "fund", "leveraged_inverse"):
+                board = tracker.get_latest_leaderboard(
+                    limit=limit, source=f"watchlist_{mk.lower()}", asset_kind=kind,
+                )
+                rows = board.get("leaderboard") if isinstance(board, dict) else board
+                key = mk if kind == "equity" else f"{mk}_{kind}"
+                out[key] = [
+                    {
+                        "rank": i,
+                        "symbol": r.get("symbol"),
+                        "name": r.get("name"),
+                        "market": r.get("market"),
+                        "action": r.get("action"),
+                        "score": r.get("score"),
+                        "score_version": r.get("score_version"),
+                        "asset_kind": r.get("asset_kind"),
+                        "price_at_advice": r.get("price_at_advice"),
+                        "created_at": r.get("created_at"),
+                        "breakdown": {
+                            "dimensions": scoring.parse_score(
+                                r.get("fundamental_verdict") or "", kind,
+                            ).get("dimensions", []),
+                        },
+                    }
+                    for i, r in enumerate(rows or [], 1)
+                ]
         return out
 
     return {"boards": _cached("leaderboard", 300, _load, default={})}
@@ -294,15 +305,19 @@ def sim(_: str = Depends(require_user)) -> dict:
 
 
 @app.get("/api/track-record")
-def track_record(limit: int = 20, _: str = Depends(require_user)) -> dict:
+def track_record(limit: int = 20, directional_only: bool = False,
+                 _: str = Depends(require_user)) -> dict:
     """AI 战绩墙：全样本的方向判断胜率 + 最近 N 条逐条结果（亏的不藏）。"""
     def _load() -> dict:
         return {
             "summary": tracker.get_advice_outcome_summary(),
-            "recent": tracker.get_recent_advice_outcomes(limit=limit),
+            "recent": tracker.get_recent_advice_outcomes(
+                limit=limit, directional_only=directional_only,
+            ),
         }
 
-    return _cached(f"track_{limit}", 600, _load, default={"summary": {}, "recent": []})
+    return _cached(f"track_{limit}_{directional_only}", 600, _load,
+                   default={"summary": {}, "recent": []})
 
 
 @app.get("/api/plan/{market}")

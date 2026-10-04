@@ -33,6 +33,10 @@ SCHEMAS = {
     ),
 }
 LABELS = {"equity": "普通股票", "leveraged_inverse": "杠杆/反向产品", "crypto": "加密资产", "fund": "普通基金/ETF"}
+DIMENSION_ALIASES = {
+    "analyst": ("分析师预期", "分析师"),
+    "fundamental": ("基本面质量", "基本面"),
+}
 
 
 def asset_kind(market: str, name: str = "", symbol: str = "") -> str:
@@ -63,7 +67,8 @@ def parse_score(text: str, expected_kind: str | None = None) -> dict:
         for kind in candidates:
             dims, errors = [], []
             for key, label, maximum in SCHEMAS[kind]:
-                alias = label + (r"(?:质量)?" if key == "fundamental" else "")
+                aliases = DIMENSION_ALIASES.get(key, (label,))
+                alias = "(?:" + "|".join(aliases) + ")"
                 matches = re.findall(rf"{alias}\s*[:：|]?\s*(-?\d+(?:\.\d+)?)\s*/\s*(\d+)", segment)
                 if len(matches) != 1:
                     errors.append(f"{label}缺失或重复")
@@ -118,6 +123,8 @@ def scoring_instructions(kind: str) -> str:
 本标的类型：{LABELS[kind]}。只使用以下维度，不能跨资产类别比较总分。
 {'专用' if kind != 'equity' else ''}维度打分：{template}
 每个分项必须是满分范围内的整数，所有项都必须出现，禁止修改分母。总分由程序计算。
+统一刻度：0分表示证据强烈反对当前短线判断，约一半表示中性/证据混合，满分表示有多项近期、可核验且相互独立的强支持证据；按证据强度逐级给分，不能因叙述流畅或长期看好直接给高分。
+分数不得伪装成概率。没有量化阈值支持时，不声称1分差异有意义；弱证据宁可落在中间或偏低区间，并解释依据。
 每个维度的高低均表示该维度对当前短线研究条件的支持程度；风险越大，风险维度分数越低。
 数据确定性只衡量来源、时效、完整性及冲突，不能因为看多而加分；资料缺失不能伪装成利空或利好。
 普通股票：基本面用于排查盈利质量/债务硬伤；价格位置只评价MA20趋势和距离，技术面只评价动能/量价确认，避免同一均线信号重复加分。

@@ -8,6 +8,7 @@
 
 import json
 import scoring
+import scoring_review
 import re
 import sqlite3
 from contextlib import closing
@@ -1530,8 +1531,8 @@ def log_advice(
             "score_fundamental, score_price_position, score_technical, score_data_certainty, "
             "score_chips, score_analyst, "
             "score_fundamental_max, score_price_position_max, score_technical_max, "
-            "score_data_certainty_max, score_chips_max, score_analyst_max, score_version, asset_kind, score_details) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "score_data_certainty_max, score_chips_max, score_analyst_max, score_version, asset_kind, score_details, review_policy) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (email, symbol, market, name, datetime.now(timezone.utc).isoformat(), price_at_advice,
              fundamental_verdict, technical_signal, action, source, score,
              breakdown["fundamental"], breakdown["price_position"],
@@ -1540,7 +1541,7 @@ def log_advice(
              breakdown["fundamental_max"], breakdown["price_position_max"],
              breakdown["technical_max"], breakdown["data_certainty_max"],
              breakdown["chips_max"], breakdown["analyst_max"], details["version"], details["asset_kind"],
-             json.dumps(details, ensure_ascii=False)),
+             json.dumps(details, ensure_ascii=False), scoring_review.POLICY),
         )
         c.commit()
         return cur.lastrowid
@@ -1548,6 +1549,7 @@ def log_advice(
 
 def get_due_for_advice_review(
     email: str, min_age_days: float = 7, limit: int = 20, source: str | None = None,
+    market: str | None = None,
 ) -> list[dict]:
     """同 get_due_for_review 的逻辑，找出该回填实际价格的历史建议（只看当前用户）。
 
@@ -1561,34 +1563,39 @@ def get_due_for_advice_review(
     cutoff = (datetime.now(timezone.utc) - timedelta(days=min_age_days)).isoformat()
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
+        sql = ("SELECT * FROM advice WHERE email = ? AND review_price IS NULL "
+               "AND score IS NOT NULL AND score_version = ? AND review_policy = ? "
+               "AND market IN ('A','HK','US') AND created_at <= ?")
+        args: list = [email, scoring.VERSION, scoring_review.POLICY, cutoff]
         if source:
-            rows = c.execute(
-                "SELECT * FROM advice WHERE email = ? AND source = ? AND review_price IS NULL "
-                "AND created_at <= ? ORDER BY created_at ASC LIMIT ?",
-                (email, source, cutoff, limit),
-            ).fetchall()
-        else:
-            rows = c.execute(
-                "SELECT * FROM advice WHERE email = ? AND review_price IS NULL AND created_at <= ? "
-                "ORDER BY created_at ASC LIMIT ?",
-                (email, cutoff, limit),
-            ).fetchall()
+            sql += " AND source = ?"
+            args.append(source)
+        if market:
+            sql += " AND market = ?"
+            args.append(market)
+        rows = c.execute(sql + " ORDER BY created_at ASC LIMIT ?", (*args, limit)).fetchall()
         return [dict(r) for r in rows]
 
 
-def record_advice_review(advice_id: int, review_price: float):
+def record_advice_review(advice_id: int, review_price: float,
+                         review_at: str | None = None, policy: str = "legacy"):
+    if not isinstance(review_price, (int, float)) or review_price <= 0:
+        return False
     with closing(_conn()) as c:
-        c.execute(
-            "UPDATE advice SET review_price = ?, review_at = ? WHERE id = ?",
-            (review_price, datetime.now(timezone.utc).isoformat(), advice_id),
+        cur = c.execute(
+            "UPDATE advice SET review_price = ?, review_at = ?, review_policy = ?, review_recorded_at = ? "
+            "WHERE id = ? AND review_price IS NULL",
+            (review_price, review_at or datetime.now(timezone.utc).isoformat(), policy,
+             datetime.now(timezone.utc).isoformat(), advice_id),
         )
         c.commit()
+        return cur.rowcount == 1
 
 
 _SCORE_BANDS = [(90, 100, "90-100"), (70, 89, "70-89"), (50, 69, "50-69"), (30, 49, "30-49"), (0, 29, "0-29")]
 
 
-def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict:
+def get_score_band_backtest(source: str = "screen", min_sample: int = 30) -> dict:
     """按综合得分分档统计事后真实收益——参考开源项目TradingAgents(TauricResearch)
     v0.2.4"结果驱动复盘日志"的思路(2026-08-26)：排行榜的0-100分打分体系上线以来
     从未被拿去跟事后价格核对过，是这套系统当时最大的可信度缺口(排行榜本身分数
@@ -1640,13 +1647,14 @@ def get_score_band_backtest(source: str = "screen", min_sample: int = 5) -> dict
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
         rows = c.execute(
-            "SELECT score, market, price_at_advice, review_price, "
+            "SELECT score, market, price_at_advice, review_price, asset_kind, "
             "score_fundamental_max, score_price_position_max, score_technical_max, "
             "score_chips_max, score_analyst_max, score_data_certainty_max "
-            "FROM advice WHERE source = ? "
+            "FROM advice WHERE source = ? AND asset_kind = 'equity' "
             "AND score IS NOT NULL AND review_price IS NOT NULL "
-            "AND price_at_advice IS NOT NULL AND price_at_advice > 0",
-            (source,),
+            "AND price_at_advice IS NOT NULL AND price_at_advice > 0 "
+            f"AND {_V2_OUTCOME_SQL} AND {_V2_DEDUP_SQL}",
+            (source, *_v2_review_params()),
         ).fetchall()
     rows = [dict(r) for r in rows]
 
@@ -1724,9 +1732,10 @@ def get_dimension_predictive_value(source: str = "watchlist", min_sample: int = 
         rows = c.execute(
             f"SELECT {', '.join(_DIMENSION_COLUMNS.values())}, {', '.join(max_cols)}, "
             "price_at_advice, review_price "
-            "FROM advice WHERE source = ? AND review_price IS NOT NULL "
-            "AND price_at_advice IS NOT NULL AND price_at_advice > 0",
-            (source,),
+            "FROM advice WHERE source = ? AND asset_kind = 'equity' AND review_price IS NOT NULL "
+            "AND price_at_advice IS NOT NULL AND price_at_advice > 0 "
+            f"AND {_V2_OUTCOME_SQL} AND {_V2_DEDUP_SQL}",
+            (source, *_v2_review_params()),
         ).fetchall()
     rows = [dict(r) for r in rows]
 
@@ -1771,6 +1780,18 @@ def _advice_accuracy_from_rows(rows: list[dict]) -> dict:
     return {"总数": len(scored), "一致数": match, "一致率": match / len(scored) * 100}
 
 
+_V2_OUTCOME_SQL = "score IS NOT NULL AND score_version = ? AND review_policy = ?"
+_V2_DEDUP_SQL = (
+    "id IN (SELECT MAX(id) FROM advice WHERE score IS NOT NULL AND review_price IS NOT NULL "
+    "AND price_at_advice > 0 AND score_version = ? AND review_policy = ? "
+    "GROUP BY substr(created_at,1,10), market, symbol, score_version, asset_kind)"
+)
+
+
+def _v2_review_params() -> tuple[str, str, str, str]:
+    return (scoring.VERSION, scoring_review.POLICY, scoring.VERSION, scoring_review.POLICY)
+
+
 def get_advice_accuracy(email: str) -> dict:
     """advice表版本的方向一致率统计，字段/口径跟get_accuracy_stats对齐，只是
     数据源换成advice表、方向标签换成买入/卖出。同样不代表未来表现，只是历史
@@ -1787,8 +1808,8 @@ def get_advice_accuracy(email: str) -> dict:
         rows = c.execute(
             "SELECT * FROM advice WHERE email = ? AND review_price IS NOT NULL "
             "AND price_at_advice IS NOT NULL AND price_at_advice > 0 "
-            f"AND {_DEDUP_ADVICE_SQL} AND {_WINDOW_SQL}",
-            (email,),
+            f"AND {_V2_OUTCOME_SQL} AND {_V2_DEDUP_SQL}",
+            (email, *_v2_review_params()),
         ).fetchall()
     rows = [dict(r) for r in rows]
 
@@ -2003,7 +2024,9 @@ def _latest_run_cutoff(c, source: str) -> str:
     return cutoff
 
 
-def get_latest_leaderboard(limit: int = 10, source: str = "screen", market_quota: dict[str, int] | None = None) -> dict:
+def get_latest_leaderboard(limit: int = 10, source: str = "screen",
+                           market_quota: dict[str, int] | None = None,
+                           asset_kind: str = "equity") -> dict:
     """2026-08-25新增：三个市场混排的综合得分排行榜，取代"每个市场固定
     前3"的老逻辑——用户明确要求"好的就上，不好不出现也没事"，不要求每个
     市场凑数量。取同一批（最近一次跑advisor.py那天）里score不为空的记录，
@@ -2055,14 +2078,15 @@ def get_latest_leaderboard(limit: int = 10, source: str = "screen", market_quota
         sql_limit = 100000 if market_quota else limit
         rows = c.execute(
             """
-            SELECT * FROM advice WHERE source = ? AND created_at >= ? AND score IS NOT NULL
+            SELECT * FROM advice WHERE source = ? AND created_at >= ? AND score_version = ?
+            AND asset_kind = ? AND score IS NOT NULL
             AND id IN (
-                SELECT MAX(id) FROM advice WHERE source = ? AND created_at >= ? AND score IS NOT NULL
-                GROUP BY symbol
+                SELECT MAX(id) FROM advice WHERE source = ? AND created_at >= ?
+                GROUP BY market, symbol
             )
             ORDER BY score DESC LIMIT ?
             """,
-            (source, _cutoff, source, _cutoff, sql_limit),
+            (source, _cutoff, scoring.VERSION, asset_kind, source, _cutoff, sql_limit),
         ).fetchall()
     board = [dict(r) for r in rows]
     if market_quota:
@@ -2096,16 +2120,24 @@ def get_watchlist_verdict_for_symbol(symbol: str, source: str = "watchlist") -> 
         # 用来算这支股票的真实排名和池子总大小。
         rows = c.execute(
             """
-            SELECT * FROM advice WHERE source = ? AND created_at >= ? AND score IS NOT NULL
+            SELECT * FROM advice WHERE source = ? AND created_at >= ? AND score_version = ? AND score IS NOT NULL
             AND id IN (
-                SELECT MAX(id) FROM advice WHERE source = ? AND created_at >= ? AND score IS NOT NULL
-                GROUP BY symbol
+                SELECT MAX(id) FROM advice WHERE source = ? AND created_at >= ?
+                GROUP BY market, symbol
             )
             ORDER BY score DESC
             """,
-            (source, _cutoff, source, _cutoff),
+            (source, _cutoff, scoring.VERSION, source, _cutoff),
         ).fetchall()
         pool = [dict(r) for r in rows]
+    target = next((r for r in pool if r.get("symbol") == symbol), None)
+    if target:
+        # A rank is meaningful only against the same market and asset rubric.
+        pool = [
+            r for r in pool
+            if r.get("market") == target.get("market")
+            and r.get("asset_kind") == target.get("asset_kind")
+        ]
     for rank, row in enumerate(pool, start=1):
         if row["symbol"] == symbol:
             return {
@@ -2190,14 +2222,13 @@ def get_recent_advice_outcomes(limit: int = 20, source: str | None = None,
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
         sql = (
-            "SELECT symbol, name, market, source, action, score, price_at_advice, "
-            "review_price, created_at, review_at FROM advice "
+            "SELECT symbol, name, market, source, action, score, score_version, asset_kind, "
+            "price_at_advice, review_price, created_at, review_at, review_policy FROM advice "
             "WHERE review_price IS NOT NULL AND price_at_advice IS NOT NULL "
             "AND price_at_advice > 0 "
-            # 去重 + 统一回看窗口，两条口径见上面那段注释。
-            f"AND {_DEDUP_ADVICE_SQL} AND {_WINDOW_SQL}"
+            f"AND {_V2_OUTCOME_SQL} AND {_V2_DEDUP_SQL}"
         )
-        params: list = []
+        params: list = list(_v2_review_params())
         if source:
             sql += " AND source = ?"
             params.append(source)
@@ -2252,13 +2283,13 @@ def get_advice_outcome_summary() -> dict:
             "         THEN 1 ELSE 0 END) AS hits "
             "FROM advice WHERE review_price IS NOT NULL AND price_at_advice IS NOT NULL "
             "AND price_at_advice > 0 AND action IN ('买入', '卖出') "
-            f"AND {_DEDUP_ADVICE_SQL} AND {_WINDOW_SQL}"
-        ).fetchone()
+            f"AND {_V2_OUTCOME_SQL} AND {_V2_DEDUP_SQL}"
+        , _v2_review_params()).fetchone()
         total_reviewed = c.execute(
             "SELECT COUNT(*) FROM advice WHERE review_price IS NOT NULL "
             "AND price_at_advice IS NOT NULL AND price_at_advice > 0 "
-            f"AND {_DEDUP_ADVICE_SQL} AND {_WINDOW_SQL}"
-        ).fetchone()[0]
+            f"AND {_V2_OUTCOME_SQL} AND {_V2_DEDUP_SQL}"
+        , _v2_review_params()).fetchone()[0]
 
     n = (row["n"] or 0) if row else 0
     hits = (row["hits"] or 0) if row else 0
@@ -2268,6 +2299,9 @@ def get_advice_outcome_summary() -> dict:
         "win_rate": (hits / n * 100) if n else None,
         "avg_return_pct": row["avg_ret"] if (row and row["avg_ret"] is not None) else None,
         "total_reviewed": total_reviewed,
+        "score_version": scoring.VERSION,
+        "review_policy": scoring_review.POLICY,
+        "status": "描述性回看；未来5个交易日收盘样本尚未证明预测优势",
     }
 
 
@@ -2291,179 +2325,40 @@ def get_advice_outcome_windows() -> list[dict]:
             "COUNT(*) AS n FROM advice "
             "WHERE review_price IS NOT NULL AND price_at_advice IS NOT NULL "
             "AND price_at_advice > 0 AND action IN ('买入', '卖出') "
-            f"AND {_DEDUP_ADVICE_SQL} AND {_WINDOW_SQL} "
-            "GROUP BY market, d0, d1"
+            f"AND {_V2_OUTCOME_SQL} AND {_V2_DEDUP_SQL} "
+            "GROUP BY market, d0, d1",
+            _v2_review_params(),
         ).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_score_evidence_text(source: str = "watchlist") -> str:
-    """把打分体系的事后回测结论整理成一段可以直接塞进prompt的实证文字。
-
-    2026-09-04第一版把结论写成"7天窗口、分数越高表现越差、单调递减"，两处都
-    不准确，已更正——错误的前提喂给AI比不喂更糟，这里把更正过程一并记下来，
-    免得以后又照着直觉重写一遍：
-
-    一、窗口不是7天，是约1天。watchlist 这条线的回填走的是"次日核对"
-        （get_due_for_advice_review 传 min_age_days=1）。实测786条已回填样本
-        的 created_at 到 review_at 间隔中位数0.99天、均值1.20天。
-
-    二、"分数越高表现越差"是合并统计造成的假象（辛普森悖论）。按市场拆开：
-        美股(n=477) 70-89档-0.65%/上涨41.6%，30-49档+0.34%/上涨55.9%
-                    ——高分没有优势，但谈不上单调反向；
-        港股(n=281) 70-89档-1.42%，50-69档-1.07%，30-49档-1.85%
-                    ——根本不单调，最低档反而最差，各档全负；
-        沪深(n=28)   样本太小，不作结论。
-        港股整体基线就差（各档全负），而它在高分档里占比又比美股高得多
-        （89/281=32% vs 77/477=16%），于是把合并后的高分档整体拖了下去。
-
-    所以真正站得住的结论只有一条：这套综合得分对"次日涨跌"没有可证实的预测力。
-    而它本来也不该有——40分基本面质量+30分价格位置安全边际，占了70%的权重，
-    衡量的是公司质地和估值位置，那是按季度起作用的东西，拿来预测明天从设计上
-    就不成立。这是衡量口径错配（用一个慢信号去打一个快窗口的分），不是模型算错。
-
-    据此仍然不改打分权重：真要改，正确的做法是把回看窗口拉长到跟信号的时间
-    尺度匹配，而不是把一个为季度设计的评分硬掰成日内择时指标。改权重还会让
-    "这套打分到底有没有用"失去干净的对照。这里只把事实和它的边界如实交给AI。
-
-    样本不足时返回空字符串——没有证据就不要编一段"经验"出来误导它。
-
-    2026-09-11修正：上面这段分析写于09-04，当时权重还是四维40/30/15/15，
-    "基本面40分+价格位置30分占七成"这句话是那批数据的真实写照。但09-05
-    晚上权重改成六维22/20/20/20/8/10之后，这句话就应该跟着变成"22+20=42%"
-    ——问题是这段docstring是写死的文字，不会跟着权重改动自动更新，而这个
-    函数的返回值是直接喂给AI当"客观统计"用的（assistant.py/sim_agent.py），
-    一旦权重再调一次、没人记得回来改这几行字，AI就会拿着一句关于"当年那套
-    权重"的过时描述去解释"现在这套评分"，这正是这次复核要修的"数据要是
-    最新的"那个坑。修法：不再把权重占比写死在返回的字符串里，改成下面从
-    `_weight_scheme_label`/*_max列现查最新一条记录的真实权重，动态拼出这句
-    话——权重以后再怎么改，这里都不用回来改代码。
-    """
+    """Return only comparable invest-short-v2 fixed-window evidence to model prompts."""
     try:
-        bt = get_score_band_backtest(source=source, min_sample=5)
+        backtest = get_score_band_backtest(source=source, min_sample=30)
     except Exception:
         return ""
-    total = bt.get("total_reviewed") or 0
-    if total < 100:
-        return ""
-
-    # 真实回看间隔从数据里实算，不写死。2026-09-04把 watchlist 的校验窗口从
-    # 0.9天改成6.9天之后，库里会有一段时间同时存在"1天口径"和"7天口径"两批
-    # 已回填数据；任何写死的窗口描述在过渡期都会是错的，而错误的前提喂给AI
-    # 比不喂更糟（这一版就是因为上一版写死"7天"而实际是1天才重写的）。
-    lags = []
-    try:
-        with closing(_conn()) as c:
-            for ca, ra in c.execute(
-                "SELECT created_at, review_at FROM advice "
-                "WHERE source = ? AND review_price IS NOT NULL AND review_at IS NOT NULL",
-                (source,),
-            ):
-                try:
-                    lags.append(
-                        (datetime.fromisoformat(ra) - datetime.fromisoformat(ca)).total_seconds() / 86400
-                    )
-                except Exception:
-                    continue
-    except Exception:
-        lags = []
-    if lags:
-        lags.sort()
-        _med = lags[len(lags) // 2]
-        _lo, _hi = lags[0], lags[-1]
-        window_txt = (
-            f"核对窗口按实际回填时间算，中位数{_med:.1f}天"
-            + (f"（区间{_lo:.1f}~{_hi:.1f}天）" if _hi - _lo > 0.5 else "")
+    count = backtest.get("total_reviewed", 0)
+    if count < 30:
+        return (
+            f"{scoring.VERSION} 的第5交易日收盘回看目前只有 {count} 条合格普通股票样本；"
+            "未达到每个分组30条，不能据此判断评分预测力或调权。"
         )
-    else:
-        window_txt = "核对窗口未知"
-
-    by_market = bt.get("按市场") or {}
-    _label = {"US": "美股", "HK": "港股", "A": "沪深"}
-    mkt_lines = []
-    for mk in ("US", "HK", "A"):
-        sub = by_market.get(mk)
-        if not sub:
-            continue
-        bands = sub.get("bands") if isinstance(sub, dict) else sub
-        bits = [
-            f"{b['band']}分档{b['count']}条平均{b['avg_return_pct']:+.2f}%、上涨{b['win_rate_pct']:.0f}%"
-            for b in (bands or [])
-            if b.get("count") and b.get("avg_return_pct") is not None
+    labels = {"HK": "港股", "US": "美股", "A": "沪深"}
+    pieces = [
+        f"评分回看仅包含 {scoring.VERSION}、{scoring_review.POLICY}、普通股票；"
+        "每个分数档样本少于30条时不计算平均收益或上涨比例。"
+    ]
+    for market, group in (backtest.get("按市场") or {}).items():
+        entries = [
+            f"{item['band']}分 n={item['count']} 平均收益={item['avg_return_pct']:+.2f}%、"
+            f"上涨比例={item['win_rate_pct']:.1f}%"
+            for item in group.get("bands", []) if item.get("avg_return_pct") is not None
         ]
-        if bits:
-            mkt_lines.append(f"    {_label.get(mk, mk)}：" + "；".join(bits))
-    if not mkt_lines:
-        return ""
-
-    # 按打分口径分开报告，跟按市场是同一个防混淆逻辑（见函数上方2026-09-11
-    # 注释）。样本目前几乎全落在一种口径里（新权重的记录还没到回填年龄），
-    # 但这段文字要在口径真正开始混合的那天之前就写好，不能等出问题了再改。
-    by_scheme = bt.get("按打分口径") or {}
-    scheme_lines = []
-    for sig, sub in sorted(by_scheme.items()):
-        bands = sub.get("bands") if isinstance(sub, dict) else sub
-        bits = [
-            f"{b['band']}分档{b['count']}条平均{b['avg_return_pct']:+.2f}%、上涨{b['win_rate_pct']:.0f}%"
-            for b in (bands or [])
-            if b.get("count") and b.get("avg_return_pct") is not None
-        ]
-        if bits:
-            scheme_lines.append(f"    [{sig}]：" + "；".join(bits))
-    scheme_block = ""
-    if len(by_scheme) > 1 and scheme_lines:
-        scheme_block = (
-            "  当前样本里混着不止一种打分口径（权重调整过），按口径分开看：\n"
-            + "\n".join(scheme_lines) + "\n"
-            "  权重变了之后，同样是\"75分\"，构成可能完全不同（旧权重靠基本面"
-            "和价格位置堆出来，新权重可能是技术面和筹码面在扛），跟按市场拆开"
-            "是同一个道理——不拆开会把两种不可比的口径混成一个假的\"整体结论\"。\n"
-        )
-
-    # 当前权重占比不写死在代码里，现查最新一条有六维满分记录的真实权重
-    # ——权重以后再调，这句话也会跟着变，不用回来改这个函数（就是这次要
-    # 修的"数据要是最新的"）。
-    weight_txt = "综合得分的具体权重构成"
-    try:
-        with closing(_conn()) as c:
-            c.row_factory = sqlite3.Row
-            latest = c.execute(
-                "SELECT score_fundamental_max, score_price_position_max, score_technical_max, "
-                "score_chips_max, score_analyst_max, score_data_certainty_max FROM advice "
-                "WHERE score_fundamental_max IS NOT NULL ORDER BY created_at DESC LIMIT 1"
-            ).fetchone()
-        if latest:
-            fund_max = latest["score_fundamental_max"] or 0
-            price_max = latest["score_price_position_max"] or 0
-            total_max = sum(v for v in dict(latest).values() if v is not None) or 100
-            slow_pct = round((fund_max + price_max) / total_max * 100)
-            weight_txt = (
-                f"当前权重下基本面质量{fund_max}分+价格位置{price_max}分，"
-                f"占综合得分{slow_pct}%"
-            )
-    except Exception:
-        pass
-
-    return (
-        f"本系统打分体系的事后实证（{total}条已回填样本，{window_txt}，"
-        f"是客观统计不是理论）：\n"
-        + "\n".join(mkt_lines) + "\n"
-        "  必须按市场分开看：三个市场的候选池口径完全不同（沪深是当天涨停股池，"
-        "港美股是人气榜/蓝筹），混在一起统计会出现辛普森悖论——港股整体基线更差、"
-        "又在高分档占比更高，会把合并后的高分档拖低，看上去像\"分数越高越差\"，"
-        "拆开后并不成立。\n"
-        + scheme_block +
-        "  站得住的结论只有一条：在上面这个窗口上，这套综合得分没有可证实的预测力。"
-        f"需要说明的是，之前绝大多数样本是按\"次日核对\"回填的，而{weight_txt}，"
-        "衡量的是公司质地和估值位置，那是按季度起作用的东西——拿它去打一天的分，"
-        "从设计上就不可能成立，这是衡量口径错配，不代表这套评分本身没有价值。"
-        "校验窗口已于2026-09-04从次日改成一周，新样本会在更接近它该被检验的尺度"
-        "上重新积累，在那之前不要拿旧结论下死判断。\n"
-        "  怎么用：把综合得分当作\"这家公司的质地和估值位置如何\"的描述，不要当作"
-        "\"明天会不会涨\"的理由。短周期的买卖时点要靠技术面确认（真实放量、趋势"
-        "成立）和当下的盘面证据，不能靠高分背书。尤其\"52周低位所以安全\"这句话，"
-        "在短周期里没有数据支持——低位往往意味着还在下跌趋势里。"
-    )
+        if entries:
+            pieces.append(f"{labels.get(market, market)}：" + "；".join(entries))
+    pieces.append("这是历史描述统计，不表示因果、盈利概率或已验证优势；不得据此自动调整维度权重。")
+    return "\n".join(pieces)
 
 
 def log_macro_brief(topic: str, title: str, brief_text: str, sources_json: str = "",

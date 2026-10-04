@@ -16,9 +16,12 @@ const DIMS = [
 // 一张卡被撑高一半、把真正该读的理由挤到屏幕外，一屏只放得下一张半。
 // 这里同样只在展开后显示。
 function Breakdown({ b }) {
-  const rows = DIMS.map(([k, label]) => {
-    const v = b?.[k];
-    const mx = b?.[`${k}_max`];
+  const dimensions = b?.dimensions?.length
+    ? b.dimensions
+    : DIMS.map(([key, label]) => ({
+        key, label, value: b?.[key], max: b?.[`${key}_max`],
+      }));
+  const rows = dimensions.map(({ key, label, value: v, max: mx }) => {
     if (v === null || v === undefined || !mx) return null;
     const pct = Math.max(0, Math.min(1, v / mx)) * 100;
     return (
@@ -63,7 +66,7 @@ function Card({ row }) {
               className="text-[1.02rem] font-semibold tracking-tight"
               style={{ color: row.score >= 60 ? "var(--fa-text)" : "var(--fa-muted)" }}
             >
-              {row.score}
+              {row.score}<span className="ml-1 text-[0.62rem] font-normal" style={{ color: "var(--fa-faint)" }}>/100</span>
             </span>
           ) : null}
           <span className="text-[0.72rem] font-semibold" style={{ color: "var(--fa-muted)" }}>
@@ -75,15 +78,20 @@ function Card({ row }) {
         现价 {fmtPrice(row.price_at_advice)}
         {row.created_at ? `（${fmtStamp(row.created_at)}取价）` : ""}
       </div>
-      <button
+      {row.breakdown?.dimensions?.length ? <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="mt-2 text-[0.74rem]"
         style={{ color: "var(--fa-muted)" }}
       >
         {open ? "收起维度打分" : "维度打分"}
-      </button>
-      {open ? <Breakdown b={row.breakdown} /> : null}
+      </button> : null}
+      {row.score_version ? (
+        <div className="mt-1 text-[0.68rem]" style={{ color: "var(--fa-faint)" }}>
+          {row.score_version} · 研究分，不代表胜率
+        </div>
+      ) : null}
+      {open && row.breakdown?.dimensions?.length ? <Breakdown b={row.breakdown} /> : null}
     </div>
   );
 }
@@ -104,16 +112,22 @@ export default function Leaderboard() {
   if (!boards) return <div className="h-24" aria-hidden />;
 
   const groups = [
-    ["港股", boards.HK],
-    ["美股", boards.US],
+    ["沪深股票", boards.A],
+    ["港股股票", boards.HK],
+    ["美股股票", boards.US],
+    ["沪深基金/ETF", boards.A_fund],
+    ["港股基金/ETF", boards.HK_fund],
+    ["美股基金/ETF", boards.US_fund],
+    ["沪深杠杆/反向产品", boards.A_leveraged_inverse],
+    ["港股杠杆/反向产品", boards.HK_leveraged_inverse],
+    ["美股杠杆/反向产品", boards.US_leveraged_inverse],
   ].filter(([, rows]) => rows && rows.length);
 
   return (
     <section className="mt-10">
       <h2 className="fa-section-title">投研观察排行榜</h2>
       <p className="mt-1 text-[0.76rem]" style={{ color: "var(--fa-muted)" }}>
-        这是基本面和技术面的研究排序，不是下单指令。结论回答的是「现在值不值得新建仓」，
-        跟持仓视角的「已持有的仓位要不要继续拿」是两次独立判断，不一致属正常。
+        研究分按标的类别使用独立口径，不是胜率或下单指令，也不适合跨类别比较。
       </p>
       {!groups.length ? (
         <p className="mt-4 text-[0.8rem]" style={{ color: "var(--fa-faint)" }}>

@@ -296,9 +296,8 @@ _OVERALL_SUMMARY_PROMPT = """你是财经数据分析助手。下面是同一只
 
 def summarize_overall(symbol: str, section_texts: dict):
     """总结性分析——把前面几个独立模块已经产出的AI文本再综合一次，不重新拉数据，
-    只是站在更高层面把几条独立证据链拧成一个判断，给用户一个"看这一段就够"的收尾。
-    末尾带一个机器可解析的[综合评分: 数字]标签，用 extract_score 解析出来，
-    展示层面转成一个可视化打分条，比纯文字更直观。流式生成器。
+    只给出一段事实综合，不在这个自由文本摘要里另造总分。正式研究评分由有版本、
+    资产类别和固定维度的 advisor 评分模块单独生成。流式生成器。
     """
     # max_tokens从1200调到3000——这里是"AI分析概率性返回空内容"那个老坑
     # (见README"踩过的坑")在summarize_overall这个调用点复现了：这个函数要把
@@ -313,12 +312,5 @@ def summarize_overall(symbol: str, section_texts: dict):
 
 
 def extract_score(analysis_text: str) -> int | None:
-    """从summarize_overall的输出里解析[综合评分: 数字]标签，解析不到返回None
-    （比如AI这次没按格式输出），调用方要能处理拿不到分数、只展示文字的情况。
-    """
-    import re
-    m = re.search(r"\[综合评分[：:]\s*(\d{1,3})\]", analysis_text)
-    if not m:
-        return None
-    score = int(m.group(1))
-    return max(0, min(100, score))
+    """Legacy compatibility: overall summaries no longer produce an uncalibrated score."""
+    return None

@@ -19,25 +19,25 @@ export default function RecordPage() {
 
   useEffect(() => {
     let alive = true;
-    apiGet("/api/track-record?limit=60")
+    apiGet(`/api/track-record?limit=20&directional_only=${onlyDirectional}`)
       .then((x) => alive && setD(x))
       .catch(() => alive && setD({ summary: {}, recent: [] }));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [onlyDirectional]);
 
   if (!d) return <div className="mt-8 h-40" aria-hidden />;
 
   const s = d.summary || {};
   const all = d.recent || [];
-  const rows = (onlyDirectional ? all.filter((r) => r.hit !== null) : all).slice(0, 20);
+  const rows = all;
 
   return (
     <section className="mt-7">
       <h2 className="fa-section-title">AI 战绩墙</h2>
       <p className="mt-1 text-[0.76rem]" style={{ color: "var(--fa-muted)" }}>
-        每一条判断生成时记下当时价格，到期后由系统自动补录事后价格。亏的也在里面，没有挑过。
+        只显示新评分口径在第5个交易日收盘的回看。它衡量历史价格方向，不代表已证明有预测优势。
       </p>
 
       {s.directional_count ? (
@@ -75,7 +75,7 @@ export default function RecordPage() {
         </div>
       ) : (
         <p className="mt-4 text-[0.82rem]" style={{ color: "var(--fa-faint)" }}>
-          还没有已回填事后价格的判断记录。
+          新口径的5个交易日收盘样本尚未回填；此前不同周期和评分版本的记录不混入这里。
         </p>
       )}
 
@@ -95,7 +95,7 @@ export default function RecordPage() {
       <div className="mt-2">
         {!rows.length ? (
           <p className="text-[0.82rem]" style={{ color: "var(--fa-faint)" }}>
-            最近的记录里没有带方向的判断（都是持有/观望）。点右上角可以看全部。
+            当前没有符合口径的回看记录。积累到期样本后会在这里逐条显示。
           </p>
         ) : null}
         {rows.map((r, i) => {
@@ -136,7 +136,7 @@ export default function RecordPage() {
         })}
       </div>
       <p className="mt-3 text-[0.72rem]" style={{ color: "var(--fa-faint)" }}>
-        「说对/说错」只对买入、卖出这类带方向的结论成立，持有/观望不计入胜率。
+        回看价取判断后第5个交易日收盘；不含分红及交易成本。
       </p>
     </section>
   );

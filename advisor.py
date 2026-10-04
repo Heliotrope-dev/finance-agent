@@ -91,7 +91,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed as _as_completed
 from concurrent.futures import wait as _futures_wait
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import futu as ft
 import toml
@@ -3019,51 +3019,46 @@ def _judge_one(item: dict, source: str) -> dict | None:
 
 
 def _backfill_due_advice() -> int:
-    # 三个source现在都是一周窗口（watchlist 2026-09-04从0.9天改过来，理由见
-    # _WATCHLIST_REVIEW_MIN_AGE_DAYS的注释）。这里仍然分开查、不合并成一次
-    # 不带source过滤的查询——watchlist那条要用自己的常量（6.9天，比默认的7天
-    # 留了0.1天余量来吸收cron固定偏移，见下面那段），合并了就用不上这个余量。
-    #
-    # 2026-08-30修复：watchlist原来用min_age_days=1（整24小时），但cron每天
-    # 固定同一时刻（17:30）启动，watchlist判断是main()里排最后、要等
-    # backfill+持仓判断+组合分析都跑完才开始写，比当天cron启动时刻晚
-    # 10-20分钟——这意味着"距上次cron启动正好24小时"这个cutoff永远比
-    # 昨天watchlist的落库时间早那10-20分钟，"created_at <= cutoff"这个条件
-    # 结构性地永远为假，不是偶尔差一点，是每天都会被卡住，实测8-28这批
-    # 49条在8-29的真实cutoff下命中数是0。改成0.9天（21.6小时），留出
-    # 足够吸收这个固定偏移量的余量。position/screen不用管，它们的7天窗口
-    # 本来就有充裕余量。
-    due = (
-        tracker.get_due_for_advice_review(_EMAIL, limit=200, source="position")
-        + tracker.get_due_for_advice_review(_EMAIL, limit=200, source="screen")
-        + tracker.get_due_for_advice_review(
-            _EMAIL, min_age_days=_WATCHLIST_REVIEW_MIN_AGE_DAYS,
-            limit=sum(_WATCHLIST_TARGET_SIZE.values()) * 2, source="watchlist",
+    # invest-short-v2统一在作出判断后的第5个完整交易日收盘回看。
+    # 只有交易日历完整覆盖且能取到目标日期日线，才会写入结果。
+    due = [
+        row
+        for market in ("A", "HK", "US")
+        for row in tracker.get_due_for_advice_review(
+            _EMAIL, min_age_days=0, limit=150, market=market,
         )
-    )
+    ]
     if not due:
         return 0
 
-    def _fetch_price(row):
+    import scoring_review
+
+    now = datetime.now(timezone.utc)
+
+    def _fetch_close(row):
         try:
-            return ds.get_stock_realtime(row["symbol"], row.get("market", "US")).get("最新价")
+            target = scoring_review.fifth_session_close(row["market"], row["created_at"])
+            if target is None or now < target.astimezone(timezone.utc):
+                return None
+            frame = ds.get_stock_history(
+                row["symbol"], target.date().isoformat(), target.date().isoformat(),
+                frequency="d", market=row["market"],
+            )
+            close = scoring_review.exact_close(frame, target, now)
+            return (close, target) if close is not None else None
         except Exception:
             return None
 
-    results = _run_concurrent_with_deadline(due, _fetch_price, timeout=60, max_workers=8)
+    results = _run_concurrent_with_deadline(due, _fetch_close, timeout=60, max_workers=8)
     n = 0
     for i, row in enumerate(due):
-        price = results.get(i)
-        # 2026-08-30修复：回填价格等于入场价，大概率是市场当天没开盘
-        # （周末/节假日回填到的还是上一个交易日收盘价，跟入场价撞了同一个
-        # 数），不是真的"次日零涨跌"——按这个项目一贯"取不到就留NULL不
-        # 硬凑"的原则，这种情况不记review_price，留着下次（下一个真实
-        # 交易日）再试，不能当0%收益记进回测统计（8-28那批周六回填出的
-        # 31条review_price=price_at_advice就是这么污染的，把回测胜率
-        # 直接拉到12%~26%，正常该在50%上下）。
-        if price and price != row.get("price_at_advice"):
-            tracker.record_advice_review(row["id"], price)
-            n += 1
+        result = results.get(i)
+        if result:
+            price, target = result
+            if tracker.record_advice_review(
+                row["id"], price, target.isoformat(), scoring_review.POLICY,
+            ):
+                n += 1
     return n
 
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from queue import Empty, Queue
 import pandas as pd
 import streamlit as st
+import scoring
 import streamlit.components.v1 as _cv1
 from contextlib import nullcontext as _nullcontext
 from datetime import datetime, timedelta, timezone
@@ -3682,18 +3683,14 @@ def _score_breakdown_bars_html(verdict_text: str) -> str:
     维度直接不画，不用0充数：没解析到和真的0分是两回事。
     """
     try:
-        breakdown = extract_score_breakdown(verdict_text or "")
+        parsed = scoring.parse_score(verdict_text or "")
     except Exception:
         return ""
-    _labels = (
-        ("fundamental", "基本面"), ("price_position", "价格位置"), ("technical", "技术面"),
-        ("chips", "筹码面"), ("analyst", "分析师"), ("data_certainty", "数据确定性"),
-    )
     bars = []
-    for key, label in _labels:
-        val, mx = breakdown.get(key), breakdown.get(f"{key}_max")
-        if val is None or not mx:
-            continue
+    if not parsed["valid"]:
+        return ""
+    for dimension in parsed["dimensions"]:
+        val, mx, label = dimension["value"], dimension["max"], dimension["label"]
         pct = max(0.0, min(1.0, val / mx)) * 100
         # 刻意不用 flex + 绝对定位画这条：第一版那么写，在排行榜这个
         # "<a> 包一堆 <div>" 的嵌套结构里 flex 没生效，标签和数值挤在一起、
@@ -3989,6 +3986,7 @@ def _render_advice_section():
     # 老的source="watchlist"（三市场混排）不删，advisor.py主流程仍然在写，
     # 只是首页不再读它。
     _market_label = {"US": "美股", "HK": "港股", "A": "沪深"}
+    _asset_label = {"equity": "股票", "fund": "基金/ETF", "leveraged_inverse": "杠杆/反向产品"}
 
     def _first_clause(text: str, limit: int = 52) -> str:
         """取一段话的第一个分句。AI 的行文习惯是先给结论再展开，第一句几乎
@@ -4166,33 +4164,32 @@ def _render_advice_section():
                             if parts.get(sec):
                                 st.markdown(_labeled_line(sec, parts[sec]), unsafe_allow_html=True)
 
-    # 港股/美股各自独立取一份，不再用market_quota从混合池里配额分配。
+    # A股、港股、美股各自独立取一份，不再用market_quota从混合池里配额分配。
     _any_board = False
     _board_diagnostics = []
-    for _mk, _label in (("HK", "港股"), ("US", "美股")):
-        try:
-            _data = get_latest_leaderboard(limit=5, source=f"watchlist_{_mk.lower()}")
-        except Exception:
-            _board_diagnostics.append(f"{_label}读取失败")
-            continue
-        _board = _data.get("leaderboard") or []
-        if not _data.get("run_date") or not _board:
-            _raw_count = _data.get("raw_count", 0)
-            if not _data.get("run_date"):
-                _board_diagnostics.append(f"{_label}尚未生成观察池结果")
-            elif _raw_count:
-                _board_diagnostics.append(f"{_label}本轮有{_raw_count}条结果，但未解析出有效评分")
-            else:
-                _board_diagnostics.append(f"{_label}本轮未输出候选")
-            continue
-        _any_board = True
-        st.markdown(f"**{_label}**")
-        st.markdown(
-            f"<div style='font-size:var(--fs-xs);color:var(--fa-faint);margin:-4px 0 14px'>"
-            f"更新于 {_data['run_date']}</div>",
-            unsafe_allow_html=True,
-        )
-        _render_board_rows(_board)
+    for _mk, _market_name in (("A", "沪深"), ("HK", "港股"), ("US", "美股")):
+        for _kind, _kind_name in _asset_label.items():
+            _label = f"{_market_name} · {_kind_name}"
+            try:
+                _data = get_latest_leaderboard(
+                    limit=5, source=f"watchlist_{_mk.lower()}", asset_kind=_kind,
+                )
+            except Exception:
+                _board_diagnostics.append(f"{_label}读取失败")
+                continue
+            _board = _data.get("leaderboard") or []
+            if not _board:
+                if _kind == "equity" and not _data.get("run_date"):
+                    _board_diagnostics.append(f"{_label}尚未生成观察池结果")
+                continue
+            _any_board = True
+            st.markdown(f"**{_label}**")
+            st.markdown(
+                f"<div style='font-size:var(--fs-xs);color:var(--fa-faint);margin:-4px 0 14px'>"
+                f"更新于 {_data['run_date']} · {scoring.VERSION}研究分</div>",
+                unsafe_allow_html=True,
+            )
+            _render_board_rows(_board)
 
     if not _any_board:
         st.caption("；".join(_board_diagnostics) or "还没有生成过投研观察排行榜")
@@ -4557,7 +4554,7 @@ def _render_my_page():
                 unsafe_allow_html=True,
             )
 
-        # ── AI 判断准确率：三套口径合成一张表 ────────────────────────────
+        # ── 历史判断回看：不同系统/窗口只作分项记录 ────────────────────────────
         #
         # 2026-09-13。改造前这一页上有三个各自独立的准确率区块，散在三处、
         # 各用一套 st.metric 卡片：
@@ -4599,8 +4596,9 @@ def _render_my_page():
             if stats.get("总数") else "你在详情页点「综合数据分析」时记下的方向，满 7 天回看；还没有满 7 天的记录",
         )]
         for _src, _label, _what in (
-            ("watchlist", "推荐股排行榜", "系统在每个交易日生成的买卖判断，满 7 天回看"),
-            ("position", "持仓判断", "同一套方法，只针对已持仓的标的"),
+            ("watchlist_hk", "港股观察池", "新评分版本；第5个交易日收盘回看"),
+            ("watchlist_us", "美股观察池", "新评分版本；第5个交易日收盘回看"),
+            ("position", "持仓判断", "新评分版本；第5个交易日收盘回看"),
         ):
             _s = _by_source.get(_src) or {}
             _acc_rows.append((
@@ -4620,7 +4618,7 @@ def _render_my_page():
 
         st.markdown(
             "<div style='font-size:var(--fs-xs);color:var(--fa-muted);margin:2px 0 10px'>"
-            "三套记录来自不同的数据源、不同的回看窗口，百分比之间不能互相比较。</div>",
+            "仅新评分版本的固定交易日窗口进入自动判断统计；详情页历史分析使用独立口径。</div>",
             unsafe_allow_html=True,
         )
         for _name, _pct, _denom, _what in _acc_rows:
@@ -4643,8 +4641,7 @@ def _render_my_page():
             )
         st.markdown(
             "<div style='font-size:var(--fs-xs);color:var(--fa-muted);margin-top:8px'>"
-            "全部是历史记录的客观统计，不代表未来表现。分数越高也不代表事后表现越好——"
-            "详见打分体系的事后实证说明。</div>",
+            "回看窗口：判断后的第5个交易日收盘。新评分口径仍需积累样本，不能据此推断收益。</div>",
             unsafe_allow_html=True,
         )
 
@@ -4752,7 +4749,7 @@ def _render_my_page():
         st.markdown("".join(_rows_html), unsafe_allow_html=True)
         st.caption(
             "「说对/说错」只对买入、卖出这类带方向的结论成立，持有/观望不计入胜率。"
-            "事后价格是系统按固定回看窗口自动补录的，不是挑出来的时点。"
+            "事后价格取判断后的第5个交易日收盘；未取得该交易日收盘数据的记录不纳入。"
         )
 
         # 把「今天给了什么判断」变成可追溯的变化记录，而不是每天再读一篇

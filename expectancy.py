@@ -25,6 +25,8 @@
 危险得多——它会让人误以为自己有依据。
 """
 import sqlite3
+import scoring
+import scoring_review
 import sys
 from contextlib import closing
 from pathlib import Path
@@ -53,21 +55,21 @@ def _fetch_reviewed(source: str | None = None) -> list[dict]:
     """
     sql = (
         "SELECT symbol, market, score, action, price_at_advice, review_price, "
-        "created_at, review_at, source, "
+        "created_at, review_at, source, market, asset_kind, score_version, review_policy, "
         "score_fundamental, score_price_position, score_technical, "
         "score_chips, score_analyst, score_data_certainty, "
         "julianday(review_at) - julianday(created_at) AS gap "
         "FROM advice WHERE review_price IS NOT NULL AND price_at_advice > 0 "
-        "AND score IS NOT NULL"
+        "AND score IS NOT NULL AND asset_kind = 'equity' AND score_version = ? AND review_policy = ?"
     )
-    args: list = []
+    args: list = [scoring.VERSION, scoring_review.POLICY]
     if source:
         sql += " AND source = ?"
         args.append(source)
     with closing(_conn()) as c:
         c.row_factory = sqlite3.Row
         rows = [dict(r) for r in c.execute(sql, args)]
-    return [r for r in rows if (r.get("gap") or 0) >= _MIN_VALID_GAP_DAYS]
+    return rows
 
 
 def _stats(rets: list[float]) -> dict:
@@ -95,30 +97,38 @@ def _stats(rets: list[float]) -> dict:
 
 
 def score_band_expectancy(source: str = "watchlist") -> dict:
-    """按分数段算期望值。这是"高分是不是真的更值得买"的直接答案。"""
+    """按版本、窗口和市场查看新口径样本；旧评分不混入，不给伪验证结论。"""
     rows = _fetch_reviewed(source)
     if len(rows) < _MIN_SAMPLE:
         return {
             "状态": "尚未验证",
             "有效样本": len(rows),
+            "按市场": {},
             "说明": (
-                f"按正确窗口（≥{_MIN_VALID_GAP_DAYS:.0f}天）复核的样本只有 {len(rows)} 条，"
+                f"符合 {scoring.VERSION} / {scoring_review.POLICY} 的普通股票样本只有 {len(rows)} 条，"
                 f"不足 {_MIN_SAMPLE} 条，任何期望值都算不出统计意义。"
-                "在积累够之前，打分只能当作筛选参考，不能当作交易依据。"
+                "分数是研究排序，不代表胜率或收益保证。"
             ),
         }
-
     bands = [(85, 101, "85+"), (75, 85, "75-84"), (65, 75, "65-74"),
              (55, 65, "55-64"), (0, 55, "<55")]
-    out = {}
-    for lo, hi, label in bands:
-        sub = [r for r in rows if lo <= r["score"] < hi]
-        rets = [(r["review_price"] - r["price_at_advice"]) / r["price_at_advice"] * 100
-                for r in sub]
-        s = _stats(rets)
-        if s and s["样本"] >= 10:
-            out[label] = s
-    return {"状态": "已验证", "有效样本": len(rows), "分段": out}
+    by_market = {}
+    for market in sorted({r["market"] for r in rows}):
+        market_rows = [r for r in rows if r["market"] == market]
+        if len(market_rows) < _MIN_SAMPLE:
+            by_market[market] = {"样本": len(market_rows), "状态": "样本不足"}
+            continue
+        out = {}
+        for lo, hi, label in bands:
+            sub = [r for r in market_rows if lo <= r["score"] < hi]
+            rets = [(r["review_price"] - r["price_at_advice"]) / r["price_at_advice"] * 100
+                    for r in sub]
+            s = _stats(rets)
+            if s and s["样本"] >= _MIN_SAMPLE:
+                out[label] = s
+        by_market[market] = {"样本": len(market_rows), "分段": out, "状态": "描述性回看"}
+    return {"状态": "描述性回看，未证明预测优势", "有效样本": len(rows),
+            "按市场": by_market, "评分版本": scoring.VERSION, "回看口径": scoring_review.POLICY}
 
 
 def action_expectancy(source: str = "watchlist") -> dict:
@@ -136,9 +146,9 @@ def action_expectancy(source: str = "watchlist") -> dict:
         rets = [(r["review_price"] - r["price_at_advice"]) / r["price_at_advice"] * 100
                 for r in sub]
         s = _stats(rets)
-        if s and s["样本"] >= 10:
+        if s and s["样本"] >= _MIN_SAMPLE:
             out[act] = s
-    return {"状态": "已验证", "有效样本": len(rows), "分动作": out}
+    return {"状态": "描述性回看，未证明预测优势", "有效样本": len(rows), "分动作": out}
 
 
 def dimension_edge(source: str = "watchlist") -> dict:
@@ -166,7 +176,7 @@ def dimension_edge(source: str = "watchlist") -> dict:
         hi = [r for r in sub if r[col] > med]
         lo = [r for r in sub if r[col] <= med]
         out[label] = {
-            "状态": "已验证", "样本": len(sub),
+            "状态": "描述性回看", "样本": len(sub),
             "高分组": f(hi), "低分组": f(lo), "差值": f(hi) - f(lo),
         }
     return out
@@ -183,7 +193,9 @@ def pending_review_eta() -> dict:
     with closing(_conn()) as c:
         rows = list(c.execute(
             "SELECT created_at FROM advice WHERE review_price IS NULL "
-            "AND score IS NOT NULL ORDER BY created_at"))
+            "AND score IS NOT NULL AND score_version = ? AND review_policy = ? "
+            "AND asset_kind = 'equity' ORDER BY created_at",
+            (scoring.VERSION, scoring_review.POLICY)))
     if not rows:
         return {"待复核": 0}
     dues = []
@@ -214,34 +226,27 @@ def pending_review_eta() -> dict:
 
 
 def summary_text() -> str:
-    """一段可以直接推给用户/喂给AI的现状说明。"""
+    """保守说明当前评分版本和回看样本，供计划页与决策辅助读取。"""
     band = score_band_expectancy()
-    lines = ["【策略数学期望现状】"]
-    if band.get("状态") != "已验证":
+    lines = ["【评分回看】",
+             f"版本 {scoring.VERSION}；回看点为第5个交易日收盘；只列普通股票并按市场拆分。"]
+    if band.get("有效样本", 0) < _MIN_SAMPLE:
         p = pending_review_eta()
         lines.append(f"状态：尚未验证。{band.get('说明', '')}")
         lines.append(
-            f"待复核 {p.get('待复核', 0)} 条，当前有效样本 {p.get('当前有效样本', 0)} 条，"
-            f"还需 {p.get('还需样本', 0)} 条，预计 {p.get('预计凑够时间')} 凑够。"
-        )
-        lines.append(
-            "在此之前，系统给出的分数和动作只能当筛选线索，"
-            "不构成任何可以照着下单的依据。"
+            f"已成熟样本 {band.get('有效样本', 0)} 条；待回看 {p.get('待复核', 0)} 条。"
+            "历史短窗口样本不并入新评分准确率。"
         )
         return "\n".join(lines)
 
-    lines.append(f"有效样本 {band['有效样本']} 条（均按 ≥5 天窗口复核）")
-    for label, s in band.get("分段", {}).items():
-        pl = f"{s['盈亏比']:.2f}" if s.get("盈亏比") else "-"
-        lines.append(
-            f"  {label:6} 样本{s['样本']:4} 胜率{s['胜率']:5.1f}% "
-            f"盈亏比{pl:>5} 期望{s['期望']:+.2f}%"
-        )
-    act = action_expectancy()
-    if act.get("状态") == "已验证":
-        lines.append("按动作：")
-        for a, s in act.get("分动作", {}).items():
-            lines.append(f"  {a:4} 样本{s['样本']:4} 胜率{s['胜率']:5.1f}% 期望{s['期望']:+.2f}%")
+    lines.append(f"符合口径样本 {band['有效样本']} 条；以下为描述性结果，尚未证明可持续优势。")
+    for market, cohort in band.get("按市场", {}).items():
+        lines.append(f"{market}（{cohort['样本']}条）：")
+        for label, row in cohort.get("分段", {}).items():
+            lines.append(
+                f"  {label} 样本{row['样本']} 胜率{row['胜率']:.1f}% "
+                f"平均收益{row['平均收益']:+.2f}% 期望{row['期望']:+.2f}%"
+            )
     return "\n".join(lines)
 
 
@@ -251,7 +256,7 @@ if __name__ == "__main__":
     print()
     print("=== 维度预测力 ===")
     for k, v in dimension_edge().items():
-        if v.get("状态") == "已验证":
+        if v.get("状态") == "描述性回看":
             print(f"  {k:8} 样本{v['样本']:4} 高分组{v['高分组']:+.2f}% "
                   f"低分组{v['低分组']:+.2f}% 差{v['差值']:+.2f}pct")
         else:

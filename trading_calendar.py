@@ -32,6 +32,20 @@ HK_HOLIDAYS: dict[int, frozenset[dt.date]] = {
     }),
 }
 
+# Shanghai and Shenzhen exchanges share mainland A-share closure dates.
+A_HOLIDAYS: dict[int, frozenset[dt.date]] = {
+    2026: frozenset({
+        dt.date(2026, 1, 1), dt.date(2026, 1, 2),
+        dt.date(2026, 2, 16), dt.date(2026, 2, 17), dt.date(2026, 2, 18),
+        dt.date(2026, 2, 19), dt.date(2026, 2, 20), dt.date(2026, 2, 23),
+        dt.date(2026, 4, 6),
+        dt.date(2026, 5, 1), dt.date(2026, 5, 4), dt.date(2026, 5, 5),
+        dt.date(2026, 6, 19), dt.date(2026, 9, 25),
+        dt.date(2026, 10, 1), dt.date(2026, 10, 2), dt.date(2026, 10, 5),
+        dt.date(2026, 10, 6), dt.date(2026, 10, 7),
+    }),
+}
+
 US_HOLIDAYS: dict[int, frozenset[dt.date]] = {
     2026: frozenset({
         dt.date(2026, 1, 1), dt.date(2026, 1, 19), dt.date(2026, 2, 16),
@@ -49,7 +63,9 @@ US_HOLIDAYS: dict[int, frozenset[dt.date]] = {
 }
 
 # years whose table is not yet confirmed against the exchange's official list
-PROVISIONAL_YEARS: dict[str, frozenset[int]] = {"HK": frozenset({2027}), "US": frozenset()}
+PROVISIONAL_YEARS: dict[str, frozenset[int]] = {
+    "HK": frozenset({2027}), "US": frozenset(), "A": frozenset(),
+}
 
 
 def today_bj() -> dt.date:
@@ -60,11 +76,11 @@ def is_trading_day(market: str, day: dt.date | None = None) -> bool:
     """Return whether ``day`` is a normal supported-market trading day."""
     day = day or today_bj()
     market = market.upper()
-    if market not in {"HK", "US"}:
+    if market not in {"A", "HK", "US"}:
         raise ValueError(f"unsupported market: {market!r}")
     if day.weekday() >= 5:
         return False
-    holidays = HK_HOLIDAYS if market == "HK" else US_HOLIDAYS
+    holidays = {"A": A_HOLIDAYS, "HK": HK_HOLIDAYS, "US": US_HOLIDAYS}[market]
     return day.year in holidays and day not in holidays[day.year]
 
 
@@ -73,7 +89,7 @@ def coverage_warnings(today: dt.date | None = None) -> list[str]:
     otherwise every scheduled job would silently skip from January 1st (unknown years fail closed)."""
     today = today or today_bj()
     out = []
-    for market, table in (("HK", HK_HOLIDAYS), ("US", US_HOLIDAYS)):
+    for market, table in (("A", A_HOLIDAYS), ("HK", HK_HOLIDAYS), ("US", US_HOLIDAYS)):
         for year in (today.year, today.year + 1) if today.month >= 11 else (today.year,):
             if year not in table:
                 out.append(f"{market} {year} 年休市日表缺失，届时所有定时任务会被跳过")
