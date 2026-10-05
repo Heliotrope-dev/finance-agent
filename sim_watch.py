@@ -82,16 +82,23 @@ def _monitored(email: str, open_markets: list[str]) -> list[tuple[str, str, bool
     由被叫醒之后的 sim_agent 自己去富途取，这里只需要一个"该盯哪些"的近似
     集合，宁可多盯几支也不要为了精确而变重。
     """
+    def watchable(symbol: str, market: str) -> bool:
+        # Futu futures continuous contracts use a lowercase "main" suffix.
+        # The stock quote batch fails as a whole when one of these contracts
+        # requires futures market data permission. US.MAIN is a valid stock.
+        return market in open_markets and not (market == "US" and symbol.endswith("main"))
+
     held: set[tuple[str, str]] = set()
     for o in tracker.get_simulated_orders(email, limit=50):
-        if o.get("status") == "成功" and o.get("market") in open_markets:
-            held.add((str(o.get("symbol")), o.get("market")))
+        symbol, market = str(o.get("symbol")), o.get("market")
+        if o.get("status") == "成功" and watchable(symbol, market):
+            held.add((symbol, market))
 
     items: list[tuple[str, str, bool]] = [(s, m, True) for s, m in held]
     seen = set(held)
     for p in tracker.get_positions(email):
         key = (str(p.get("symbol")), p.get("market"))
-        if key[1] in open_markets and key not in seen:
+        if watchable(*key) and key not in seen:
             seen.add(key)
             items.append((key[0], key[1], float(p.get("shares") or 0) > 0))
     return items[:_MAX_WATCH]
