@@ -1192,11 +1192,14 @@ _CN_TZ = timezone(timedelta(hours=8))
 # 基准时，下面的逻辑本来就会如实返回 None、界面显示"暂无数据"。
 _EQUITY_BASIS_CUTOVER = datetime(2026, 9, 12, 1, 40, tzinfo=_CN_TZ)
 
+# 收益按交易日分组时的日切点（北京时间几点），见 get_period_pnl。
+_TRADING_DAY_CUTOFF_HOUR = 8
 
-def get_period_pnl(email: str, current_net_value: float) -> dict:
+
+def get_period_pnl(email: str, current_net_value: float, now: datetime | None = None) -> dict:
     """本日/昨日/本月收益——用户明确要求"要有本日收益昨日收益本月收益三个
     模块，还有一个收益百分比，负收益就是负数"。基于sim_equity_snapshots
-    (每5分钟一次的净值快照)按北京时间的自然日/自然月分组，跟当前实时净值
+    (每5分钟一次的净值快照)按交易日（北京时间08:00切日）和月分组，跟当前实时净值
     (current_net_value，调用方传入——快照表最新一条可能有几分钟延迟，"现在"
     这一端要用真正实时查到的数字，不能拿旧快照冒充)做差值。
 
@@ -1234,39 +1237,55 @@ def get_period_pnl(email: str, current_net_value: float) -> dict:
     if not parsed:
         return {"today": None, "yesterday": None, "month": None}
 
-    today = datetime.now(_CN_TZ).date()
-    yesterday = today - timedelta(days=1)
+    # 按"交易日"分组，不按北京时间自然日：美股夜盘横跨北京时间零点
+    # （21:30~次日04:00/05:00），按自然日切会把同一个美股交易日劈成两半，
+    # 前半段算进"昨日"、后半段算进"本日"。2026-10-06实测：10-05美股收盘
+    # 对收盘真实 +0.11%，页面"昨日"显示 -0.03%，而10-06上午港美都还没开盘，
+    # "本日"却显示 +0.18%（其实是前一晚美股后半夜的涨幅）。
+    # 交易日 = (北京时间 - 8小时) 的日期：08:00 之后到次日 08:00 之前算同一天，
+    # 这个切点落在美股收盘（最晚05:00）和港股开盘（09:30）之间，不会劈开任何
+    # 一个市场的交易时段。
+    # 每个交易日的"期初"= 这个交易日第一条快照（开盘前那一刻的净值，
+    # 也就是上一交易日收盘）；期末 = 下一个交易日第一条快照。快照任务在
+    # 北京时间03:55就停了，拿当天最后一条当收盘会漏掉美股最后几分钟。
+    def _trading_day(dt_cn: datetime):
+        return (dt_cn - timedelta(hours=_TRADING_DAY_CUTOFF_HOUR)).date()
+
+    now_cn = (now or datetime.now(_CN_TZ)).astimezone(_CN_TZ)
+    today = _trading_day(now_cn)
     month_start = today.replace(day=1)
 
-    # 每个自然日/月窗口的"期初"：这个窗口开始后第一条快照；"期末"（仅
-    # 昨日收益需要，本日/本月的期末统一用current_net_value）：这个窗口
-    # 结束前最后一条快照。
-    today_start = next((v for dt, v in parsed if dt.date() >= today), None)
-    # 本月收益的期初 = 上个月最后一条快照（上月收盘净值），不是"本月第一条
-    # 快照"。2026-09-11修：原来取的是本月第一条，而快照历史本身就是从本月
-    # 才开始有的，于是"本月收益"实际覆盖了全部历史，页面上出现"本月收益
-    # +54.42% 比累计收益率还高"这种不可能的组合。没有上月数据时（比如本月
-    # 就是有记录的第一个月）如实返回None，显示"暂无数据"，不拿本月第一条
-    # 冒充上月收盘。
-    month_prev_close = None
-    for dt, v in parsed:
-        if dt.date() < month_start:
-            month_prev_close = v
-        else:
-            break
-    month_start_val = month_prev_close
+    keyed = [(_trading_day(dt), v) for dt, v in parsed]
+    first_of_day: dict = {}
+    for day, v in keyed:
+        first_of_day.setdefault(day, v)
 
-    yesterday_start = next((v for dt, v in parsed if dt.date() >= yesterday), None)
-    yesterday_end = None
-    for dt, v in parsed:
-        if dt.date() < today:
-            yesterday_end = v
+    today_start = first_of_day.get(today)
+
+    # 昨日 = 今天之前最近一个有快照的交易日（周一的"昨日"是上周五，
+    # 不是没有数据的周日）。
+    prev_days = [d for d in first_of_day if d < today]
+    yesterday_block = None
+    if prev_days:
+        prev = max(prev_days)
+        later = [d for d in first_of_day if d > prev]
+        if later:
+            prev_end = first_of_day[min(later)]
         else:
-            break
+            prev_end = next(v for day, v in reversed(keyed) if day == prev)
+        yesterday_block = _pct_block(first_of_day[prev], prev_end)
+
+    # 本月收益的期初 = 上月最后一个交易日的收盘，也就是本月第一条快照；
+    # 但前提是上个月确实有快照——本月就是有记录的第一个月时，本月第一条
+    # 快照只是起点不是上月收盘，如实返回None（2026-09-11修过一次"本月收益
+    # 比累计收益率还高"的同类问题）。
+    month_start_val = None
+    if any(d < month_start for d in first_of_day):
+        month_start_val = next((v for day, v in keyed if day >= month_start), None)
 
     return {
         "today": _pct_block(today_start, current_net_value),
-        "yesterday": _pct_block(yesterday_start, yesterday_end) if yesterday_end is not None else None,
+        "yesterday": yesterday_block,
         "month": _pct_block(month_start_val, current_net_value),
     }
 
